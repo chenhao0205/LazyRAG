@@ -117,3 +117,4 @@ backend/core/openapi.json
 backend/core/swagger.json
 backend/core/docs/swagger.json
 openapi-export/
+data-lzy/
