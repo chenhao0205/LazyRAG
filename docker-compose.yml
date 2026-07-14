@@ -137,7 +137,7 @@ services:
     expose:
       - "5432"
     volumes:
-      - ./data/state/postgres:/var/lib/postgresql/data
+      - ${LAZYMIND_DATA_DIR:-./data}/state/postgres:/var/lib/postgresql/data
       - ./db-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U root -d postgres"]
@@ -190,9 +190,9 @@ services:
       LAZYMIND_SCAN_CONTROL_PLANE_TEMP_DIR: "/tmp/scan-control-plane/sourceengine"
       LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN: ${LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN:-dev-internal-service-token}
     volumes:
-      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-./data/scan}:/data/ragscan
-      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-./data/scan}/staging:/data/staging
-      - ./data/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-${LAZYMIND_DATA_DIR:-./data}/scan}:/data/ragscan
+      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-${LAZYMIND_DATA_DIR:-./data}/scan}/staging:/data/staging
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
     expose:
       - "18080"
     depends_on:
@@ -229,7 +229,7 @@ services:
       LAZYMIND_FILE_WATCHER_WATCH_CONTAINER_DIR: /watch/docs
     volumes:
       - ./backend/file-watcher/configs/agent.yaml:/app/configs/agent.yaml:ro
-      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-./data/scan}:/data/ragscan
+      - ${LAZYMIND_FILE_WATCHER_BASE_ROOT:-${LAZYMIND_DATA_DIR:-./data}/scan}:/data/ragscan
       - type: bind
         source: *file-watcher-watch-host-dir
         target: /watch/docs
@@ -244,7 +244,7 @@ services:
     image: ${DOCKER_MIRROR:-docker.m.daocloud.io/library/}redis:7
     command: ["redis-server", "--appendonly", "yes", "--aclfile", "/usr/local/etc/redis/users.acl"]
     volumes:
-      - ./data/state/redis:/data
+      - ${LAZYMIND_DATA_DIR:-./data}/state/redis:/data
       - ./redis-users.acl:/usr/local/etc/redis/users.acl:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -305,7 +305,7 @@ services:
       OFFICE_CONVERT_TIMEOUT_SECONDS: "900"
       OFFICE_CONVERT_CONCURRENCY: ${OFFICE_CONVERT_CONCURRENCY:-4}
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -322,9 +322,9 @@ services:
         <<: *mirror-args
     volumes:
       - ./api/backend:/openapi-export
-      - ./data/evo:/var/lib/lazymind/evo
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/subagent:/data/subagent
+      - ${LAZYMIND_DATA_DIR:-./data}/evo:/var/lib/lazymind/evo
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/subagent:/data/subagent
       - ./skills:/skills:ro
     expose:
       - "8000"
@@ -367,7 +367,7 @@ services:
     command: ["sleep", "infinity"]
     volumes:
       - ./backend/core:/app
-      - ./data/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
       - ./skills:/skills:ro
     environment:
       <<: *core-env
@@ -419,8 +419,8 @@ services:
     expose:
       - "8000"
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
       - *lazyllm-src-mount
       - *algorithm-src-mount
     environment:
@@ -475,7 +475,7 @@ services:
     expose:
       - "8000"
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
       - mineru-model-cache:/root/.cache
     environment:
       <<: [*upload-paths, *llm-api-keys]
@@ -553,8 +553,8 @@ services:
     expose:
       - "8000"
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
       - sqlite-data:/data/sqlite
       - *algorithm-src-mount
       - *lazyllm-src-mount
@@ -592,8 +592,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
       - sqlite-data:/data/sqlite
       - *algorithm-src-mount
       - *lazyllm-src-mount
@@ -640,8 +640,8 @@ services:
       - "8000"
     working_dir: /app
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
       - sqlite-data:/data/sqlite
       - *algorithm-src-mount
       - *lazyllm-src-mount
@@ -689,10 +689,10 @@ services:
     expose:
       - "8046"
     volumes:
-      - ./data/core/uploads:/var/lib/lazymind/uploads
-      - ./data/traces:/var/lib/lazymind/traces
-      - ./data/evo:/var/lib/lazymind/evo:ro
-      - ./data/subagent:/data/subagent
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/evo:/var/lib/lazymind/evo:ro
+      - ${LAZYMIND_DATA_DIR:-./data}/subagent:/data/subagent
       - *algorithm-src-mount
       - *lazyllm-src-mount
       # Router mode: mount algorithm source so child processes can load different versions.
@@ -779,8 +779,8 @@ services:
       <<: [*runtime-home, *trace-config, *proxy-env, *db-conn, *upload-paths, *ocr-env, *llm-api-keys]
     volumes:
       - evo-data:/var/lib/lazymind/evo
-      - ./data/traces:/var/lib/lazymind/traces
-      - ./data/core/uploads:/var/lib/lazymind/uploads:ro
+      - ${LAZYMIND_DATA_DIR:-./data}/traces:/var/lib/lazymind/traces
+      - ${LAZYMIND_DATA_DIR:-./data}/core/uploads:/var/lib/lazymind/uploads:ro
       - *algorithm-src-mount
       - ./evo:/app/evo:ro
     healthcheck:
