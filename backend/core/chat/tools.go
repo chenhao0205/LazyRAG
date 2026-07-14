@@ -179,7 +179,9 @@ func applyChatRuntimeConfigs(ctx context.Context, db *gorm.DB, userID string, bo
 		return err
 	}
 	if len(llmConfig) > 0 {
-		body["llm_config"] = llmConfig
+		if existing, ok := body["llm_config"].(map[string]any); !ok || len(existing) == 0 {
+			body["llm_config"] = llmConfig
+		}
 	}
 	toolConfig, err := loadChatToolConfig(ctx, db, userID)
 	if err != nil {

@@ -125,6 +125,23 @@ func seedSelectedOCRProvider(t *testing.T, db *gorm.DB, userID string) {
 	)
 }
 
+func TestApplyChatRuntimeConfigsPreservesRequestLLMConfig(t *testing.T) {
+	db := newToolsTestDB(t)
+	seedRuntimeModelConfig(t, db, "u1")
+	requestConfig := map[string]any{
+		"llm": map[string]any{"source": "deepseek", "model": "deepseek-v4-pro", "api_key": "request-key"},
+	}
+	body := map[string]any{"llm_config": requestConfig}
+	if err := applyChatRuntimeConfigs(context.Background(), db.DB, "u1", body); err != nil {
+		t.Fatal(err)
+	}
+	llmConfig := body["llm_config"].(map[string]any)
+	llm := llmConfig["llm"].(map[string]any)
+	if llm["source"] != "deepseek" || llm["model"] != "deepseek-v4-pro" || llm["api_key"] != "request-key" {
+		t.Fatalf("request llm_config was overwritten: %#v", llmConfig)
+	}
+}
+
 func TestListToolsForwardsRuntimeConfigsAndMarksDisabled(t *testing.T) {
 	db := newToolsTestDB(t)
 	store.Init(db.DB, nil, nil)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -587,6 +588,18 @@ func TestBuildChatRequestBodyFilesMergeDedupesAndSkipsHTTP(t *testing.T) {
 	}
 	if currentFiles[0] != "/data/x.jpg" || currentFiles[1] != "/data/y.jpeg" {
 		t.Fatalf("unexpected files: %#v", currentFiles)
+	}
+}
+
+func TestBuildChatRequestBodyPreservesRequestLLMConfig(t *testing.T) {
+	requestConfig := map[string]any{
+		"llm": map[string]any{"source": "deepseek", "model": "deepseek-v4-pro"},
+	}
+	body := buildChatRequestBody(nil, nil, "conv-1", "sid", "hello", nil, map[string]any{
+		"llm_config": requestConfig,
+	}, nil, "user-1", 1)
+	if !reflect.DeepEqual(body["llm_config"], requestConfig) {
+		t.Fatalf("expected request llm_config to be preserved, got %#v", body["llm_config"])
 	}
 }
 

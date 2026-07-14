@@ -698,6 +698,9 @@ func buildChatRequestBody(ctx context.Context, db *gorm.DB, convID, sessionID, q
 	if environmentContext, ok := raw["environment_context"].(map[string]any); ok {
 		body["environment_context"] = environmentContext
 	}
+	if llmConfig, ok := raw["llm_config"].(map[string]any); ok && len(llmConfig) > 0 {
+		body["llm_config"] = llmConfig
+	}
 	// Propagate plugin_context so Python ChatAgent receives the active session info.
 	// Merge plugin_ui_state (focused_tab, focused_sort_order) from the request body.
 	// Python reads artifact state directly from the DB via _build_session_artifact_section.
@@ -895,49 +898,48 @@ func handleNonStreamChat(
 	target chatPersistTarget,
 	historyExt json.RawMessage,
 ) {
-	pyBody, _ := json.Marshal(reqBody)
-	upstreamURL := common.JoinURL(baseURL, "/api/chat")
-	respBytes, _, err := common.HTTPPost(reqCtx, upstreamURL, "application/json", pyBody)
+	ch, err := StreamChatUpstream(reqCtx, baseURL, reqBody)
 	if err != nil {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "chat service unavailable", err), http.StatusBadGateway)
 		return
 	}
-	var pyResp struct {
-		Code int             `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
-	_ = json.Unmarshal(respBytes, &pyResp)
 	answer := ""
 	rawAnswer := ""
 	var toolCallTurns int
 	var sources []any
-	if pyResp.Code == 200 && len(pyResp.Data) > 0 {
-		var data struct {
-			Text          string `json:"text"`
-			Think         string `json:"think"`
-			Sources       []any  `json:"sources"`
-			ToolCallTurns int64  `json:"tool_call_turns"`
+	var pendingThink string
+	upstreamFailed := false
+	for d := range ch {
+		if d.Heartbeat || d.TaskCreated != nil || d.AskPending != nil || d.IntentUpdated != nil {
+			continue
 		}
-		if json.Unmarshal(pyResp.Data, &data) == nil {
-			if data.Think != "" {
-				rawAnswer = "<think>" + strings.TrimSpace(data.Think) + "</think>" + strings.TrimSpace(data.Text)
-			} else {
-				rawAnswer = strings.TrimSpace(data.Text)
-			}
-			answer = strings.TrimSpace(stripToolTags(data.Text))
-			sources = data.Sources
-			toolCallTurns = nonNegativeToolCallTurns(data.ToolCallTurns)
+		if next := nonNegativeToolCallTurns(d.ToolCallTurns); next > toolCallTurns {
+			toolCallTurns = next
 		}
-		if rawAnswer == "" {
-			rawAnswer = strings.TrimSpace(string(pyResp.Data))
+		if d.Status == "FAILED" {
+			upstreamFailed = true
 		}
-		if answer == "" {
-			answer = strings.TrimSpace(stripToolTags(rawAnswer))
+		if d.ReasoningText != "" {
+			pendingThink += d.ReasoningText
+			continue
+		}
+		if pendingThink != "" {
+			rawAnswer += "<think>" + pendingThink + "</think>"
+			pendingThink = ""
+		}
+		rawAnswer += d.Text
+		answer += stripToolTags(d.Text)
+		if len(d.Sources) > 0 {
+			sources = d.Sources
 		}
 	}
-	if pyResp.Code != 200 {
-		answer = "error: " + pyResp.Msg
+	if pendingThink != "" {
+		rawAnswer += "<think>" + pendingThink + "</think>"
+	}
+	answer = strings.TrimSpace(answer)
+	rawAnswer = strings.TrimSpace(rawAnswer)
+	if upstreamFailed && rawAnswer == "" {
+		answer = "error: chat service failed"
 		rawAnswer = answer
 	}
 	historyID := target.HistoryID
