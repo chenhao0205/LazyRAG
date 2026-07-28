@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import os
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ CONFIG_ARTIFACTS = {
 }
 EVO_MAX_IN_FLIGHT = 8
 EVO_PARTITION_OP_LIMIT = 4
+EVO_EVAL_ANSWER_OP_LIMIT = 2
 
 
 class RuntimePort:
@@ -163,19 +165,30 @@ class RuntimePort:
             store.close()
 
     def _concurrency_limits(self) -> ConcurrencyLimits:
+        max_in_flight = _env_int('LAZYMIND_EVO_MAX_IN_FLIGHT', EVO_MAX_IN_FLIGHT)
+        partition_limit = _env_int('LAZYMIND_EVO_PARTITION_OP_LIMIT', EVO_PARTITION_OP_LIMIT)
+        eval_answer_limit = _env_int('LAZYMIND_EVO_EVAL_ANSWER_OP_LIMIT', EVO_EVAL_ANSWER_OP_LIMIT)
         return ConcurrencyLimits(
-            max_in_flight=EVO_MAX_IN_FLIGHT,
+            max_in_flight=max_in_flight,
             per_materializer={
-                'dataset.prepare_case': EVO_PARTITION_OP_LIMIT,
-                'dataset.generate_case': EVO_PARTITION_OP_LIMIT,
-                'eval.answer': EVO_PARTITION_OP_LIMIT,
-                'eval.judge': EVO_PARTITION_OP_LIMIT,
-                'analysis.trace_summary': EVO_PARTITION_OP_LIMIT,
-                'analysis.classify_case': EVO_PARTITION_OP_LIMIT,
-                'abtest.candidate_rag_answer': EVO_PARTITION_OP_LIMIT,
-                'abtest.candidate_judge': EVO_PARTITION_OP_LIMIT,
+                'dataset.prepare_case': partition_limit,
+                'dataset.generate_case': partition_limit,
+                'eval.answer': min(eval_answer_limit, max_in_flight),
+                'eval.judge': partition_limit,
+                'analysis.trace_summary': partition_limit,
+                'analysis.classify_case': partition_limit,
+                'abtest.candidate_rag_answer': partition_limit,
+                'abtest.candidate_judge': partition_limit,
             },
         )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, '') or default)
+    except ValueError:
+        return default
+    return value if value >= 1 else default
 
 
 __all__ = ['RuntimePort']

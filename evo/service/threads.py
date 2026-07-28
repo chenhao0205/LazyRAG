@@ -27,6 +27,8 @@ THREAD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
 STEPS = ('dataset', 'eval', 'analysis', 'repair', 'abtest')
 CHAT_CASE_DEADLINE_SECONDS = 300.0
 CHAT_FIRST_FRAME_TIMEOUT_SECONDS = 60.0
+CHAT_MAX_ATTEMPTS = 5
+CHAT_RETRY_WAIT_MAX_SECONDS = 2.0
 
 
 class ThreadService:
@@ -397,6 +399,12 @@ def _inputs(value: Mapping[str, Any]) -> dict[str, Any]:
         'algorithm_id': str(value.get('algorithm_id') or '').strip(),
         'num_case': int(value.get('num_case') or 0),
         'case_deadline_seconds': float(value.get('case_deadline_seconds') or CHAT_CASE_DEADLINE_SECONDS),
+        'chat_max_attempts': int(value.get('chat_max_attempts') or CHAT_MAX_ATTEMPTS),
+        'chat_retry_wait_max_seconds': float(
+            CHAT_RETRY_WAIT_MAX_SECONDS
+            if value.get('chat_retry_wait_max_seconds') in (None, '')
+            else value.get('chat_retry_wait_max_seconds')
+        ),
     }
     if not inputs['kb_id'] and not inputs['csv_data']:
         raise HTTPException(422, 'inputs.kb_id or inputs.csv_data is required')
@@ -410,6 +418,10 @@ def _inputs(value: Mapping[str, Any]) -> dict[str, Any]:
         raise HTTPException(422, 'inputs.num_case must be positive')
     if inputs['case_deadline_seconds'] <= 0:
         raise HTTPException(422, 'inputs.case_deadline_seconds must be positive')
+    if inputs['chat_max_attempts'] < 1 or inputs['chat_max_attempts'] > 5:
+        raise HTTPException(422, 'inputs.chat_max_attempts must be between 1 and 5')
+    if inputs['chat_retry_wait_max_seconds'] < 0:
+        raise HTTPException(422, 'inputs.chat_retry_wait_max_seconds must be non-negative')
     return inputs
 
 
@@ -429,6 +441,8 @@ def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_
         'llm_config': dict(llm_config),
         'case_deadline_seconds': inputs['case_deadline_seconds'],
         'first_frame_timeout_seconds': CHAT_FIRST_FRAME_TIMEOUT_SECONDS,
+        'chat_max_attempts': inputs['chat_max_attempts'],
+        'chat_retry_wait_max_seconds': inputs['chat_retry_wait_max_seconds'],
     }
     candidate_config = {
         'thread_id': thread_id,
@@ -438,6 +452,8 @@ def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_
         'llm_config': dict(llm_config),
         'case_deadline_seconds': inputs['case_deadline_seconds'],
         'first_frame_timeout_seconds': CHAT_FIRST_FRAME_TIMEOUT_SECONDS,
+        'chat_max_attempts': inputs['chat_max_attempts'],
+        'chat_retry_wait_max_seconds': inputs['chat_retry_wait_max_seconds'],
     }
     return {
         'run_config': {'thread_id': thread_id, 'mode': mode, 'title': title, 'inputs': dict(inputs),

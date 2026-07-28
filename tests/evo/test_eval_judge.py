@@ -1,6 +1,7 @@
 import json
 import sys
 import types
+import asyncio
 
 
 fake_router = types.ModuleType('evo.operations.chat_router')
@@ -20,7 +21,8 @@ sys.modules.setdefault('json_repair', fake_repair)
 
 from evo.operations.eval.judge import judge_case
 from evo.operations.eval.materializers import build_eval_detail_summary, eval_materializers
-from evo.operations.eval.answer import _with_case
+from evo.operations.eval.answer import call_chat_answer, _with_case
+from evo.operations.route.chat_router import RouterChatRequest, async_call_router_chat
 
 
 class FakeLLM:
@@ -142,6 +144,133 @@ def test_eval_answer_keeps_context_chunk_alignment_for_duplicate_text():
         'kb-a:doc-b:chunk-b',
         'kb-a:doc-c:chunk-c',
     ]
+
+
+def test_eval_answer_passes_chat_retry_policy(monkeypatch):
+    captured = {}
+
+    def fake_call_router_chat(request):
+        captured['request'] = request
+        return {
+            'status': 'ok',
+            'answer': 'final answer',
+            'trace_id': request.trace_id,
+            'target': {
+                'trace_id': request.trace_id,
+                'algorithm_id': request.algorithm_id,
+                'kb_id': ';'.join(request.kb_ids),
+            },
+        }
+
+    import evo.operations.eval.answer as answer_module
+
+    monkeypatch.setattr(answer_module, 'call_router_chat', fake_call_router_chat)
+
+    result = call_chat_answer(
+        {'id': 'case-retry', 'question': 'q'},
+        {
+            'router_chat_url': 'http://router.local/api/chat/stream',
+            'router_admin_url': 'http://router.local',
+            'algorithm_id': 'algo-a',
+            'session_id': '0' * 32,
+            'llm_config': {'llm': {'model': 'fake'}},
+            'chat_max_attempts': 3,
+            'chat_retry_wait_max_seconds': 0,
+        },
+        'kb-a',
+    )
+
+    request = captured['request']
+    assert request.max_attempts == 3
+    assert request.retry_wait_max_seconds == 0
+    assert result['status'] == 'ok'
+
+
+def test_router_chat_records_retry_attempt_history(monkeypatch):
+    attempts = []
+
+    async def fake_call_once(request: RouterChatRequest):
+        attempts.append(request.trace_id)
+        if len(attempts) == 1:
+            return {
+                'status': 'failed',
+                'trace_id': request.trace_id,
+                'chat_error': {'type': 'chat_transport_error', 'message': 'connection reset'},
+                'target': {'trace_id': request.trace_id, 'conversation_id': request.conversation_id},
+            }
+        return {
+            'status': 'ok',
+            'answer': 'final answer',
+            'trace_id': request.trace_id,
+            'routed_instance_host': 'worker-1',
+            'target': {'trace_id': request.trace_id, 'conversation_id': request.conversation_id},
+        }
+
+    import evo.operations.route.chat_router as chat_router
+
+    monkeypatch.setattr(chat_router, '_call_router_chat_once', fake_call_once)
+    result = asyncio.run(async_call_router_chat(RouterChatRequest(
+        router_chat_url='http://router.local/api/chat/stream',
+        router_admin_url='http://router.local',
+        algorithm_id='algo-a',
+        query='q',
+        kb_ids=('kb-a',),
+        trace_id='0' * 32,
+        max_attempts=2,
+        retry_wait_max_seconds=0,
+    )))
+
+    assert result['status'] == 'ok'
+    assert result['chat_attempt_count'] == 2
+    assert result['chat_attempts'][0]['error_type'] == 'chat_transport_error'
+    assert result['chat_attempts'][1]['status'] == 'ok'
+    assert attempts[0] != attempts[1]
+
+
+def test_router_chat_normalizes_retry_policy_like_go_defaults(monkeypatch):
+    captured = {}
+
+    async def fake_call_once(request: RouterChatRequest):
+        captured['max_attempts'] = request.max_attempts
+        captured['retry_wait_max_seconds'] = request.retry_wait_max_seconds
+        return {
+            'status': 'ok',
+            'answer': 'final answer',
+            'trace_id': request.trace_id,
+            'target': {'trace_id': request.trace_id, 'conversation_id': request.conversation_id},
+        }
+
+    import evo.operations.route.chat_router as chat_router
+
+    monkeypatch.setattr(chat_router, '_call_router_chat_once', fake_call_once)
+    result = asyncio.run(async_call_router_chat(RouterChatRequest(
+        router_chat_url='http://router.local/api/chat/stream',
+        router_admin_url='http://router.local',
+        algorithm_id='algo-a',
+        query='q',
+        kb_ids=('kb-a',),
+        trace_id='0' * 32,
+        max_attempts=99,
+        retry_wait_max_seconds=-1,
+    )))
+
+    assert result['status'] == 'ok'
+    assert captured['max_attempts'] == 5
+    assert captured['retry_wait_max_seconds'] == 2.0
+
+
+def test_runtime_limits_eval_answer_concurrency_from_env(monkeypatch, tmp_path):
+    from evo.service.runtime_port import RuntimePort
+
+    monkeypatch.setenv('LAZYMIND_EVO_MAX_IN_FLIGHT', '6')
+    monkeypatch.setenv('LAZYMIND_EVO_PARTITION_OP_LIMIT', '4')
+    monkeypatch.setenv('LAZYMIND_EVO_EVAL_ANSWER_OP_LIMIT', '1')
+
+    limits = RuntimePort(tmp_path)._concurrency_limits()
+
+    assert limits.max_in_flight == 6
+    assert limits.per_materializer['eval.answer'] == 1
+    assert limits.per_materializer['eval.judge'] == 4
 
 
 def test_zero_diagnostic_scores_do_not_fallback_to_positive_defaults(monkeypatch):

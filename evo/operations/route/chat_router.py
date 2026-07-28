@@ -135,6 +135,7 @@ async def async_call_router_chat(request: RouterChatRequest) -> dict[str, Any]:
         return _failed({}, _target_from_raw(request), 'chat_config_error', str(exc))
 
     attempts = 0
+    attempt_results: list[dict[str, Any]] = []
     deadline = time.monotonic() + normalized.case_deadline_seconds
     wait_strategy = wait_random_exponential(multiplier=0.25, max=normalized.retry_wait_max_seconds)
 
@@ -145,11 +146,13 @@ async def async_call_router_chat(request: RouterChatRequest) -> dict[str, Any]:
         if remaining <= 0:
             return _failed({}, _target(normalized), 'chat_timeout', 'chat retry budget exhausted before next attempt')
         attempt = normalized if attempts == 1 else _retry_request(normalized)
-        return await _call_router_chat_once(replace(
+        result = await _call_router_chat_once(replace(
             attempt,
             case_deadline_seconds=remaining,
             first_frame_timeout_seconds=min(attempt.first_frame_timeout_seconds, remaining),
         ))
+        attempt_results.append(_attempt_summary(attempts, result))
+        return result
 
     def wait_with_deadline(state: Any) -> float:
         return min(float(wait_strategy(state)), max(0.0, deadline - time.monotonic()))
@@ -162,7 +165,7 @@ async def async_call_router_chat(request: RouterChatRequest) -> dict[str, Any]:
         reraise=False,
     )(attempt_once)
     if attempts > 1:
-        result = dict(result) | {'chat_attempt_count': attempts}
+        result = dict(result) | {'chat_attempt_count': attempts, 'chat_attempts': attempt_results}
     return result
 
 
@@ -604,6 +607,21 @@ def _retry_exhausted_result(state: Any) -> dict[str, Any]:
     }
 
 
+def _attempt_summary(attempt: int, result: Mapping[str, Any]) -> dict[str, Any]:
+    target = result.get('target') if isinstance(result.get('target'), Mapping) else {}
+    error = result.get('chat_error') if isinstance(result.get('chat_error'), Mapping) else {}
+    return {
+        'attempt': attempt,
+        'status': str(result.get('status') or ''),
+        'trace_id': str(result.get('trace_id') or target.get('trace_id') or ''),
+        'conversation_id': str(target.get('conversation_id') or ''),
+        'routed_instance_host': str(result.get('routed_instance_host') or target.get('routed_instance_host') or ''),
+        'error_type': str(error.get('type') or ''),
+        'error_message': str(error.get('message') or '')[:500],
+        'answer_chars': len(str(result.get('answer') or '')),
+    }
+
+
 def _target(request: RouterChatRequest) -> dict[str, Any]:
     return {
         'router_chat_url': request.router_chat_url,
@@ -1040,16 +1058,24 @@ def _positive_number(value: Any, field: str) -> float:
 
 
 def _non_negative_number(value: Any, field: str) -> float:
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_WAIT_MAX_SECONDS
     if not math.isfinite(number) or number < 0:
-        raise ValueError(f'{field} must be a non-negative finite number')
+        return DEFAULT_RETRY_WAIT_MAX_SECONDS
     return number
 
 
 def _int_between(value: Any, field: str, low: int, high: int) -> int:
-    number = int(value)
-    if number < low or number > high:
-        raise ValueError(f'{field} must be between {low} and {high}')
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ATTEMPTS
+    if number < low:
+        return DEFAULT_MAX_ATTEMPTS
+    if number > high:
+        return high
     return number
 
 

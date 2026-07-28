@@ -113,6 +113,23 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 	if deadlineSeconds <= 0 {
 		deadlineSeconds = 300
 	}
+	chatMaxAttempts := firstPositiveInt(
+		inputs["chat_max_attempts"],
+		payload["chat_max_attempts"],
+	)
+	if chatMaxAttempts <= 0 {
+		chatMaxAttempts = 5
+	}
+	if chatMaxAttempts > 5 {
+		chatMaxAttempts = 5
+	}
+	chatRetryWaitMaxSeconds := firstNonNegativeFloat(
+		inputs["chat_retry_wait_max_seconds"],
+		payload["chat_retry_wait_max_seconds"],
+	)
+	if chatRetryWaitMaxSeconds < 0 {
+		chatRetryWaitMaxSeconds = 2
+	}
 
 	routerChatURL := strings.TrimSpace(agentScalarString(inputs["router_chat_url"]))
 	if routerChatURL == "" {
@@ -132,13 +149,15 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 		"title":      firstNonEmptyScalar(payload["title"]),
 		"llm_config": payload["llm_config"],
 		"inputs": map[string]any{
-			"kb_id":                 stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
-			"csv_data":              csvDataListFromAny(inputs["csv_data"]),
-			"router_chat_url":       routerChatURL,
-			"router_admin_url":      routerAdminURL,
-			"algorithm_id":          algorithmID,
-			"num_case":              numCase,
-			"case_deadline_seconds": deadlineSeconds,
+			"kb_id":                       stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
+			"csv_data":                    csvDataListFromAny(inputs["csv_data"]),
+			"router_chat_url":             routerChatURL,
+			"router_admin_url":            routerAdminURL,
+			"algorithm_id":                algorithmID,
+			"num_case":                    numCase,
+			"case_deadline_seconds":       deadlineSeconds,
+			"chat_max_attempts":           chatMaxAttempts,
+			"chat_retry_wait_max_seconds": chatRetryWaitMaxSeconds,
 		},
 	}
 }
@@ -275,6 +294,31 @@ func firstPositiveFloat(values ...any) float64 {
 		}
 	}
 	return 0
+}
+
+func firstNonNegativeFloat(values ...any) float64 {
+	for _, value := range values {
+		switch typed := value.(type) {
+		case int:
+			if typed >= 0 {
+				return float64(typed)
+			}
+		case int64:
+			if typed >= 0 {
+				return float64(typed)
+			}
+		case float64:
+			if typed >= 0 {
+				return typed
+			}
+		case string:
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+			if err == nil && parsed >= 0 {
+				return parsed
+			}
+		}
+	}
+	return -1
 }
 
 func parseThreadPageSize(raw string) int {

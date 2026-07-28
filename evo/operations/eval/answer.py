@@ -7,7 +7,12 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
-from evo.operations.route.chat_router import RouterChatRequest, call_router_chat
+from evo.operations.route.chat_router import (
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_RETRY_WAIT_MAX_SECONDS,
+    RouterChatRequest,
+    call_router_chat,
+)
 
 HEX = re.compile(r'^[0-9a-fA-F]+$')
 DEFAULT_CASE_DEADLINE_SECONDS = 300.0
@@ -81,6 +86,18 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
                 target_config.get('first_frame_timeout_seconds')
                 or os.getenv('LAZYMIND_EVO_CHAT_FIRST_FRAME_TIMEOUT_SECONDS'),
                 DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS,
+            ),
+            max_attempts=_configured_value(
+                target_config,
+                'chat_max_attempts',
+                'LAZYMIND_EVO_CHAT_MAX_ATTEMPTS',
+                DEFAULT_MAX_ATTEMPTS,
+            ),
+            retry_wait_max_seconds=_configured_value(
+                target_config,
+                'chat_retry_wait_max_seconds',
+                'LAZYMIND_EVO_CHAT_RETRY_WAIT_MAX_SECONDS',
+                DEFAULT_RETRY_WAIT_MAX_SECONDS,
             ),
         ))
     except (TypeError, ValueError) as exc:
@@ -244,6 +261,14 @@ def _number(value: Any, default: float) -> float:
     if not math.isfinite(result) or result <= 0:
         raise ValueError('timeout values must be positive finite numbers')
     return result
+
+
+def _configured_value(config: Mapping[str, Any], key: str, env_name: str, default: Any) -> Any:
+    if key in config:
+        value = config[key]
+        return default if value in (None, '') else value
+    value = os.getenv(env_name)
+    return default if value in (None, '') else value
 
 
 def _has_role(value: object, role_name: str) -> bool:
