@@ -198,12 +198,17 @@ func SetSelectedModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		modelByID[m.ID] = m
 	}
-	for _, modelID := range selectionByType {
+	for modelType, modelID := range selectionByType {
 		if modelID == "" {
 			continue
 		}
-		if _, ok := modelByID[modelID]; !ok {
+		model, ok := modelByID[modelID]
+		if !ok {
 			common.ReplyErr(w, "model not found", http.StatusBadRequest)
+			return
+		}
+		if modelType == "evo_llm" && (model.ModelType != "llm" || !isOpenCodeCompatibleModel(model.ProviderName, model.Name)) {
+			common.ReplyErr(w, "model is not opencode compatible", http.StatusBadRequest)
 			return
 		}
 	}
