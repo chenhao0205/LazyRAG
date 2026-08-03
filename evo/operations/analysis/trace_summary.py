@@ -36,27 +36,35 @@ ID_KEYS = DOC_KEYS | CHUNK_KEYS
 DIAGNOSTIC_STAGES = {stage for stage, _ in STAGE_RULES}
 
 
-def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
+def build_trace_summary(
+    case: Mapping[str, Any],
+    answer: Mapping[str, Any],
+    *,
+    attempts: int | None = None,
+    retry_seconds: float | None = None,
+) -> dict[str, Any]:
     case_id = _text(case.get('id') or answer.get('case_id'))
     trace_id = _text(answer.get('trace_id'))
     if not trace_id:
         return _trace_unavailable(case_id, trace_id, 'eval.rag_answer trace_id missing')
     from lazyllm.tracing.consume import get_single_trace
 
+    read_attempts = TRACE_READ_ATTEMPTS if attempts is None else max(1, int(attempts))
+    wait_seconds = TRACE_RETRY_SECONDS if retry_seconds is None else max(0.0, float(retry_seconds))
     last_error: Exception | None = None
-    for attempt in range(TRACE_READ_ATTEMPTS):
+    for attempt in range(read_attempts):
         try:
             trace = get_single_trace(trace_id)
             break
         except Exception as exc:
             last_error = exc
-            if attempt + 1 < TRACE_READ_ATTEMPTS:
-                time.sleep(TRACE_RETRY_SECONDS)
+            if attempt + 1 < read_attempts and wait_seconds > 0:
+                time.sleep(wait_seconds)
     else:
         return _trace_unavailable(
             case_id,
             trace_id,
-            f'lazyllm.get_single_trace failed after {TRACE_READ_ATTEMPTS} attempts: {last_error}',
+            f'lazyllm.get_single_trace failed after {read_attempts} attempts: {last_error}',
         )
     root = getattr(trace, 'execution_tree', None)
     if root is None:

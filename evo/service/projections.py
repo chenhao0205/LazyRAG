@@ -13,7 +13,7 @@ from evo.artifact_flow.state import FlowRunState
 from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef
 from evo.operations.abtest.comparison import compare_eval_detail_for_repair
-from evo.operations.eval.materializers import build_eval_detail_summary
+from evo.operations.eval.materializers import build_eval_detail_summary, build_eval_frontend_view
 from evo.operations.repair.trace import RepairTraceStore
 
 from .runtime_port import RuntimePort
@@ -270,6 +270,36 @@ class ProjectionService:
         return {'items': [public_value(row) for row in page],
                 'next_page_token': next_token, 'total_size': total}
 
+    def eval_overview(self, thread_id: str, version: int) -> dict[str, Any]:
+        config = self._require_thread(thread_id)
+        store = self.runtime.store()
+        try:
+            record = self._gate_record(thread_id, 'eval', version, store)
+            summary = _eval_detail_summary_from_record(
+                store,
+                thread_id,
+                record,
+                C.EVAL_JUDGE_RESULT,
+                live_progress=_eval_live_progress(record, config),
+            )
+        finally:
+            store.close()
+        return {
+            'thread_id': thread_id,
+            'step': 'eval',
+            'version': version,
+            'content': public_value({
+                'frontend_view_version': summary.get('frontend_view_version'),
+                'overview': summary.get('overview') or {},
+                'case_overviews': summary.get('case_overviews') or [],
+                'case_details': summary.get('case_details') or [],
+                'metrics': summary.get('metrics') or {},
+                'quality_counts': summary.get('quality_counts') or {},
+                'failure_type_counts': summary.get('failure_type_counts') or {},
+                'retrieval_failure_type_counts': summary.get('retrieval_failure_type_counts') or {},
+            }),
+        }
+
     def abtest_case_details(
         self,
         thread_id: str,
@@ -388,6 +418,8 @@ def _eval_detail_summary_from_record(
     thread_id: str,
     record: Any,
     judge_artifact_id: str,
+    *,
+    live_progress: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     value = record.value if isinstance(record.value, Mapping) else {}
     if 'bad_cases' in value or 'rows' in value:
@@ -396,13 +428,60 @@ def _eval_detail_summary_from_record(
             'bad_cases',
             [row for row in _list_of_mappings(value.get('rows')) if row.get('quality_label') != 'good'],
         )
+        detail.update(build_eval_frontend_view(detail, live_progress=live_progress))
         return detail
 
     judge_refs = _input_refs(record, judge_artifact_id, partitioned=True)
     if not judge_refs:
         raise HTTPException(409, f'{_ref_text(record.ref)} has no {judge_artifact_id} provenance')
     judges = tuple(_values_for_refs(store, thread_id, judge_refs))
-    return build_eval_detail_summary(judges)
+    summary = build_eval_detail_summary(judges)
+    if live_progress:
+        summary.update(build_eval_frontend_view(summary, live_progress=live_progress))
+    return summary
+
+
+def _eval_live_progress(record: Any, config: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive running/current case from gate provenance partitions.
+
+    answered-but-not-judged cases are treated as running in multi_dimension_judge.
+    Cases still inside answer materialization (no answer artifact yet) are only
+    visible via the event stream for P0.
+    """
+    answer_ids = [ref.key.partition for ref in _input_refs(record, C.EVAL_RAG_ANSWER, partitioned=True)]
+    judged_ids = {ref.key.partition for ref in _input_refs(record, C.EVAL_JUDGE_RESULT, partitioned=True)}
+    running_ids = [case_id for case_id in answer_ids if case_id and case_id not in judged_ids]
+    completed_cases = len(judged_ids)
+    answered_cases = len({case_id for case_id in answer_ids if case_id})
+    total_cases = max(_num_case(config), answered_cases, completed_cases)
+    running_cases = len(running_ids)
+    pending_cases = max(0, total_cases - answered_cases)
+    current_case = {
+        'case_id': '',
+        'stage': '',
+        'stage_label': '',
+    }
+    if running_ids:
+        current_case = {
+            'case_id': running_ids[-1],
+            'stage': 'multi_dimension_judge',
+            'stage_label': '多维评测',
+        }
+    elif pending_cases > 0 and answered_cases < total_cases:
+        current_case = {
+            'case_id': '',
+            'stage': 'answer_generation',
+            'stage_label': '生成回答',
+        }
+        running_cases = max(running_cases, 1)
+        pending_cases = max(0, total_cases - completed_cases - running_cases)
+    return {
+        'total_cases': total_cases,
+        'completed_cases': completed_cases,
+        'running_cases': running_cases,
+        'pending_cases': pending_cases,
+        'current_case': current_case,
+    }
 
 
 def _abtest_detail_from_record(store: Any, thread_id: str, record: Any) -> dict[str, Any]:
@@ -1008,10 +1087,28 @@ def _artifact_event(row: Mapping[str, Any], num_case: int, case_counts: dict[str
         total = num_case or case_counts[artifact_id]
         item['case'] = {'id': ref.key.partition, 'index': _case_index(ref.key.partition), 'total': total}
         item['progress'] = _progress(case_counts[artifact_id], total)
+        if artifact_id in {C.EVAL_RAG_ANSWER, C.EVAL_JUDGE_RESULT}:
+            item['summary'] = _eval_visual_event_summary(artifact_id)
     elif artifact_id in C.ROOTS.values():
         item['progress'] = {'percent': 100}
     item['artifact'] = _artifact_locator(str(row['stage']), ref)
     return _clean_empty(item)
+
+
+def _eval_visual_event_summary(artifact_id: str) -> dict[str, Any]:
+    answer_done = artifact_id in {C.EVAL_RAG_ANSWER, C.EVAL_JUDGE_RESULT}
+    judge_done = artifact_id == C.EVAL_JUDGE_RESULT
+    return {
+        'eval_stage_nodes': [
+            {'key': 'retrieval_evidence', 'label': '检索证据', 'status': 'done' if answer_done else 'pending'},
+            {'key': 'answer_generation', 'label': '生成回答', 'status': 'done' if answer_done else 'pending'},
+            {'key': 'multi_dimension_judge', 'label': '多维评测', 'status': 'done' if judge_done else 'pending'},
+            {'key': 'result_archive', 'label': '结果归档', 'status': 'done' if judge_done else 'pending'},
+        ],
+        'completed_visual_stages': 4 if judge_done else 2,
+        'current_visual_stage': '' if judge_done else 'multi_dimension_judge',
+        'current_visual_stage_label': '' if judge_done else '多维评测',
+    }
 
 
 def _trace_items(thread_id: str, step_id: str, trace_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

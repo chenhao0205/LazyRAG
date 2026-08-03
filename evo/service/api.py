@@ -198,6 +198,10 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         return service.projections.eval_bad_cases(thread_id, version, page_size, page_token, keyword, failure_type)
 
+    @app.get('/threads/{thread_id}/gates/eval/versions/{version}/overview')
+    def eval_report_overview(thread_id: str, version: int) -> dict[str, Any]:
+        return service.projections.eval_overview(thread_id, version)
+
     @app.get('/threads/{thread_id}/gates/abtest/versions/{version}/case-details')
     def abtest_case_details(
         thread_id: str,

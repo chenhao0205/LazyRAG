@@ -19,6 +19,8 @@ ABTEST_CANDIDATE_CONFIG = 'abtest.candidate_config'
 
 CORPUS_REPORT = 'corpus.report'
 CORPUS_SNAPSHOT = 'corpus.snapshot'
+DATASET_CASE = 'dataset.case'
+DATASET_CASE_ENHANCE = 'dataset.case_enhance'
 EVAL_CASE_PREPARATION = 'eval.case_preparation'
 EVAL_CASE = 'eval.case'
 EVAL_DATASET = 'eval.dataset'
@@ -63,7 +65,8 @@ OUTPUTS = MappingProxyType({
         OutputSpec(CORPUS_REPORT),
         OutputSpec(CORPUS_SNAPSHOT),
         OutputSpec(EVAL_CASE_PREPARATION, True),
-        OutputSpec(EVAL_CASE, True),
+        OutputSpec(DATASET_CASE, True),
+        OutputSpec(DATASET_CASE_ENHANCE, True),
         OutputSpec(EVAL_DATASET),
     ),
     'eval': (
@@ -93,7 +96,7 @@ OUTPUTS = MappingProxyType({
 })
 
 READ_CASE = MappingProxyType({
-    'dataset_case': EVAL_CASE,
+    'dataset_case': DATASET_CASE,
     'eval_answer': EVAL_RAG_ANSWER,
     'eval_judge': EVAL_JUDGE_RESULT,
     'analysis_trace': ANALYSIS_TRACE_SUMMARY,
@@ -103,7 +106,7 @@ READ_CASE = MappingProxyType({
 })
 
 RERUN_CASE_STAGE = MappingProxyType({
-    'dataset': (EVAL_CASE_PREPARATION, EVAL_CASE),
+    'dataset': (EVAL_CASE_PREPARATION, DATASET_CASE, DATASET_CASE_ENHANCE),
     'eval': (EVAL_RAG_ANSWER, EVAL_JUDGE_RESULT),
     'analysis': (ANALYSIS_TRACE_SUMMARY, ANALYSIS_CASE_CLASSIFICATION),
     'abtest': (ABTEST_CANDIDATE_RAG_ANSWER, ABTEST_CANDIDATE_JUDGE_RESULT),

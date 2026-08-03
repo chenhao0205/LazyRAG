@@ -473,6 +473,55 @@ func TestGetThreadEvalGateBadCasesProxiesEvoResponse(t *testing.T) {
 	}
 }
 
+func TestGetThreadEvalGateOverviewProxiesEvoResponse(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/gates/eval/versions/2/overview" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"thread_id": "thr_1",
+			"step":      "eval",
+			"version":   2,
+			"content":   map[string]any{"overview": map[string]any{"total_cases": 1}},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/core/agent/threads/thr_1/gates/eval/versions/2/overview",
+		nil,
+	)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "version": "2"})
+	rec := httptest.NewRecorder()
+
+	GetThreadEvalGateOverview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "total_cases") {
+		t.Fatalf("expected proxied overview body, got %s", rec.Body.String())
+	}
+}
+
 func TestGetThreadTraceDetailProxiesEvoResponse(t *testing.T) {
 	db := newAgentTestDB(t)
 	store.Init(db.DB, nil, nil)

@@ -40,13 +40,13 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class GenerateCase(FixedOp):
         op_id = 'dataset.generate_case'
         inputs = {**case_inputs, 'preparation': ArtifactInput(C.EVAL_CASE_PREPARATION, partition_spec=partitions)}
-        outputs = {'case': ArtifactOutput(C.EVAL_CASE, partitions)}
+        outputs = {'case': ArtifactOutput(C.DATASET_CASE, partitions)}
 
     class AssembleDataset(FixedOp):
         op_id = 'dataset.assemble'
         inputs = {
             'cases': ArtifactInput(
-                C.EVAL_CASE,
+                C.DATASET_CASE,
                 partition_spec=partitions,
                 partition_mapping=all_to_unpartitioned(),
             )
@@ -56,7 +56,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class EvalAnswer(FixedOp):
         op_id = 'eval.answer'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'dataset': ArtifactInput(C.ROOTS['dataset'], partition_mapping=unpartitioned_to_all()),
             'target_config': ArtifactInput(C.EVAL_TARGET_CONFIG, partition_mapping=unpartitioned_to_all()),
         }
@@ -65,9 +65,10 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class EvalJudge(FixedOp):
         op_id = 'eval.judge'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.EVAL_RAG_ANSWER, partition_spec=partitions),
             'policy': ArtifactInput(C.EVAL_POLICY, partition_mapping=unpartitioned_to_all()),
+            'case_enhance': ArtifactInput(C.DATASET_CASE_ENHANCE, partition_spec=partitions),
         }
         outputs = {'judge': ArtifactOutput(C.EVAL_JUDGE_RESULT, partitions)}
 
@@ -85,7 +86,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class TraceSummary(FixedOp):
         op_id = 'analysis.trace_summary'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.EVAL_RAG_ANSWER, partition_spec=partitions),
             'eval_summary': ArtifactInput(C.ROOTS['eval'], partition_mapping=unpartitioned_to_all()),
         }
@@ -94,7 +95,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class ClassifyCase(FixedOp):
         op_id = 'analysis.classify_case'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.EVAL_RAG_ANSWER, partition_spec=partitions),
             'judge': ArtifactInput(C.EVAL_JUDGE_RESULT, partition_spec=partitions),
             'trace': ArtifactInput(C.ANALYSIS_TRACE_SUMMARY, partition_spec=partitions),
@@ -152,7 +153,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
             'plan': ArtifactInput(C.REPAIR_PLAN),
             'workspace': ArtifactInput(C.REPAIR_CANDIDATE_WORKSPACE),
             'cases': ArtifactInput(
-                C.EVAL_CASE,
+                C.DATASET_CASE,
                 partition_spec=partitions,
                 partition_mapping=all_to_unpartitioned(),
             ),
@@ -184,7 +185,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class CandidateRagAnswer(FixedOp):
         op_id = 'abtest.candidate_rag_answer'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'service': ArtifactInput(C.ABTEST_CANDIDATE_SERVICE, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'answer': ArtifactOutput(C.ABTEST_CANDIDATE_RAG_ANSWER, partitions)}
@@ -192,7 +193,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class CandidateJudge(FixedOp):
         op_id = 'abtest.candidate_judge'
         inputs = {
-            'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.ABTEST_CANDIDATE_RAG_ANSWER, partition_spec=partitions),
             'policy': ArtifactInput(C.EVAL_POLICY, partition_mapping=unpartitioned_to_all()),
         }

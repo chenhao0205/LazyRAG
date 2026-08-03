@@ -253,6 +253,16 @@ func GetThreadEvalGateBadCases(w http.ResponseWriter, r *http.Request) {
 	proxyEvoResponse(w, r, http.MethodGet, path, cloneURLValues(r.URL.Query()), nil, "application/json")
 }
 
+func GetThreadEvalGateOverview(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
+	}
+	version := strings.TrimSpace(mux.Vars(r)["version"])
+	path := threadProxyPath(threadID, "/gates/eval/versions/"+url.PathEscape(version)+"/overview")
+	proxyEvoResponse(w, r, http.MethodGet, path, cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
 func GetThreadABTestGateCaseDetails(w http.ResponseWriter, r *http.Request) {
 	threadID, ok := ownerCheckedThreadID(w, r)
 	if !ok {

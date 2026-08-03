@@ -49,10 +49,27 @@ def case_kb_id(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> str
     preparation = case.get('source_preparation') if isinstance(case.get('source_preparation'), Mapping) else {}
     case_source = preparation.get('case_source') if isinstance(preparation.get('case_source'), Mapping) else {}
     if isinstance(by_case, Mapping) and isinstance(by_case.get(case_id), Mapping):
-        text = str(by_case[case_id].get('kb_id') or '').strip()
+        text = _kb_ids_text(by_case[case_id].get('kb_ids') or by_case[case_id].get('kb_id'))
         if text:
             return text
-    return str(preparation.get('kb_id') or case_source.get('kb_id') or target_config.get('kb_id') or '').strip()
+    for value in (
+        preparation.get('kb_ids'),
+        preparation.get('kb_id'),
+        case_source.get('kb_ids'),
+        case_source.get('kb_id'),
+        target_config.get('kb_ids'),
+        target_config.get('kb_id'),
+    ):
+        text = _kb_ids_text(value)
+        if text:
+            return text
+    return ''
+
+
+def _kb_ids_text(value: object) -> str:
+    if isinstance(value, list | tuple | set):
+        return ';'.join(dict.fromkeys(str(item).strip() for item in value if str(item or '').strip()))
+    return str(value or '').strip()
 
 
 def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> dict[str, Any]:
@@ -210,8 +227,21 @@ def _source_refs(sources: Any, target: Mapping[str, Any]) -> list[dict[str, str]
         if (not any(key)) or key in seen:
             continue
         seen.add(key)
-        refs.append({'content': content, 'doc_id': doc_ref, 'chunk_id': chunk_ref})
+        refs.append({
+            'content': content,
+            'doc_id': doc_ref,
+            'doc_name': _source_doc_name(source, metadata, doc_ref),
+            'chunk_id': chunk_ref,
+        })
     return refs
+
+
+def _source_doc_name(source: Mapping[str, Any], metadata: Mapping[str, Any], doc_id: str) -> str:
+    for key in ('doc_name', 'document_name', 'title', 'file_name', 'filename', 'name'):
+        text = str(source.get(key) or metadata.get(key) or '').strip()
+        if text:
+            return text
+    return doc_id
 
 
 def _zipped_refs(contexts: Any, doc_ids: Any, chunk_ids: Any) -> list[dict[str, str]]:
@@ -225,19 +255,26 @@ def _zipped_refs(contexts: Any, doc_ids: Any, chunk_ids: Any) -> list[dict[str, 
             content = str(context.get('content') or context.get('text') or context.get('context') or '').strip()
             doc_id = str(context.get('doc_id') or '').strip()
             chunk_id = str(context.get('chunk_id') or context.get('id') or '').strip()
+            doc_name = str(
+                context.get('doc_name') or context.get('document_name') or context.get('title')
+                or context.get('file_name') or context.get('filename') or context.get('name') or doc_id
+            ).strip()
         else:
             content = str(context or '').strip()
             doc_id = ''
             chunk_id = ''
+            doc_name = ''
         if index < len(doc_values) and not doc_id:
             doc_id = doc_values[index]
         if index < len(chunk_values) and not chunk_id:
             chunk_id = chunk_values[index]
+        if not doc_name:
+            doc_name = doc_id
         key = (content, doc_id, chunk_id)
         if (not any(key)) or key in seen:
             continue
         seen.add(key)
-        refs.append({'content': content, 'doc_id': doc_id, 'chunk_id': chunk_id})
+        refs.append({'content': content, 'doc_id': doc_id, 'doc_name': doc_name, 'chunk_id': chunk_id})
     return refs
 
 

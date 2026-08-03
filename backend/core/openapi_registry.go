@@ -3794,6 +3794,15 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/gates/eval/versions/{version}/overview",
+			Summary:     "Get eval overview for a gate version",
+			Description: "Proxies Evo GET /threads/{thread_id}/gates/eval/versions/{version}/overview. Returns metric cards, case overviews, and four-tab case details for the frontend eval overview UI.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadGateVersionPathParams{},
+			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo eval overview view")},
+		},
+		{
+			Method:      "GET",
 			Path:        "/agent/threads/{thread_id}/gates/abtest/versions/{version}/case-details",
 			Summary:     "List AB test case details for a gate version",
 			Description: "Proxies Evo GET /threads/{thread_id}/gates/abtest/versions/{version}/case-details.",
