@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from evo import artifacts as A
 from evo.artifact_flow import ArtifactFlow, FlowSnapshot
 from evo.artifact_runtime import ArtifactKey, ArtifactRef, ArtifactRuntimeError
+from evo.repair_guidance import guidance_snapshot
 
 from .actions import ActionExecutor, PreparedAction, _artifact_key_data, _artifact_ref_data, intent_catalog
 from .schemas import (
@@ -137,7 +138,9 @@ class _Turn:
         if action is None:
             return self._finish('needs_input', '没有得到可执行的结构化动作', projection)
         if isinstance(action, RepairGuidanceAction):
-            action = RepairGuidanceAction(kind='repair_guidance', message=self.request.text)
+            # Keep the user's exact text without discarding the planner's
+            # structured transition semantics and target directive ids.
+            action = action.model_copy(update={'message': self.request.text})
 
         pending_ref = self.intent.audit.projection(self.thread_id).get(
             'pending_confirmation_ref'
@@ -168,7 +171,22 @@ class _Turn:
                 projection,
             )
         try:
-            prepared = await self.executor.prepare(action, self.message_id)
+            guidance_context = (
+                context.get('repair_guidance')
+                if isinstance(context.get('repair_guidance'), Mapping) else {}
+            )
+            prepared = await self.executor.prepare(
+                action,
+                self.message_id,
+                expected_repair_policy_ref=(
+                    _repair_policy_ref(guidance_context)
+                    if isinstance(action, RepairGuidanceAction) else None
+                ),
+                expected_guidance_revision_id=(
+                    str(guidance_context.get('revision_id') or '')
+                    if isinstance(action, RepairGuidanceAction) else ''
+                ),
+            )
         except (ArtifactRuntimeError, ValueError) as exc:
             return self._finish('needs_input', str(exc), projection)
         if prepared.needs_confirmation:
@@ -210,8 +228,39 @@ class _Turn:
                 'mode': str(control.get('mode') or 'interactive'),
                 'automatic': bool(control.get('automatic')),
             },
+            'repair_guidance': await self._repair_guidance_context(),
         }
         return context, observation_ref, projection
+
+    async def _repair_guidance_context(self) -> dict[str, Any]:
+        record = await self.intent.flow.head(
+            self.thread_id, ArtifactKey.scalar(A.REPAIR_POLICY),
+        )
+        if record is None:
+            return {'available': False, 'active_directives': []}
+        value = await self.intent.flow.read(self.thread_id, record.ref)
+        if not isinstance(value, Mapping):
+            return {'available': False, 'active_directives': []}
+        try:
+            state = guidance_snapshot(value)
+        except ValueError as exc:
+            return {
+                'available': False,
+                'active_directives': [],
+                'error': str(exc),
+            }
+        return {
+            'available': True,
+            'revision_id': state['revision_id'],
+            'artifact_ref': _artifact_ref_data(record.ref),
+            'active_directives': [
+                {
+                    'directive_id': item['directive_id'],
+                    'text': item['text'],
+                }
+                for item in state['active_directives']
+            ],
+        }
 
     async def _confirm(self, action: ConfirmationAction, pending_ref: object, base_observation: MessageContentRef,
                        projection: dict[str, Any], config: Mapping[str, Any]) -> MessageTurnResult:
@@ -296,6 +345,11 @@ class _Turn:
             'command_id': prepared.command_id,
             'summary': prepared.summary,
             'action': prepared.action.model_dump(),
+            'expected_repair_policy_ref': (
+                _artifact_ref_data(prepared.expected_repair_policy_ref)
+                if prepared.expected_repair_policy_ref is not None else None
+            ),
+            'expected_guidance_revision_id': prepared.expected_guidance_revision_id,
         })
         try:
             result = await self.executor.execute(prepared)
@@ -455,6 +509,22 @@ def _progress_text(observation: Mapping[str, Any]) -> str:
 
 def _ref_data(ref: ArtifactRef | None) -> dict[str, object] | None:
     return None if ref is None else dict(_artifact_ref_data(ref))
+
+
+def _repair_policy_ref(context: Mapping[str, Any]) -> ArtifactRef | None:
+    value = context.get('artifact_ref')
+    if not isinstance(value, Mapping):
+        return None
+    version = value.get('version')
+    if (
+        value.get('artifact_id') != A.REPAIR_POLICY
+        or str(value.get('partition_key') or '')
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 1
+    ):
+        return None
+    return ArtifactRef(ArtifactKey.scalar(A.REPAIR_POLICY), version)
 
 
 def _hash(value: object) -> str:

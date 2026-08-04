@@ -21,8 +21,17 @@ The next action kinds are:
   operation_events reads operation-internal steps, logs, errors and structured details;
   it may filter by stage, case_id, event_type and level.
 - case: rerun or retry. rerun requires an explicit stage; retry only retries that case's recorded failure.
-- repair_guidance: append the user's concrete Repair observation, constraint, or optimization direction to
-  repair.policy.user_guidance. Preserve the user's meaning and do not invent technical conclusions.
+- repair_guidance: update the user's active Repair observations, constraints, or optimization directions.
+  Preserve the user's meaning and do not invent technical conclusions. Choose exactly one effect:
+  * append adds one compatible direction; target_directive_ids must be empty.
+  * amend replaces the specifically selected active direction(s); include their directive ids.
+  * replace declares the old active set obsolete and starts from this message; targets must be empty.
+  * withdraw removes specifically selected active direction(s); include their directive ids.
+  Read ids and texts only from context.repair_guidance.active_directives. If amend/withdraw has no unique
+  active target, or the user's wording does not make append versus amend/replace clear, return needs_input
+  with clarify instead of guessing. The application preserves the exact original user text after planning.
+  For repair_guidance, leave the top-level user_message_effect as none; the transition effect belongs to
+  the repair_guidance action itself.
 - confirmation: respond to the pending destructive-action confirmation.
 - clarify asks for missing information.
 - final answers ordinary chat, explains current capabilities, or gives execution advice without changing state.
@@ -35,7 +44,7 @@ application creates that confirmation. Only return confirmation when projection.
 Stage approval is a flow approve action and is different from destructive-action confirmation.
 
 Never modify, patch, replace, roll back, comment on, add, or delete an artifact, case, or configuration,
-except that repair_guidance may append one user-authored observation or direction to Repair policy.
+except that repair_guidance may update the active user-authored directions in Repair policy.
 If the user requests a content or structure change, use final to explain that they must edit it in
 the product UI; the Service receives the complete edited value and base version, then Flow computes
 the affected recomputation. You may suggest what to edit, but must not create an executable mutation.

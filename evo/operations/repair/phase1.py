@@ -13,11 +13,13 @@ from evo.traces.detail import build_trace_detail_view
 
 from .agent import ModelCallError, ModelCallTimeout, _bounded_json, next_action
 from .contracts import build_supported_plan, select_category, validate_analysis
+from .demo import _command as normalize_demo_command
+from .demo import _origin as http_origin
 from .demo import request_http, run_command
 from .memory import WorkMemory, content_ref, write_json
 from .opencode import OpenCodeSession
 from .validation import inside_repair_scope, repair_scope
-from .web import read_web_pages, search_web
+from .web import normalize_http_url, read_web_pages, search_web
 
 
 DEFAULT_BUDGET = {
@@ -27,6 +29,7 @@ DEFAULT_BUDGET = {
     'opencode_calls': 10,
     'command_runs': 10,
     'http_requests': 6,
+    'artifact_reads': 8,
     'seconds': 1800,
 }
 DEFAULT_MODEL_TIMEOUT_SECONDS = 120
@@ -35,6 +38,13 @@ TRACE_ERROR_MARKERS = (
     'connection refused', 'failed to establish', 'error', 'exception', 'timeout',
     'timed out', 'unavailable', '503',
 )
+FORCE_RERUN_REASONS = frozenset({
+    'explicit_user_request',
+    'independent_revalidation',
+    'prior_result_inconclusive',
+    'stale_external_data',
+    'suspected_nondeterminism',
+})
 
 
 def build_repair_plan(
@@ -139,6 +149,7 @@ def run_phase1(
                 'trace_evidence': trace_evidence,
                 'resumed_session': bool(session.session_id),
                 'guidance': memory.guidance,
+                **_phase1_lineage(memory),
             },
         )
         consecutive_model_failures = 0
@@ -225,9 +236,27 @@ def _execute_action(
     deadline: float,
 ) -> dict[str, Any] | None:
     if action == 'search_web':
-        _consume(counters, budget, 'web_searches')
         query = _text(request, 'query')
-        result = search_web(query, memory.artifact_root)
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'web.search',
+            {'status': 'completed', 'query': query},
+            request,
+            allow_cross_revision=True,
+        )
+        if reused:
+            return None
+        if not rerun_reason and memory.has_searched_query(query):
+            raise ValueError('web_search_query_already_searched')
+        _consume(counters, budget, 'web_searches')
+        result = {
+            **search_web(
+                query,
+                memory.artifact_root,
+                seen_urls=set() if rerun_reason else memory.known_urls(),
+            ),
+            **_rerun_metadata(rerun_reason),
+        }
         memory.record(
             'web.search',
             f"{result.get('status')}: {query}; {len(result.get('results') or ())} results",
@@ -235,29 +264,111 @@ def _execute_action(
         )
         return None
     if action == 'read_web':
+        question = _text(request, 'question')
         urls = _strings(request.get('urls'), maximum=3)
         if not urls:
             raise ValueError('read_web_urls_missing')
-        fresh = [url for url in urls if url not in memory.read_urls()]
+        normalized = []
+        for value in urls:
+            url = normalize_http_url(value)
+            if not url:
+                raise ValueError('read_web_url_invalid')
+            if url not in normalized:
+                normalized.append(url)
+        known_urls = {
+            url
+            for value in memory.known_urls()
+            if (url := normalize_http_url(value))
+        }
+        if any(url not in known_urls for url in normalized):
+            raise ValueError('read_web_url_not_discovered')
+        probe = {
+            'status': 'completed',
+            'question': question,
+            'pages': [
+                {'requested_url': url, 'url': url}
+                for url in normalized
+            ],
+        }
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'web.read',
+            probe,
+            request,
+            allow_cross_revision=True,
+        )
+        if reused:
+            return None
+        read_urls = {
+            url
+            for value in memory.read_urls()
+            if (url := normalize_http_url(value))
+        }
+        fresh = normalized if rerun_reason else [url for url in normalized if url not in read_urls]
         if not fresh:
             raise ValueError('read_web_urls_already_read')
-        if any(url not in memory.known_urls() for url in fresh):
-            raise ValueError('read_web_url_not_discovered')
         _consume(counters, budget, 'page_reads', len(fresh))
         result = read_web_pages(
-            _text(request, 'question'),
+            question,
             fresh,
             memory.work_root,
             memory.artifact_root,
-            seen_urls=memory.read_urls(),
+            seen_urls=set() if rerun_reason else read_urls,
+            seen_pages=() if rerun_reason else memory.read_page_fingerprints(),
+        )
+        pages = result.get('pages') if isinstance(result.get('pages'), list) else []
+        successful_pages = [
+            page
+            for page in pages
+            if isinstance(page, Mapping)
+            and page.get('status') in {'readable', 'duplicate'}
+        ]
+        # A forced revalidation must be judged only by this fetch. Historical
+        # successes are useful for an incremental retry, but they cannot turn a
+        # failed freshness check into a completed investigation.
+        satisfied_urls = set() if rerun_reason else set(read_urls)
+        for page in successful_pages:
+            for name in ('requested_url', 'canonical_url', 'url'):
+                if url := normalize_http_url(page.get(name)):
+                    satisfied_urls.add(url)
+        read_status = (
+            'completed' if all(url in satisfied_urls for url in normalized)
+            else 'partial' if successful_pages or (
+                not rerun_reason and any(url in read_urls for url in normalized)
+            )
+            else 'failed'
         )
         memory.record(
             'web.read',
             f"read {len(result.get('pages') or ())} pages",
-            {'content_trust': 'external_untrusted', **result},
+            {
+                'status': read_status,
+                'requested_urls': normalized,
+                'content_trust': 'external_untrusted',
+                **result,
+                **_rerun_metadata(rerun_reason),
+            },
         )
         return None
     if action == 'opencode':
+        instruction = _text(request, 'instruction')
+        expected = str(request.get('expected_result') or '').strip()
+        workspace_before = memory.workspace_digest()
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'opencode.result',
+            {
+                'status': 'completed',
+                'instruction': instruction,
+                'expected_result': expected,
+                'workspace_before_sha256': workspace_before,
+                'guidance_revision_id': memory.guidance_revision_id,
+            },
+            request,
+            allow_cross_revision=True,
+        )
+        if reused:
+            return None
         if memory.consecutive_failures('opencode.result') >= 2:
             memory.record(
                 'phase1.stopped',
@@ -266,14 +377,23 @@ def _execute_action(
             )
             return _terminal('blocked', 'opencode_repeated_failure')
         _consume(counters, budget, 'opencode_calls')
-        instruction = _text(request, 'instruction')
-        expected = str(request.get('expected_result') or '').strip()
         memory.write_context(counters, budget)
         result = session.run(
             instruction,
             expected,
             max(0.1, deadline - time.monotonic()),
         )
+        workspace_after = memory.workspace_digest(refresh=True)
+        result = {
+            **result,
+            'instruction': instruction,
+            'expected_result': expected,
+            'workspace_before_sha256': workspace_before,
+            'workspace_after_sha256': workspace_after,
+            'guidance_revision_id': memory.guidance_revision_id,
+            **_rerun_metadata(rerun_reason),
+        }
+        result['investigation_key'] = memory.investigation_key('opencode.result', result)
         summary = str(result.get('report', {}).get('summary') or result.get('reason') or 'OpenCode finished')
         memory.record('opencode.result', summary, result)
         if result.get('invalid_changes'):
@@ -282,11 +402,27 @@ def _execute_action(
         memory.checkpoint(session.session_id, session.calls)
         return None
     if action == 'run_command':
-        _consume(counters, budget, 'command_runs')
         command = request.get('command')
         if not isinstance(command, list):
             raise ValueError('run_command_argv_required')
+        normalized_command = normalize_demo_command(command, memory.work_root)
         expected = str(request.get('expected_result') or '').strip()
+        workspace_before = memory.workspace_digest()
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'command.result',
+            {
+                'status': 'completed',
+                'command': normalized_command,
+                'expected_result': expected,
+                'workspace_before_sha256': workspace_before,
+            },
+            request,
+            allow_cross_revision=True,
+        )
+        if reused:
+            return None
+        _consume(counters, budget, 'command_runs')
         result = run_command(
             memory.work_root,
             memory.artifact_root,
@@ -296,26 +432,95 @@ def _execute_action(
             output_limit=256 * 1024,
             expected_source_hash=memory.source_digest,
         )
+        workspace_after = memory.workspace_digest(refresh=True)
+        result = {
+            **result,
+            'expected_result': expected,
+            'workspace_before_sha256': workspace_before,
+            'workspace_after_sha256': workspace_after,
+            **_rerun_metadata(rerun_reason),
+        }
+        result['investigation_key'] = memory.investigation_key('command.result', result)
         memory.record(
             'command.result',
             f"{result['status']}: {' '.join(result['command'][:6])}; expected={expected}",
-            {**result, 'expected_result': expected},
+            result,
         )
         memory.checkpoint(session.session_id, session.calls)
         return None
     if action == 'http_request':
+        url = _text(request, 'url')
+        method = str(request.get('method') or 'GET').strip().upper()
+        if method not in {'GET', 'HEAD'}:
+            raise ValueError('http_method_not_allowed')
+        allowed_origins = _allowed_origins(policy)
+        if http_origin(url) not in set(allowed_origins):
+            raise ValueError(f'http_origin_not_allowed:{url}')
+        workspace_sha256 = memory.workspace_digest()
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'http.result',
+            {
+                'status': 'completed',
+                'url': url,
+                'method': method,
+                'workspace_sha256': workspace_sha256,
+            },
+            request,
+            allow_cross_revision=False,
+        )
+        if reused:
+            return None
         _consume(counters, budget, 'http_requests')
         result = request_http(
-            _text(request, 'url'),
-            str(request.get('method') or 'GET'),
-            _allowed_origins(policy),
+            url,
+            method,
+            allowed_origins,
             memory.artifact_root,
             attempt=counters['http_requests'],
             timeout_seconds=min(15.0, max(0.1, deadline - time.monotonic())),
         )
+        result = {
+            **result,
+            'workspace_sha256': workspace_sha256,
+            **_rerun_metadata(rerun_reason),
+        }
         memory.record(
             'http.result',
             f"{result['method']} {result['url']} -> {result.get('status_code') or result['status']}",
+            result,
+        )
+        return None
+    if action == 'read_artifact':
+        uri = _text(request, 'uri')
+        offset_bytes = _request_integer(request, 'offset_bytes', default=0)
+        max_bytes = _request_integer(request, 'max_bytes', default=4096)
+        probe = {
+            'status': 'completed',
+            'uri': uri,
+            'offset_bytes': offset_bytes,
+            'max_bytes': max_bytes,
+        }
+        reused, rerun_reason = _reuse_completed_investigation(
+            memory,
+            'artifact.read',
+            probe,
+            request,
+            allow_cross_revision=True,
+        )
+        if reused:
+            return None
+        _consume(counters, budget, 'artifact_reads')
+        result = memory.read_artifact(
+            uri,
+            offset_bytes=offset_bytes,
+            max_bytes=max_bytes,
+        )
+        result.update(_rerun_metadata(rerun_reason))
+        result['investigation_key'] = memory.investigation_key('artifact.read', result)
+        memory.record(
+            'artifact.read',
+            f"read {result['returned_bytes']} bytes from registered artifact",
             result,
         )
         return None
@@ -333,16 +538,27 @@ def _execute_action(
             )
             return None
         evidence = _selected_evidence(request.get('evidence_uris'), memory.evidence_refs())
-        memory.record('phase1.finished', reason, {'proposal': proposal})
+        lineage = _phase1_lineage(memory)
+        memory.record(
+            'phase1.finished',
+            reason,
+            {'proposal': proposal, 'evidence_refs': evidence, **lineage},
+        )
         workspace_ref = memory.checkpoint(session.session_id, session.calls)
         result_path = memory.artifact_root / 'result.json'
         write_json(
             result_path,
-            {'proposal': proposal, 'evidence_refs': evidence, 'reason': reason},
+            {
+                'proposal': proposal,
+                'evidence_refs': evidence,
+                'reason': reason,
+                **lineage,
+            },
         )
         return {
             'status': 'supported',
             'proposal': proposal,
+            **lineage,
             'validation': {
                 'verdict': 'supports',
                 'reason': reason,
@@ -350,6 +566,7 @@ def _execute_action(
                 'result_ref': content_ref(result_path, memory.artifact_root),
                 'workspace_ref': workspace_ref,
                 'journal_ref': memory.journal_ref(),
+                **lineage,
             },
         }
     if action == 'stop':
@@ -444,12 +661,70 @@ def _strings(value: object, maximum: int) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()][:maximum]
 
 
+def _request_integer(value: Mapping[str, Any], key: str, *, default: int) -> int:
+    candidate = value.get(key, default)
+    if isinstance(candidate, bool) or not isinstance(candidate, int):
+        raise ValueError(f'{key}_invalid')
+    return candidate
+
+
 def _selected_evidence(value: object, available: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
     requested = _strings(value, maximum=8)
     by_uri = {str(item.get('uri') or ''): dict(item) for item in available}
     if not requested or any(uri not in by_uri for uri in requested):
         raise ValueError('finish_requires_decisive_evidence_uris')
     return [by_uri[uri] for uri in dict.fromkeys(requested)]
+
+
+def _reuse_completed_investigation(
+    memory: WorkMemory,
+    event: str,
+    probe: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    allow_cross_revision: bool,
+) -> tuple[bool, str]:
+    """Reuse a matching observation before consuming budget or invoking a tool."""
+    rerun_reason = _force_rerun_reason(request)
+    if rerun_reason:
+        return False, rerun_reason
+    source = memory.completed_investigation(
+        event,
+        probe,
+        allow_cross_revision=allow_cross_revision,
+    )
+    if source is None:
+        return False, ''
+    memory.record_investigation_reuse(event, source)
+    return True, ''
+
+
+def _force_rerun_reason(request: Mapping[str, Any]) -> str:
+    force = request.get('force_rerun', False)
+    if not isinstance(force, bool):
+        raise ValueError('force_rerun_invalid')
+    reason = str(request.get('rerun_reason') or '').strip()
+    if not force:
+        if reason:
+            raise ValueError('rerun_reason_without_force_rerun')
+        return ''
+    if reason not in FORCE_RERUN_REASONS:
+        raise ValueError('force_rerun_reason_invalid')
+    return reason
+
+
+def _rerun_metadata(reason: str) -> dict[str, Any]:
+    return {'force_rerun': True, 'rerun_reason': reason} if reason else {}
+
+
+def _phase1_lineage(memory: WorkMemory) -> dict[str, Any]:
+    provenance = memory.guidance_provenance()
+    return {
+        'guidance_revision_id': memory.guidance_revision_id,
+        'guidance_provenance': provenance,
+        'workspace_sha256': memory.workspace_digest(),
+        'recovery': dict(memory.recovery),
+    }
 
 
 def _positive_seconds(value: object, default: float) -> float:

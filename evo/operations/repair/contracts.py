@@ -14,7 +14,8 @@ class AgentAction(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     action: Literal[
-        'opencode', 'run_command', 'search_web', 'read_web', 'http_request', 'finish', 'stop'
+        'opencode', 'run_command', 'search_web', 'read_web', 'http_request',
+        'read_artifact', 'finish', 'stop',
     ]
     reason: str = Field(min_length=1, max_length=2000)
     request: dict[str, Any] = Field(default_factory=dict)
