@@ -109,6 +109,26 @@ class CaseAction(StrictModel):
 class RepairGuidanceAction(StrictModel):
     kind: Literal['repair_guidance']
     message: str = Field(min_length=1, max_length=4000)
+    effect: Literal['append', 'amend', 'replace', 'withdraw']
+    target_directive_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode='after')
+    def validate_effect(self) -> RepairGuidanceAction:
+        targets = []
+        seen = set()
+        for value in self.target_directive_ids:
+            target = value.strip()
+            if not target or len(target) > 80:
+                raise ValueError('target_directive_ids must contain non-empty ids')
+            if target not in seen:
+                seen.add(target)
+                targets.append(target)
+        self.target_directive_ids = targets
+        if self.effect in {'amend', 'withdraw'} and not targets:
+            raise ValueError(f'{self.effect} requires target_directive_ids')
+        if self.effect in {'append', 'replace'} and targets:
+            raise ValueError(f'{self.effect} does not accept target_directive_ids')
+        return self
 
 
 class ConfirmationAction(StrictModel):

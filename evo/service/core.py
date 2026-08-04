@@ -22,6 +22,7 @@ from evo.artifact_runtime import (
 )
 from evo.message_intent import MessageIntent, MessageRequest, MessageTurnResult
 from evo.operations import evo_flow_definition
+from evo.repair_guidance import canonicalize_guidance_policy_update, guidance_snapshot
 from evo.repair_model import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
@@ -330,9 +331,19 @@ class EvoService:
             else ConfigurationUpdateBody.model_validate(request)
         )
         key = ArtifactKey.scalar(_CONFIG_ARTIFACTS[request.target])
+        base_policy = None
+        if request.target == 'repair_policy':
+            base_ref = ArtifactRef(key, request.base_version)
+            base_record = await self.flow.record(thread_id, base_ref)
+            if base_record is None:
+                raise ServiceError(409, 'repair_policy base_version is stale')
+            base_policy = await self.flow.read(thread_id, base_ref)
+            if not isinstance(base_policy, Mapping):
+                raise ServiceError(409, 'repair_policy base_version is invalid')
+        value = _configuration_value(request, base_policy)
         await self.flow.update_artifacts(
             thread_id,
-            (ArtifactUpdate(ArtifactRef(key, request.base_version), request.value),),
+            (ArtifactUpdate(ArtifactRef(key, request.base_version), value),),
             request_id=request.request_id,
         )
         await self._continue_automatic(thread_id)
@@ -561,6 +572,24 @@ def _command(request: CommandRequest | Mapping[str, Any]) -> CommandRequest:
 
 def _control_request(request: ControlRequest | Mapping[str, Any]) -> ControlRequest:
     return request if isinstance(request, ControlRequest) else ControlRequest.model_validate(request)
+
+
+def _configuration_value(
+    request: ConfigurationUpdateBody,
+    base_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = dict(request.value)
+    if request.target == 'repair_policy':
+        try:
+            value = (
+                canonicalize_guidance_policy_update(base_policy, value)
+                if base_policy is not None
+                else value
+            )
+            guidance_snapshot(value)
+        except ValueError as exc:
+            raise ServiceError(422, f'invalid repair guidance: {exc}') from exc
+    return value
 
 
 def _retry_request(request: RetryRequest | Mapping[str, Any]) -> RetryRequest:
