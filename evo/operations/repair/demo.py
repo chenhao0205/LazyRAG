@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -25,9 +24,6 @@ SECRET = re.compile(
     r"(?i)([\"']?(?:api[_-]?key|token|secret|password|authorization)[\"']?\s*[:=]\s*)"
     r"([\"']?)([^\"'\s,;}]+)(\2)"
 )
-SHELLS = {'bash', 'dash', 'fish', 'sh', 'zsh', 'cmd', 'powershell', 'pwsh'}
-
-
 def run_command(
     work_root: Path,
     artifact_root: Path,
@@ -38,10 +34,12 @@ def run_command(
     output_limit: int,
     expected_source_hash: str,
 ) -> dict[str, Any]:
-    argv = _command(command, work_root)
+    argv, relative_script = _command(command, work_root)
     if source_hash(work_root / 'source') != expected_source_hash:
-        return _failed(attempt, argv, 'source_changed')
+        return _failed(attempt, argv, relative_script, expected_source_hash, 'source_changed')
     before = _snapshot(work_root / 'work')
+    temp_dir = work_root / 'work' / '.tmp'
+    temp_dir.mkdir(parents=True, exist_ok=True)
     stdout_raw = work_root / 'logs' / f'run-{attempt:03d}.stdout.raw'
     stderr_raw = work_root / 'logs' / f'run-{attempt:03d}.stderr.raw'
     env = {
@@ -49,6 +47,7 @@ def run_command(
         'HOME': str(work_root),
         'LANG': os.environ.get('LANG', 'C.UTF-8'),
         'PYTHONDONTWRITEBYTECODE': '1',
+        'TMPDIR': str(temp_dir),
         'PYTHONPATH': os.pathsep.join((
             str(work_root / 'source'),
             str(work_root / 'source' / 'algorithm'),
@@ -57,9 +56,10 @@ def run_command(
         'REPAIR_WORK_ROOT': str(work_root),
     }
     started = time.monotonic()
+    sandboxed_command, sandboxed = _sandboxed(argv, work_root)
     with stdout_raw.open('wb') as stdout, stderr_raw.open('wb') as stderr:
         process = subprocess.Popen(
-            _sandboxed(argv, work_root),
+            sandboxed_command,
             cwd=str(work_root),
             env=env,
             stdout=stdout,
@@ -79,23 +79,23 @@ def run_command(
     stderr_text, stderr_truncated = _sanitize(stderr_bytes, output_limit)
     stdout_path = artifact_root / 'runs' / f'run-{attempt:03d}.stdout.log'
     stderr_path = artifact_root / 'runs' / f'run-{attempt:03d}.stderr.log'
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_path.write_text(stdout_text, encoding='utf-8')
     stderr_path.write_text(stderr_text, encoding='utf-8')
     source_changed = source_hash(work_root / 'source') != expected_source_hash
     after = _snapshot(work_root / 'work')
     changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-    status = (
-        'source_changed' if source_changed else
-        'timeout' if timed_out else
-        'output_too_large' if stdout_truncated or stderr_truncated else
-        'nonzero_exit' if exit_code else
-        'completed'
+    status, reason, parsed = _result_status(
+        source_changed, timed_out, stdout_truncated or stderr_truncated, exit_code, stdout_text,
     )
-    parsed = _json_output(stdout_text)
     record = {
         'attempt': attempt,
         'status': status,
+        'reason': reason,
+        'script_path': relative_script,
         'command': argv,
+        'source_hash': expected_source_hash,
+        'sandboxed': sandboxed,
         'exit_code': exit_code,
         'duration_ms': duration_ms,
         'changed_files': changed,
@@ -159,58 +159,58 @@ def request_http(
     return {**record, 'result_ref': content_ref(path, artifact_root)}
 
 
-def _command(value: Sequence[object], work_root: Path) -> list[str]:
-    if isinstance(value, (str, bytes)) or not 1 <= len(value) <= 32:
+def _command(value: Sequence[object], work_root: Path) -> tuple[list[str], str]:
+    if isinstance(value, (str, bytes)) or not 2 <= len(value) <= 32:
         raise ValueError('demo_command_invalid')
     command = [str(item) for item in value]
     if any(not item or '\0' in item or '\n' in item or len(item) > 2000 for item in command):
         raise ValueError('demo_command_invalid')
-    executable = command[0]
-    if Path(executable).name.casefold() in SHELLS or any(
-        item in {'-c', '--command', '--eval'} for item in command[1:]
-    ):
-        raise ValueError('demo_shell_or_inline_command_forbidden')
-    if executable in {'python', 'python3'}:
-        command[0] = sys.executable
-    elif '/' in executable:
-        path = Path(executable)
-        resolved = (work_root / path).resolve() if not path.is_absolute() else path.resolve()
-        if not resolved.is_relative_to(work_root) or not resolved.is_file():
-            raise ValueError('demo_executable_outside_workspace')
-        command[0] = str(resolved)
-    elif shutil.which(executable, path=os.environ.get('PATH')) is None:
-        raise ValueError('demo_executable_missing')
+    if command[0] in {'sh', '/bin/sh'}:
+        if len(command) != 2:
+            raise ValueError('demo_shell_command_invalid')
+        resolved = _work_path(command[1], work_root, '.sh')
+        return ['/bin/sh', str(resolved)], resolved.relative_to(work_root).as_posix()
+    if command[0] in {'python', 'python3', sys.executable}:
+        if command[1].startswith('-') or any(item in {'-c', '--command', '--eval'} for item in command[1:]):
+            raise ValueError('demo_shell_or_inline_command_forbidden')
+        resolved = _work_path(command[1], work_root, '.py')
+        return [sys.executable, str(resolved), *command[2:]], resolved.relative_to(work_root).as_posix()
+    raise ValueError('demo_executable_not_allowed')
+
+
+def _work_path(value: str, work_root: Path, suffix: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or path.suffix != suffix:
+        raise ValueError('demo_script_path_invalid')
+    resolved = (work_root / path).resolve()
     work = (work_root / 'work').resolve()
-    executable_path = Path(command[0])
-    runs_work_program = executable_path.is_absolute() and executable_path.is_relative_to(work)
-    for item in command[1:]:
-        if not item or item.startswith('-'):
-            continue
-        path = Path(item)
-        candidate = path.resolve() if path.is_absolute() else (work_root / path).resolve()
-        if candidate.is_relative_to(work) and candidate.exists():
-            runs_work_program = True
-            break
-    if not runs_work_program:
-        raise ValueError('demo_work_program_required')
-    return command
+    if not resolved.is_relative_to(work):
+        raise ValueError('demo_script_outside_work')
+    if not resolved.is_file():
+        raise ValueError('demo_script_missing')
+    return resolved
 
 
-def _sandboxed(command: list[str], work_root: Path) -> list[str]:
+def _sandboxed(command: list[str], work_root: Path) -> tuple[list[str], bool]:
     sandbox = Path('/usr/bin/sandbox-exec')
     if not sandbox.is_file() or not _sandbox_available(str(sandbox)):
-        return command
+        return command, False
+    profile = _sandbox_profile(work_root)
+    profile_path = work_root / 'memory' / 'sandbox.sb'
+    profile_path.write_text(profile, encoding='utf-8')
+    return [str(sandbox), '-f', str(profile_path), *command], True
+
+
+def _sandbox_profile(work_root: Path) -> str:
     escaped = str(work_root).replace('\\', '\\\\').replace('"', '\\"')
-    profile = (
+    return (
         '(version 1)\n'
         '(allow default)\n'
         '(deny network*)\n'
         '(deny file-write*)\n'
+        '(allow file-write* (literal "/dev/null"))\n'
         f'(allow file-write* (subpath "{escaped}"))\n'
     )
-    profile_path = work_root / 'memory' / 'sandbox.sb'
-    profile_path.write_text(profile, encoding='utf-8')
-    return [str(sandbox), '-f', str(profile_path), *command]
 
 
 @lru_cache(maxsize=1)
@@ -227,11 +227,15 @@ def _sandbox_available(binary: str) -> bool:
     return result.returncode == 0
 
 
-def _failed(attempt: int, command: list[str], reason: str) -> dict[str, Any]:
+def _failed(attempt: int, command: list[str], script_path: str, source_digest: str, reason: str) -> dict[str, Any]:
     return {
         'attempt': attempt,
         'status': reason,
+        'reason': reason,
+        'script_path': script_path,
         'command': command,
+        'source_hash': source_digest,
+        'sandboxed': False,
         'exit_code': -1,
         'duration_ms': 0,
         'changed_files': [],
@@ -254,11 +258,37 @@ def _snapshot(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
-def _json_output(value: str) -> Any:
+def _result_status(
+    source_changed: bool,
+    timed_out: bool,
+    output_too_large: bool,
+    exit_code: int,
+    stdout: str,
+) -> tuple[str, str, dict[str, Any] | None]:
+    if source_changed:
+        return 'source_changed', 'source_changed', None
+    if timed_out:
+        return 'timeout', 'timeout', None
+    if output_too_large:
+        return 'output_too_large', 'output_too_large', None
+    if exit_code:
+        return 'process_failed', f'process_exit_{exit_code}', None
+    parsed = _json_output(stdout)
+    if parsed is None:
+        return 'invalid_json', 'stdout_not_json_object', None
+    if not isinstance(parsed.get('status'), str) or not parsed['status'].strip():
+        return 'invalid_contract', 'status_missing', parsed
+    if parsed['status'] != 'passed':
+        return 'demo_failed', f"demo_status_{parsed['status']}", parsed
+    return 'passed', '', parsed
+
+
+def _json_output(value: str) -> dict[str, Any] | None:
     try:
-        return json.loads(value)
+        parsed = json.loads(value)
     except json.JSONDecodeError:
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _terminate(process: subprocess.Popen[Any]) -> None:
