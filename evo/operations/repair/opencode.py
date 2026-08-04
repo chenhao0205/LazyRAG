@@ -6,7 +6,6 @@ import select
 import signal
 import subprocess
 import time
-from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
 from shutil import copy2
@@ -16,8 +15,11 @@ from evo.artifact_runtime import record_event
 from evo.llm import parse_json_object
 
 PERMISSIONS = {
-    **dict.fromkeys(('read', 'grep', 'glob', 'list', 'edit', 'write'), 'allow'),
-    **dict.fromkeys(('bash', 'question', 'plan_enter', 'plan_exit', 'todowrite', 'task'), 'deny'),
+    'read': {'*': 'deny', 'source/**': 'allow'},
+    'glob': {'*': 'deny', 'source/**': 'allow'},
+    'grep': {'*': 'deny', 'source/**': 'allow'},
+    'edit': {'*': 'deny', 'work/**': 'allow'},
+    **dict.fromkeys(('bash', 'task', 'webfetch', 'websearch', 'external_directory'), 'deny'),
 }
 OPENCODE_FIELDS = {
     'model',
@@ -79,7 +81,8 @@ class OpenCodeSession:
             raise ValueError('opencode_instruction_missing')
         self.calls += 1
         call_dir = self.artifact_root / 'opencode' / 'calls' / f'call-{self.calls:03d}'
-        report_path = self.workdir / 'memory' / 'reports' / f'call-{self.calls:03d}.json'
+        call_dirs = [call_dir]
+        report_path = self.workdir / 'work' / '.opencode' / 'reports' / f'call-{self.calls:03d}.json'
         report_path.parent.mkdir(parents=True, exist_ok=True)
         persisted_report = self.artifact_root / 'opencode' / 'reports' / report_path.name
         report_path.unlink(missing_ok=True)
@@ -89,7 +92,7 @@ class OpenCodeSession:
             workdir=str(self.workdir),
             prompt=json.dumps(_phase1_task_card(
                 instruction, expected_result, self.category_id,
-                Path('memory/context.json'), report_path.relative_to(self.workdir),
+                report_path.relative_to(self.workdir),
             ), ensure_ascii=False, indent=2),
             artifact_dir=call_dir,
             session_id=self.session_id,
@@ -100,13 +103,15 @@ class OpenCodeSession:
         if _invalid_session(run) and not self.recovered:
             self.recovered = True
             self.session_id = ''
+            recovery_dir = call_dir / 'recovery-001'
+            call_dirs.append(recovery_dir)
             run = run_opencode_streaming(
                 workdir=str(self.workdir),
                 prompt=json.dumps(_phase1_task_card(
                     instruction, expected_result, self.category_id,
-                    Path('memory/context.json'), report_path.relative_to(self.workdir),
+                    report_path.relative_to(self.workdir),
                 ), ensure_ascii=False, indent=2),
-                artifact_dir=call_dir,
+                artifact_dir=recovery_dir,
                 config=self.config,
                 timeout_s=max(0.1, call_timeout),
                 attempt=self.calls,
@@ -135,7 +140,7 @@ class OpenCodeSession:
             'report': report,
             'changed_files': changed,
             'invalid_changes': invalid,
-            'artifacts': _call_artifacts(call_dir, persisted_report, self.artifact_root),
+            'artifacts': _call_artifacts(call_dirs, persisted_report, self.artifact_root),
         }
 
 
@@ -157,6 +162,7 @@ class _OpenCodeLogs:
     def write_stdout(self, line: str) -> None:
         clean = _clean(line, self.secrets)
         self.stdout_stream.write(clean)
+        self.stdout_stream.flush()
         self.tail = (self.tail + clean)[-1000:]
 
     def failure(self, session_id: str, kind: str, message: object) -> OpenCodeRunResult:
@@ -174,8 +180,6 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
     prompt_path = artifact_dir / 'opencode_prompt.json'
     stdout_path = artifact_dir / 'stdout.log'
     events_path = artifact_dir / 'events.jsonl'
-    config_path: Path | None = None
-
     try:
         stdout_log = stdout_path.open('w', encoding='utf-8')
         events_log = events_path.open('w', encoding='utf-8')
@@ -189,13 +193,8 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
                                 f'missing opencode config fields: {", ".join(missing)}')
         try:
             root = Path(workdir).resolve()
-            config_path = root / 'opencode.json'
             prompt_path.write_text(prompt, encoding='utf-8')
-            config_path.write_text(json.dumps(_opencode_json(settings), ensure_ascii=False), encoding='utf-8')
         except Exception as exc:
-            if config_path is not None:
-                with suppress(OSError):
-                    config_path.unlink()
             return logs.failure(session_id, 'prompt_write_failed', exc)
 
         prompt_arg = f'Follow this JSON task card exactly:\n{prompt}'
@@ -209,63 +208,54 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
                 text=True,
                 bufsize=1,
                 cwd=str(root),
-                env=_process_env(),
+                env=_process_env(settings),
                 start_new_session=True,
             )
         except Exception as exc:
-            if config_path is not None:
-                with suppress(OSError):
-                    config_path.unlink()
             return logs.failure(session_id, 'process_start_failed', exc)
 
         session, error, finish_reason = session_id, None, ''
-        try:
-            while proc.poll() is None:
-                now = time.monotonic()
-                if now - started > timeout_s:
-                    error = logs.record({'type': 'timeout', 'message': f'opencode timed out after {timeout_s}s'})
-                    _terminate(proc)
-                    break
-                ready, _, _ = select.select([proc.stdout], [], [], 0.05) if proc.stdout else ([], [], [])
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now - started > timeout_s:
+                error = logs.record({'type': 'timeout', 'message': f'opencode timed out after {timeout_s}s'})
+                _terminate(proc)
+                break
+            ready, _, _ = select.select([proc.stdout], [], [], 0.05) if proc.stdout else ([], [], [])
+            if not ready:
+                continue
+            session, error, finish_reason = _read_line(
+                ready[0].readline(), logs, session, error, finish_reason,
+            )
+        if proc.stdout:
+            drain_deadline = time.monotonic() + 1.0
+            while time.monotonic() < drain_deadline:
+                ready, _, _ = select.select([proc.stdout], [], [], 0.05)
                 if not ready:
-                    continue
+                    break
+                line = ready[0].readline()
+                if not line:
+                    break
                 session, error, finish_reason = _read_line(
-                    ready[0].readline(), logs, session, error, finish_reason,
+                    line, logs, session, error, finish_reason,
                 )
-            # A killed CLI may leave a descendant holding the stdout pipe.
-            # Drain only data that is immediately available; iterating the pipe
-            # until EOF would turn a controlled timeout into an unbounded wait.
-            if proc.stdout:
-                drain_deadline = time.monotonic() + 1.0
-                while time.monotonic() < drain_deadline:
-                    ready, _, _ = select.select([proc.stdout], [], [], 0.05)
-                    if not ready:
-                        break
-                    line = ready[0].readline()
-                    if not line:
-                        break
-                    session, error, finish_reason = _read_line(
-                        line, logs, session, error, finish_reason,
-                    )
-            returncode = proc.wait()
-            logs.record({'type': 'process_exit', 'status': 'completed' if returncode == 0 else 'failed',
-                         'message': f'opencode exited with code {returncode}', 'returncode': returncode})
-            if returncode and not error:
-                error = logs.record({'type': 'process_failed', 'message': logs.tail})
-        finally:
-            if config_path is not None:
-                with suppress(OSError):
-                    config_path.unlink()
+        returncode = proc.wait()
+        logs.record({'type': 'process_exit', 'status': 'completed' if returncode == 0 else 'failed',
+                     'message': f'opencode exited with code {returncode}', 'returncode': returncode})
+        if returncode and not error:
+            error = logs.record({'type': 'process_failed', 'message': logs.tail})
         return OpenCodeRunResult(returncode, session, error, finish_reason)
 
 
-def _call_artifacts(call_dir: Path, report_path: Path, artifact_root: Path) -> dict[str, dict[str, str]]:
-    paths = {
-        'prompt': call_dir / 'opencode_prompt.json',
-        'stdout': call_dir / 'stdout.log',
-        'events': call_dir / 'events.jsonl',
-        'report': report_path,
-    }
+def _call_artifacts(call_dirs: list[Path], report_path: Path, artifact_root: Path) -> dict[str, dict[str, str]]:
+    paths = {'report': report_path}
+    for index, call_dir in enumerate(call_dirs):
+        prefix = '' if index == 0 else f'recovery_{index}_'
+        paths |= {
+            f'{prefix}prompt': call_dir / 'opencode_prompt.json',
+            f'{prefix}stdout': call_dir / 'stdout.log',
+            f'{prefix}events': call_dir / 'events.jsonl',
+        }
     identity = '/'.join(artifact_root.parts[-4:])
     return {
         name: {
@@ -426,9 +416,14 @@ def _missing_config(settings: dict[str, str]) -> list[str]:
     return missing
 
 
-def _process_env() -> dict[str, str]:
-    return {key: value for key in ('HOME', 'PATH', 'SHELL', 'USER', 'LANG', 'LC_ALL', 'TMPDIR')
-            if (value := os.environ.get(key))}
+def _process_env(settings: dict[str, str]) -> dict[str, str]:
+    env = {
+        key: value for key in ('HOME', 'PATH', 'SHELL', 'USER', 'LANG', 'LC_ALL', 'TMPDIR')
+        if (value := os.environ.get(key))
+    }
+    env['OPENCODE_CONFIG_CONTENT'] = json.dumps(_opencode_json(settings), ensure_ascii=False)
+    env['OPENCODE_PERMISSION'] = json.dumps(PERMISSIONS, ensure_ascii=False)
+    return env
 
 
 def _terminate(proc: subprocess.Popen, grace_s: float = 5.0) -> None:
@@ -512,26 +507,24 @@ def read_opencode_report(path: Path, task: str = '') -> dict[str, Any]:
     }
 
 
-def _phase1_task_card(instruction: str, expected_result: str, category_id: str, context_path: Path,
-                      report_path: Path) -> dict[str, Any]:
+def _phase1_task_card(instruction: str, expected_result: str, category_id: str, report_path: Path) -> dict[str, Any]:
     return {
         'mode': 'repair_phase1',
         'category_id': category_id,
         'instruction': instruction,
         'expected_result': expected_result,
-        'context_path': context_path.as_posix(),
         'report_path': report_path.as_posix(),
         'constraints': [
-            'Read memory/context.json before acting and continue from the current session history.',
             'Use search/read tools to inspect source/. Never modify source/.',
             'Create or revise experiments only under work/.',
             'Do not execute commands or use shell/bash; the trusted runner executes suggested commands later.',
+            'Suggested test scripts must be work/**/*.sh; send pytest logs to stderr and print one JSON object to stdout.',
             'Write report_path as one strict JSON object and escape every embedded quote.',
         ],
         'report_schema': {
             'summary': 'what was learned or changed this turn',
             'changed_files': ['work/...'],
-            'suggested_commands': [['python', 'work/...']],
+            'suggested_commands': [['work/tests/run_demo.sh']],
         },
     }
 
@@ -541,7 +534,9 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
     for name in ('source', 'work'):
         for path in (root / name).rglob('*'):
             if path.is_file():
-                result[path.relative_to(root).as_posix()] = sha256(path.read_bytes()).hexdigest()
+                relative = path.relative_to(root).as_posix()
+                if not relative.startswith('work/.opencode/'):
+                    result[relative] = sha256(path.read_bytes()).hexdigest()
     return result
 
 
