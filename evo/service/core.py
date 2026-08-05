@@ -22,7 +22,7 @@ from evo.artifact_runtime import (
 )
 from evo.message_intent import MessageIntent, MessageRequest, MessageTurnResult
 from evo.operations import evo_flow_definition
-from evo.repair_model import EvoModelConfigError, resolve_evo_model
+from evo.operations.repair.opencode import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
     ArtifactUpdateBody,

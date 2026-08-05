@@ -56,6 +56,7 @@ type selectedModelItem struct {
 	BaseURL                  string  `json:"base_url" gorm:"column:base_url"`
 	Share                    bool    `json:"share" gorm:"column:share"`
 	MaxInputTokens           *string `json:"max_input_tokens" gorm:"column:max_input_tokens"`
+	TechnicalModelType       string  `json:"-" gorm:"column:technical_model_type"`
 }
 
 type selectedModelsResponse struct {
@@ -87,30 +88,34 @@ type sharedModelDetail struct {
 // getSharedModelDetail returns the detail of the active shared selection for the given model_type.
 // Returns nil (no error) if no shared selection exists.
 func getSharedModelDetail(ctx context.Context, db *gorm.DB, modelType string) (*sharedModelDetail, error) {
-	var row struct {
+	var rows []struct {
 		UserID       string `gorm:"column:user_id"`
 		UserName     string `gorm:"column:user_name"`
 		ProviderName string `gorm:"column:provider_name"`
 		ModelName    string `gorm:"column:model_name"`
+		ModelType    string `gorm:"column:model_type"`
 	}
 	err := db.WithContext(ctx).
 		Table("user_selected_models usm").
 		Joins("JOIN user_model_provider_group_models m ON m.id = usm.user_model_provider_group_model_id AND m.deleted_at IS NULL").
 		Where("usm.model_type = ? AND usm.share = ?", modelType, true).
-		Select("usm.user_id, usm.user_name, m.provider_name, m.name AS model_name").
-		First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
+		Select("usm.user_id, usm.user_name, m.provider_name, m.name AS model_name, m.model_type").
+		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return &sharedModelDetail{
-		UserID:       row.UserID,
-		UserName:     row.UserName,
-		ProviderName: row.ProviderName,
-		ModelName:    row.ModelName,
-	}, nil
+	for _, row := range rows {
+		if modelType == "evo_llm" && (row.ModelType != "llm" || !isOpenCodeCompatibleModel(row.ModelName)) {
+			continue
+		}
+		return &sharedModelDetail{
+			UserID:       row.UserID,
+			UserName:     row.UserName,
+			ProviderName: row.ProviderName,
+			ModelName:    row.ModelName,
+		}, nil
+	}
+	return nil, nil
 }
 
 // GetSelectedModels returns selected model rows for the current user.
@@ -198,12 +203,17 @@ func SetSelectedModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		modelByID[m.ID] = m
 	}
-	for _, modelID := range selectionByType {
+	for modelType, modelID := range selectionByType {
 		if modelID == "" {
 			continue
 		}
-		if _, ok := modelByID[modelID]; !ok {
+		model, ok := modelByID[modelID]
+		if !ok {
 			common.ReplyErr(w, "model not found", http.StatusBadRequest)
+			return
+		}
+		if modelType == "evo_llm" && (model.ModelType != "llm" || !isOpenCodeCompatibleModel(model.Name)) {
+			common.ReplyErr(w, "model is not opencode compatible", http.StatusBadRequest)
 			return
 		}
 	}
@@ -313,6 +323,7 @@ func loadSelectedModels(ctx context.Context, db *gorm.DB, userID string) ([]sele
 				"m.user_model_provider_group_id, "+
 				"m.name, "+
 				"m.provider_name, "+
+				"m.model_type AS technical_model_type, "+
 				"m.max_input_tokens, "+
 				"g.name AS group_name, "+
 				"g.base_url",
@@ -332,7 +343,17 @@ func loadSelectedModels(ctx context.Context, db *gorm.DB, userID string) ([]sele
 		Where("usm.user_id = ?", strings.TrimSpace(userID)).
 		Order("usm.model_type ASC").
 		Scan(&out).Error
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	filtered := out[:0]
+	for _, item := range out {
+		if item.ModelKey == "evo_llm" && (item.TechnicalModelType != "llm" || !isOpenCodeCompatibleModel(item.Name)) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
 }
 
 // SetSharedModel sets or clears the share flag for a selected model row.
@@ -496,7 +517,6 @@ func maybeScheduleImageGroupLazyReset(ctx context.Context, db *gorm.DB) {
 // countValidModelSelection counts selections whose model row still exists (not soft-deleted).
 // When sharedOnly is true, only share=true rows are counted (any user).
 func countValidModelSelection(ctx context.Context, db *gorm.DB, userID, modelType string, sharedOnly bool) (int64, error) {
-	var count int64
 	q := db.WithContext(ctx).
 		Table("user_selected_models usm").
 		Joins(
@@ -510,8 +530,25 @@ func countValidModelSelection(ctx context.Context, db *gorm.DB, userID, modelTyp
 	} else {
 		q = q.Where("usm.user_id = ?", userID)
 	}
-	err := q.Count(&count).Error
-	return count, err
+	if modelType != "evo_llm" {
+		var count int64
+		err := q.Count(&count).Error
+		return count, err
+	}
+	var rows []struct {
+		Name      string `gorm:"column:name"`
+		ModelType string `gorm:"column:model_type"`
+	}
+	if err := q.Select("m.name, m.model_type").Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, row := range rows {
+		if row.ModelType == "llm" && isOpenCodeCompatibleModel(row.Name) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // IsModelReady checks whether a model of the given model_type is available for the user.

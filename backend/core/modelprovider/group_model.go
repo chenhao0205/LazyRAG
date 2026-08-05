@@ -323,6 +323,9 @@ func ListUserModelsByModelType(w http.ResponseWriter, r *http.Request) {
 	out := make([]groupModelListItem, 0, len(rows))
 	for i := range rows {
 		m := rows[i]
+		if modelType == "evo_llm" && !isOpenCodeCompatibleModel(m.Name) {
+			continue
+		}
 		grp, ok := groupByID[m.UserModelProviderGroupID]
 		if !ok || !grp.isVerified {
 			continue
