@@ -261,6 +261,7 @@ func mapSourceSummary(item scanSourceListItem) clouddocument.SourceSummary {
 		Name:                 item.Name,
 		Status:               item.Status,
 		DatasetID:            item.DatasetID,
+		ConfigVersion:        item.ConfigVersion,
 		BindingCount:         item.BindingCount,
 		Summary:              cloneMap(item.Summary),
 		AuthConnectionStatus: authConnectionStatus(item.AuthConnectionStatus),
@@ -276,6 +277,7 @@ func mapSourceDetail(resp scanGetSourceResponse) clouddocument.SourceDetail {
 		Name:          resp.Source.Name,
 		Status:        resp.Source.Status,
 		DatasetID:     resp.Source.DatasetID,
+		ConfigVersion: resp.Source.ConfigVersion,
 		Summary:       cloneMap(resp.Summary),
 		DocumentCount: documentCount(resp.Summary),
 		CreatedAt:     resp.Source.CreatedAt,
@@ -285,30 +287,52 @@ func mapSourceDetail(resp scanGetSourceResponse) clouddocument.SourceDetail {
 
 func mapDocumentSummary(item scanDocumentItem) clouddocument.DocumentSummary {
 	return clouddocument.DocumentSummary{
-		ID:             item.DocumentID,
-		ObjectKey:      item.ObjectKey,
-		DisplayName:    item.DisplayName,
-		FileType:       item.FileType,
-		CoreDocumentID: item.CoreDocumentID,
-		ParseStatus:    firstNonEmpty(item.EffectiveParseStatus, item.ParseStatus, item.ParseState),
-		SourceState:    item.SourceState,
+		ID:                   item.DocumentID,
+		SourceID:             item.SourceID,
+		BindingID:            item.BindingID,
+		ObjectKey:            item.ObjectKey,
+		DisplayName:          item.DisplayName,
+		Name:                 item.Name,
+		FileType:             item.FileType,
+		SizeBytes:            item.SizeBytes,
+		SourceVersion:        item.SourceVersion,
+		BaselineVersion:      item.BaselineVersion,
+		CoreDocumentID:       item.CoreDocumentID,
+		ParseStatus:          item.ParseStatus,
+		ParseState:           item.ParseState,
+		EffectiveParseStatus: firstNonEmpty(item.EffectiveParseStatus, item.ParseStatus, item.ParseState),
+		SourceState:          item.SourceState,
+		SyncState:            item.SyncState,
+		PendingAction:        item.PendingAction,
+		ParseQueueState:      item.ParseQueueState,
+		HasUpdate:            item.HasUpdate,
+		UpdateType:           item.UpdateType,
+		SourceModifiedAt:     item.SourceModifiedAt,
+		LastSyncedAt:         item.LastSyncedAt,
 	}
 }
 
 func mapSearchHit(item scanTreeNode) clouddocument.SearchHit {
 	return clouddocument.SearchHit{
-		Key:         item.Key,
-		DisplayName: item.DisplayName,
-		SearchName:  item.SearchName,
-		SourceID:    item.SourceID,
-		BindingID:   item.BindingID,
-		TreeKey:     item.TreeKey,
-		ObjectKey:   item.ObjectKey,
-		ParentKey:   item.ParentKey,
-		ObjectType:  item.ObjectType,
-		IsDocument:  item.IsDocument,
-		IsContainer: item.IsContainer,
-		SourceState: item.SourceState,
+		Key:             item.Key,
+		DisplayName:     item.DisplayName,
+		SearchName:      item.SearchName,
+		SourceID:        item.SourceID,
+		BindingID:       item.BindingID,
+		TreeKey:         item.TreeKey,
+		ObjectKey:       item.ObjectKey,
+		ParentKey:       item.ParentKey,
+		ObjectType:      item.ObjectType,
+		IsDocument:      item.IsDocument,
+		IsContainer:     item.IsContainer,
+		HasChildren:     item.HasChildren,
+		Selectable:      item.Selectable,
+		SourceState:     item.SourceState,
+		SyncState:       item.SyncState,
+		PendingAction:   item.PendingAction,
+		ParseQueueState: item.ParseQueueState,
+		HasUpdate:       item.HasUpdate,
+		UpdateType:      item.UpdateType,
 	}
 }
 
@@ -382,6 +406,7 @@ type scanSourceListItem struct {
 	Name                 string                    `json:"name"`
 	DatasetID            string                    `json:"dataset_id"`
 	Status               string                    `json:"status"`
+	ConfigVersion        int64                     `json:"config_version"`
 	BindingCount         int                       `json:"binding_count"`
 	AuthConnectionStatus *scanAuthConnectionStatus `json:"auth_connection_status,omitempty"`
 	Summary              map[string]any            `json:"summary,omitempty"`
@@ -400,12 +425,13 @@ type scanGetSourceResponse struct {
 }
 
 type scanSource struct {
-	SourceID  string    `json:"source_id"`
-	Name      string    `json:"name"`
-	DatasetID string    `json:"dataset_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	SourceID      string    `json:"source_id"`
+	Name          string    `json:"name"`
+	DatasetID     string    `json:"dataset_id"`
+	Status        string    `json:"status"`
+	ConfigVersion int64     `json:"config_version"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type scanListDocumentsResponse struct {
@@ -416,15 +442,28 @@ type scanListDocumentsResponse struct {
 }
 
 type scanDocumentItem struct {
-	DocumentID           string `json:"document_id,omitempty"`
-	ObjectKey            string `json:"object_key"`
-	DisplayName          string `json:"display_name"`
-	FileType             string `json:"file_type,omitempty"`
-	CoreDocumentID       string `json:"core_document_id,omitempty"`
-	ParseStatus          string `json:"parse_status,omitempty"`
-	ParseState           string `json:"parse_state,omitempty"`
-	EffectiveParseStatus string `json:"effective_parse_status,omitempty"`
-	SourceState          string `json:"source_state,omitempty"`
+	DocumentID           string     `json:"document_id,omitempty"`
+	SourceID             string     `json:"source_id"`
+	BindingID            string     `json:"binding_id"`
+	ObjectKey            string     `json:"object_key"`
+	DisplayName          string     `json:"display_name"`
+	Name                 string     `json:"name,omitempty"`
+	FileType             string     `json:"file_type,omitempty"`
+	SizeBytes            int64      `json:"size_bytes"`
+	SourceVersion        string     `json:"source_version,omitempty"`
+	BaselineVersion      string     `json:"baseline_version,omitempty"`
+	CoreDocumentID       string     `json:"core_document_id,omitempty"`
+	ParseStatus          string     `json:"parse_status,omitempty"`
+	ParseState           string     `json:"parse_state,omitempty"`
+	EffectiveParseStatus string     `json:"effective_parse_status,omitempty"`
+	SourceState          string     `json:"source_state,omitempty"`
+	SyncState            string     `json:"sync_state,omitempty"`
+	PendingAction        string     `json:"pending_action,omitempty"`
+	ParseQueueState      string     `json:"parse_queue_state,omitempty"`
+	HasUpdate            bool       `json:"has_update,omitempty"`
+	UpdateType           string     `json:"update_type,omitempty"`
+	SourceModifiedAt     *time.Time `json:"source_modified_at,omitempty"`
+	LastSyncedAt         *time.Time `json:"last_synced_at,omitempty"`
 }
 
 type scanSearchSourceTreeRequest struct {
@@ -448,16 +487,23 @@ type scanTreeNodePage struct {
 }
 
 type scanTreeNode struct {
-	Key         string `json:"key"`
-	DisplayName string `json:"display_name"`
-	SearchName  string `json:"search_name,omitempty"`
-	SourceID    string `json:"source_id,omitempty"`
-	BindingID   string `json:"binding_id,omitempty"`
-	TreeKey     string `json:"tree_key,omitempty"`
-	ObjectKey   string `json:"object_key,omitempty"`
-	ParentKey   string `json:"parent_key,omitempty"`
-	ObjectType  string `json:"object_type,omitempty"`
-	IsDocument  bool   `json:"is_document"`
-	IsContainer bool   `json:"is_container"`
-	SourceState string `json:"source_state,omitempty"`
+	Key             string `json:"key"`
+	DisplayName     string `json:"display_name"`
+	SearchName      string `json:"search_name,omitempty"`
+	SourceID        string `json:"source_id,omitempty"`
+	BindingID       string `json:"binding_id,omitempty"`
+	TreeKey         string `json:"tree_key,omitempty"`
+	ObjectKey       string `json:"object_key,omitempty"`
+	ParentKey       string `json:"parent_key,omitempty"`
+	ObjectType      string `json:"object_type,omitempty"`
+	IsDocument      bool   `json:"is_document"`
+	IsContainer     bool   `json:"is_container"`
+	HasChildren     bool   `json:"has_children"`
+	Selectable      bool   `json:"selectable"`
+	SourceState     string `json:"source_state,omitempty"`
+	SyncState       string `json:"sync_state,omitempty"`
+	PendingAction   string `json:"pending_action,omitempty"`
+	ParseQueueState string `json:"parse_queue_state,omitempty"`
+	HasUpdate       bool   `json:"has_update,omitempty"`
+	UpdateType      string `json:"update_type,omitempty"`
 }
