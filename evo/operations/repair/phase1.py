@@ -8,14 +8,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from evo.llm import LazyLLMClient
-from evo.repair_model import EvoModelConfigError, opencode_settings
 from evo.traces.detail import build_trace_detail_view
 
 from .agent import ModelCallError, ModelCallTimeout, _bounded_json, next_action
 from .contracts import build_supported_plan, select_category, validate_analysis
 from .demo import request_http, run_command
 from .memory import WorkMemory, content_ref, write_json
-from .opencode import OpenCodeSession
+from .opencode import EvoModelConfigError, OpenCodeSession, build_opencode_settings
 from .validation import inside_repair_scope, repair_scope
 from .web import read_web_pages, search_web
 
@@ -108,7 +107,7 @@ def run_phase1(
         )
         budget = _limits(policy.get('phase1_budget'))
         try:
-            config = opencode_settings(_llm_config(policy).get('evo_llm'))
+            config = build_opencode_settings(_llm_config(policy).get('evo_llm'))
         except EvoModelConfigError as exc:
             return _terminal('blocked', exc.reason)
         restored = memory.restored_session

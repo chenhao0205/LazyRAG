@@ -12,11 +12,10 @@ from unidiff import PatchSet
 from evo.artifact_runtime import record_event
 from evo.operations.public_contracts import RepairPatch, algo_id, clean_text, dump_contract
 from evo.llm import LazyLLMClient
-from evo.repair_model import EvoModelConfigError, opencode_settings
 
 from .agent import ModelCallError, ModelCallTimeout, review_patch
 from .candidate import validate_candidate_patch
-from .opencode import read_opencode_report, run_opencode_streaming
+from .opencode import EvoModelConfigError, build_opencode_settings, read_opencode_report, run_opencode_streaming
 from .validation import pre_validate
 from .workspace import (
     algorithm_source_root,
@@ -98,7 +97,7 @@ async def run_repair_loop(
     if gap:
         return _result('failed', plan, workspace, [], {}, gap, baseline_algo_id)
     try:
-        config = opencode_settings(_llm_config(policy).get('evo_llm'))
+        config = build_opencode_settings(_llm_config(policy).get('evo_llm'))
     except EvoModelConfigError as exc:
         return _result('failed', plan, workspace, [], {}, exc.reason, baseline_algo_id)
     root = Path(str(workspace['workspace_ref'])).resolve()

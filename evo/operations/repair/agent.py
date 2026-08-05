@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from evo.llm import LazyLLMClient, parse_json_object
-from evo.repair_model import EvoModelConfigError, resolve_evo_model
+from .opencode import EvoModelConfigError, resolve_evo_model
 
 from .contracts import AgentAction, PatchReview
 

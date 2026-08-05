@@ -214,7 +214,11 @@ async def repair_session_operation(ctx: OperationContext, analysis: object, poli
         model='evo_llm',
     )
     session = RepairSession(
-        OpenCodeAdapter(client, int(policy_value.get('model_timeout_seconds') or 120)),
+        OpenCodeAdapter.from_llm_config(
+            client,
+            llm_config.get('evo_llm') if isinstance(llm_config, Mapping) else None,
+            int(policy_value.get('model_timeout_seconds') or 120),
+        ),
         DefaultCapabilityFactory(),
     )
     result = await asyncio.to_thread(session.run, repair_input)
