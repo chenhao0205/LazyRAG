@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import Counter
@@ -51,10 +52,11 @@ def build_trace_summary(
 
     read_attempts = TRACE_READ_ATTEMPTS if attempts is None else max(1, int(attempts))
     wait_seconds = TRACE_RETRY_SECONDS if retry_seconds is None else max(0.0, float(retry_seconds))
+    backend = os.getenv('LAZYLLM_TRACE_CONSUME_BACKEND') or os.getenv('LAZYLLM_TRACE_BACKEND') or None
     last_error: Exception | None = None
     for attempt in range(read_attempts):
         try:
-            trace = get_single_trace(trace_id)
+            trace = get_single_trace(trace_id, backend=backend) if backend else get_single_trace(trace_id)
             break
         except Exception as exc:
             last_error = exc

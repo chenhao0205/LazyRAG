@@ -293,6 +293,7 @@ class ProjectionService:
                 'overview': summary.get('overview') or {},
                 'case_overviews': summary.get('case_overviews') or [],
                 'case_details': summary.get('case_details') or [],
+                'guides': summary.get('guides') or {},
                 'metrics': summary.get('metrics') or {},
                 'quality_counts': summary.get('quality_counts') or {},
                 'failure_type_counts': summary.get('failure_type_counts') or {},

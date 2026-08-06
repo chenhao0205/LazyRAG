@@ -23,6 +23,14 @@ STAGE_LABELS = {
     'stream': 'Stream',
 }
 TRACE_HINT = 'use /threads/{thread_id}/results/traces/{trace_id} for raw trace detail'
+TRACE_NOTE_OK = 'Trace loaded; durations use exclusive stage latency from the final attempt.'
+TRACE_NOTE_HEURISTIC = (
+    'Trace spans were unavailable; step status is inferred from evidence/answer and durations are null.'
+)
+TRACE_NOTE_PARTIAL = (
+    'Trace loaded but some handbook stages have no duration; expand shows observed stages only.'
+)
+TRACE_NOTE_MISSING = 'No trace_id on the answer artifact.'
 
 
 def build_answer_process_panel(
@@ -33,7 +41,7 @@ def build_answer_process_panel(
     retry_seconds: float = 0.0,
 ) -> dict[str, Any]:
     stored = row.get('answer_process') if isinstance(row.get('answer_process'), Mapping) else None
-    if _usable_stored(stored):
+    if _usable_stored(stored) and (_stored_has_latency(stored) or not load_trace):
         return _normalize_panel(stored, row)
 
     has_evidence = _has_evidence(row)
@@ -47,6 +55,10 @@ def build_answer_process_panel(
             attempts=attempts,
             retry_seconds=retry_seconds,
         )
+        if not _usable_trace_summary(summary) and _usable_stored(stored):
+            return _normalize_panel(stored, row)
+    elif _usable_stored(stored):
+        return _normalize_panel(stored, row)
     return compose_answer_process_panel(
         summary,
         trace_id=trace_id,
@@ -68,14 +80,13 @@ def compose_answer_process_panel(
     return {
         'call_chain': call_chain,
         'latency_expand': latency_expand,
-        'trace': {
-            'trace_id': trace_id or str((summary or {}).get('trace_id') or ''),
-            'available': bool(trace_id or (summary or {}).get('trace_id')),
-            'source': str((summary or {}).get('trace_source') or ('heuristic' if not usable else '')),
-            'status': 'ok' if usable else ('unavailable' if trace_id else 'missing'),
-            'hint': TRACE_HINT,
-            'raw_entry': 'advanced',
-        },
+        'trace': _trace_meta(
+            trace_id=trace_id or str((summary or {}).get('trace_id') or ''),
+            summary=summary if usable else None,
+            call_chain=call_chain,
+            latency_expand=latency_expand,
+            source=str((summary or {}).get('trace_source') or ''),
+        ),
     }
 
 
@@ -86,38 +97,46 @@ def _usable_stored(stored: Mapping[str, Any] | None) -> bool:
     return isinstance(call_chain, list) and bool(call_chain)
 
 
+def _stored_has_latency(stored: Mapping[str, Any] | None) -> bool:
+    if not isinstance(stored, Mapping):
+        return False
+    expand = stored.get('latency_expand') if isinstance(stored.get('latency_expand'), Mapping) else {}
+    if expand.get('available') and expand.get('total_duration_ms') is not None:
+        return True
+    call_chain = stored.get('call_chain') if isinstance(stored.get('call_chain'), list) else []
+    return any(
+        isinstance(item, Mapping) and item.get('duration_ms') is not None
+        for item in call_chain
+    )
+
+
 def _normalize_panel(stored: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
     has_evidence = _has_evidence(row)
     has_answer = bool(str(row.get('rag_answer') or row.get('answer') or '').strip())
     call_chain = stored.get('call_chain')
     if not isinstance(call_chain, list) or not call_chain:
         call_chain = _call_chain(None, has_evidence=has_evidence, has_answer=has_answer)
+    else:
+        call_chain = [_normalize_chain_step(item) for item in call_chain if isinstance(item, Mapping)]
     latency_expand = stored.get('latency_expand')
     if not isinstance(latency_expand, Mapping):
         latency_expand = _latency_expand(None)
+    else:
+        latency_expand = _normalize_latency_expand(latency_expand, call_chain)
     trace = stored.get('trace') if isinstance(stored.get('trace'), Mapping) else {}
     trace_id = str(trace.get('trace_id') or row.get('trace_id') or '')
     return {
-        'call_chain': [_normalize_chain_step(item) for item in call_chain if isinstance(item, Mapping)],
-        'latency_expand': {
-            'available': bool(latency_expand.get('available')),
-            'total_duration_ms': _optional_ms(latency_expand.get('total_duration_ms')),
-            'bottleneck_stage': str(latency_expand.get('bottleneck_stage') or ''),
-            'route_signature': str(latency_expand.get('route_signature') or ''),
-            'stages': [
-                _normalize_expand_stage(item)
-                for item in (latency_expand.get('stages') or [])
-                if isinstance(item, Mapping)
-            ],
-        },
-        'trace': {
-            'trace_id': trace_id,
-            'available': bool(trace.get('available', bool(trace_id))),
-            'source': str(trace.get('source') or 'row.answer_process'),
-            'status': str(trace.get('status') or ('ok' if latency_expand.get('available') else 'missing')),
-            'hint': str(trace.get('hint') or TRACE_HINT),
-            'raw_entry': str(trace.get('raw_entry') or 'advanced'),
-        },
+        'call_chain': call_chain,
+        'latency_expand': latency_expand,
+        'trace': _trace_meta(
+            trace_id=trace_id,
+            summary=None,
+            call_chain=call_chain,
+            latency_expand=latency_expand,
+            source=str(trace.get('source') or 'row.answer_process'),
+            status_override=str(trace.get('status') or ''),
+            reason_override=str(trace.get('reason') or ''),
+        ),
     }
 
 
@@ -127,6 +146,64 @@ def _usable_trace_summary(summary: Mapping[str, Any] | None) -> bool:
     if str(summary.get('trace_status') or '') == 'unavailable':
         return False
     return bool(summary.get('stages') or summary.get('latency_by_stage') or summary.get('diagnostic_stage_sequence'))
+
+
+def _trace_meta(
+    *,
+    trace_id: str,
+    summary: Mapping[str, Any] | None,
+    call_chain: list[dict[str, Any]],
+    latency_expand: Mapping[str, Any],
+    source: str = '',
+    status_override: str = '',
+    reason_override: str = '',
+) -> dict[str, Any]:
+    latency_available = bool(latency_expand.get('available')) and any(
+        item.get('duration_ms') is not None for item in call_chain
+    )
+    incomplete = bool(latency_expand.get('incomplete'))
+    if summary is not None and latency_available and not incomplete:
+        status = 'ok'
+        reason = ''
+        note = TRACE_NOTE_OK
+        resolved_source = source or str(summary.get('trace_source') or 'lazyllm.get_single_trace')
+    elif summary is not None and latency_available:
+        status = 'partial'
+        reason = 'trace_partial_latency'
+        note = TRACE_NOTE_PARTIAL
+        resolved_source = source or str(summary.get('trace_source') or 'lazyllm.get_single_trace')
+    elif summary is not None:
+        status = 'partial'
+        reason = 'trace_without_stage_latency'
+        note = TRACE_NOTE_PARTIAL
+        resolved_source = source or str(summary.get('trace_source') or 'lazyllm.get_single_trace')
+    elif status_override in {'ok', 'partial'} and latency_available:
+        status = status_override
+        reason = reason_override or ('trace_partial_latency' if incomplete else '')
+        note = TRACE_NOTE_PARTIAL if incomplete or status == 'partial' else TRACE_NOTE_OK
+        resolved_source = source or 'row.answer_process'
+    elif trace_id:
+        status = status_override or 'unavailable'
+        reason = reason_override or 'trace_spans_unavailable'
+        note = TRACE_NOTE_HEURISTIC
+        resolved_source = source or 'heuristic'
+    else:
+        status = 'missing'
+        reason = 'trace_id_missing'
+        note = TRACE_NOTE_MISSING
+        resolved_source = source or 'heuristic'
+    return {
+        'trace_id': trace_id,
+        'available': bool(trace_id),
+        'readable': status in {'ok', 'partial'},
+        'latency_available': latency_available,
+        'source': resolved_source,
+        'status': status,
+        'reason': reason,
+        'note': note,
+        'hint': TRACE_HINT,
+        'raw_entry': 'advanced',
+    }
 
 
 def _call_chain(
@@ -173,8 +250,25 @@ def _call_chain(
             'exclusive_duration_ms': duration,
             'span_count': len(stage_nodes),
             'names': [str(item.get('name') or '') for item in stage_nodes if item.get('name')][:8],
+            'latency_note': _latency_note(status, duration, has_trace=summary is not None),
         })
     return result
+
+
+def _latency_note(status: str, duration: float | None, *, has_trace: bool) -> str:
+    if duration is not None:
+        return ''
+    if status == 'skipped':
+        return 'Stage not observed in the final attempt trace.'
+    if status == 'unknown':
+        return 'No trace spans; status unknown.'
+    if status == 'done' and not has_trace:
+        return 'Inferred from answer evidence; duration unavailable.'
+    if status == 'done':
+        return 'Stage inferred or observed without exclusive latency.'
+    if status == 'failed':
+        return 'Stage reported error; duration may be incomplete.'
+    return ''
 
 
 def _chain_status(
@@ -204,9 +298,13 @@ def _latency_expand(summary: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(summary, Mapping):
         return {
             'available': False,
+            'incomplete': True,
             'total_duration_ms': None,
             'bottleneck_stage': '',
+            'bottleneck_label': '',
             'route_signature': '',
+            'missing_stages': [step for step, _, _ in HANDBOOK_CALL_CHAIN],
+            'note': TRACE_NOTE_HEURISTIC,
             'stages': [],
         }
     latency = summary.get('latency_by_stage') if isinstance(summary.get('latency_by_stage'), Mapping) else {}
@@ -246,12 +344,55 @@ def _latency_expand(summary: Mapping[str, Any] | None) -> dict[str, Any]:
     if total is None and expand_stages:
         values = [item['duration_ms'] for item in expand_stages if item['duration_ms'] is not None]
         total = round(sum(values), 4) if values else None
+    observed = {item['stage'] for item in expand_stages if item.get('duration_ms') is not None}
+    missing = [
+        step for step, _, stage in HANDBOOK_CALL_CHAIN
+        if stage not in observed
+    ]
+    bottleneck = str(summary.get('bottleneck_stage') or '')
     return {
         'available': bool(expand_stages),
+        'incomplete': bool(missing) or total is None,
         'total_duration_ms': total,
-        'bottleneck_stage': str(summary.get('bottleneck_stage') or ''),
+        'bottleneck_stage': bottleneck,
+        'bottleneck_label': STAGE_LABELS.get(bottleneck, bottleneck),
         'route_signature': str(summary.get('route_signature') or ''),
+        'missing_stages': missing,
+        'note': TRACE_NOTE_PARTIAL if missing else TRACE_NOTE_OK,
         'stages': expand_stages,
+    }
+
+
+def _normalize_latency_expand(
+    latency_expand: Mapping[str, Any],
+    call_chain: list[dict[str, Any]],
+) -> dict[str, Any]:
+    stages = [
+        _normalize_expand_stage(item)
+        for item in (latency_expand.get('stages') or [])
+        if isinstance(item, Mapping)
+    ]
+    missing = latency_expand.get('missing_stages')
+    if not isinstance(missing, list):
+        observed = {
+            item['step'] for item in call_chain
+            if item.get('duration_ms') is not None
+        }
+        missing = [step for step, _, _ in HANDBOOK_CALL_CHAIN if step not in observed]
+    bottleneck = str(latency_expand.get('bottleneck_stage') or '')
+    available = bool(latency_expand.get('available') if 'available' in latency_expand else stages)
+    return {
+        'available': available,
+        'incomplete': bool(latency_expand.get('incomplete', bool(missing) or not available)),
+        'total_duration_ms': _optional_ms(latency_expand.get('total_duration_ms')),
+        'bottleneck_stage': bottleneck,
+        'bottleneck_label': str(
+            latency_expand.get('bottleneck_label') or STAGE_LABELS.get(bottleneck, bottleneck)
+        ),
+        'route_signature': str(latency_expand.get('route_signature') or ''),
+        'missing_stages': [str(item) for item in missing],
+        'note': str(latency_expand.get('note') or (TRACE_NOTE_PARTIAL if missing else TRACE_NOTE_OK)),
+        'stages': stages,
     }
 
 
@@ -286,17 +427,20 @@ def _has_evidence(row: Mapping[str, Any]) -> bool:
 def _normalize_chain_step(item: Mapping[str, Any]) -> dict[str, Any]:
     step = str(item.get('step') or '')
     label = str(item.get('label') or STAGE_LABELS.get(step, step))
+    duration = _optional_ms(item.get('duration_ms'))
+    status = str(item.get('status') or 'unknown')
     return {
         'step': step,
         'label': label,
-        'status': str(item.get('status') or 'unknown'),
-        'duration_ms': _optional_ms(item.get('duration_ms')),
+        'status': status,
+        'duration_ms': duration,
         'exclusive_duration_ms': _optional_ms(
             item.get('exclusive_duration_ms') if item.get('exclusive_duration_ms') is not None
             else item.get('duration_ms')
         ),
         'span_count': int(item.get('span_count') or 0),
         'names': [str(name) for name in (item.get('names') or []) if str(name)][:8],
+        'latency_note': str(item.get('latency_note') or _latency_note(status, duration, has_trace=True)),
     }
 
 

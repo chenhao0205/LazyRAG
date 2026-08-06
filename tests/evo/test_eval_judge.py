@@ -20,7 +20,11 @@ fake_repair.repair_json = lambda raw, return_objects=False: json.loads(raw) if r
 sys.modules.setdefault('json_repair', fake_repair)
 
 from evo.operations.eval.judge import judge_case
-from evo.operations.eval.materializers import build_eval_detail_summary, eval_materializers
+from evo.operations.eval.materializers import (
+    build_eval_detail_summary,
+    build_eval_frontend_view,
+    eval_materializers,
+)
 from evo.operations.eval.answer import call_chat_answer, case_kb_id, _with_case
 from evo.operations.route.chat_router import RouterChatRequest, async_call_router_chat
 
@@ -735,6 +739,91 @@ def test_eval_detail_summary_exposes_frontend_overview_fields(monkeypatch):
     ]
     assert expand['stages'][1]['steps'][0]['name'] == 'retriever'
     assert 'raw' not in summary['case_details'][0]
+    guides = summary['guides']
+    assert guides['badcase_rule']
+    assert guides['score_metrics'][0]['key'] == 'overall'
+    assert guides['retrieval_metrics'][0]['key'] == 'retrieval_hit_at_k'
+    assert any(item['key'] == 'retrieval_miss' for item in guides['failure_statuses'])
+    overview_tab = detail['overview']
+    assert overview_tab['score_metrics'][0]['label'] == '总分'
+    assert 'description' in overview_tab['score_metrics'][0]
+    assert 'description' in overview_tab['failure_status']
+    assert overview_tab['failure_status']['suggestion'] is not None
+    judge_tab = detail['judge_evaluation']
+    assert judge_tab['retrieval_metric_guide'][0]['label'] == 'Hit@K'
+    assert 'description' in judge_tab['retrieval_metric_guide'][0]
+    assert judge_tab['facts']['metric_guide'][0]['key'] == 'claim_support_rate'
+    assert judge_tab['failure_status']['code']
+
+
+def test_frontend_failure_status_guide_for_infra_and_retrieval(monkeypatch):
+    import evo.llm
+    import evo.operations.eval.answer_process as answer_process
+
+    monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeLLM)
+    monkeypatch.setattr(
+        answer_process,
+        'build_answer_process_panel',
+        lambda row, **kwargs: {
+            'call_chain': [],
+            'latency_expand': {'available': False, 'total_duration_ms': None,
+                               'bottleneck_stage': '', 'route_signature': '', 'stages': []},
+            'trace': {'trace_id': '', 'available': False, 'source': 'heuristic',
+                      'status': 'missing', 'hint': '', 'raw_entry': 'advanced'},
+        },
+    )
+    monkeypatch.setattr('evo.operations.eval.materializers.build_answer_process_panel',
+                        answer_process.build_answer_process_panel)
+
+    infra = {
+        'case_id': 'case_infra',
+        'question': 'q',
+        'quality_label': 'infra_failure',
+        'failure_type': 'infra_failure',
+        'retrieval_failure_type': 'not_applicable',
+        'reason': 'chat failed',
+        'overall_score': 0.0,
+        'answer_quality_score': 0.0,
+        'retrieval_quality_score': 0.0,
+    }
+    miss = {
+        'case_id': 'case_miss',
+        'question': 'q',
+        'quality_label': 'bad',
+        'failure_type': 'wrong_answer',
+        'retrieval_failure_type': 'retrieval_miss',
+        'reason': 'missed evidence',
+        'overall_score': 0.2,
+        'answer_quality_score': 0.2,
+        'retrieval_quality_score': 0.1,
+        'key_points': [],
+    }
+    view = build_eval_frontend_view({'rows': [infra, miss], 'total': 2, 'metrics': {},
+                                     'execution_failures': [{'case_id': 'case_infra'}],
+                                     'routing_failures': []})
+    infra_status = view['case_details'][0]['tabs']['overview']['failure_status']
+    miss_status = view['case_details'][1]['tabs']['overview']['failure_status']
+    assert infra_status['code'] == 'infra_failure'
+    assert infra_status['label'] == '执行异常'
+    assert infra_status['is_badcase'] is False
+    assert infra_status['counts_in_score_avg'] is False
+    assert miss_status['code'] == 'wrong_answer'
+    assert miss_status['label'] == '回答错误'
+    assert miss_status['is_badcase'] is True
+    assert miss_status['display_group'] == 'badcase'
+    assert infra_status['display_group'] == 'exception'
+    assert infra_status['is_exception'] is True
+    assert view['case_overviews'][0]['status_label'] == '执行异常'
+    assert view['case_overviews'][0]['boundary']['kind'] == 'execution_exception'
+    assert view['case_overviews'][0]['scores_applicable'] is False
+    assert view['case_overviews'][1]['status_label'] == 'Badcase'
+    assert view['case_overviews'][1]['boundary']['display_group'] == 'badcase'
+    assert view['overview']['status_breakdown']['exception'] == 1
+    assert view['overview']['status_breakdown']['badcase'] == 1
+    assert view['overview']['exception_cases'] == 1
+    assert view['overview']['boundary_note']
+    assert view['guides']['case_statuses'][0]['key'] == 'good'
+    assert view['guides']['boundary_statuses'][2]['key'] == 'exception'
 
 
 def test_compose_answer_process_panel_from_trace_summary():
@@ -769,11 +858,64 @@ def test_compose_answer_process_panel_from_trace_summary():
 
     assert panel['call_chain'][0]['status'] == 'skipped'
     assert panel['call_chain'][0]['duration_ms'] is None
+    assert panel['call_chain'][0]['latency_note']
     assert panel['call_chain'][1]['duration_ms'] == 40.0
     assert panel['call_chain'][2]['duration_ms'] == 10.0
     assert panel['call_chain'][3]['duration_ms'] == 100.0
     assert panel['latency_expand']['available'] is True
+    assert panel['latency_expand']['incomplete'] is True
+    assert 'query_rewrite' in panel['latency_expand']['missing_stages']
     assert panel['latency_expand']['total_duration_ms'] == 150.0
+    assert panel['latency_expand']['bottleneck_label'] == 'Generate'
     assert panel['latency_expand']['stages'][0]['stage'] == 'retrieve'
     assert panel['trace']['raw_entry'] == 'advanced'
-    assert panel['trace']['status'] == 'ok'
+    assert panel['trace']['status'] == 'partial'
+    assert panel['trace']['readable'] is True
+    assert panel['trace']['latency_available'] is True
+    assert panel['trace']['note']
+
+
+def test_answer_process_prefers_reloading_heuristic_stored_without_latency(monkeypatch):
+    from evo.operations.eval import answer_process as ap
+
+    captured = {}
+
+    def fake_summary(case, answer, *, attempts=None, retry_seconds=None):
+        captured['attempts'] = attempts
+        return {
+            'trace_id': answer['trace_id'],
+            'trace_source': 'lazyllm.get_single_trace',
+            'route_signature': 'retrieve>llm_generate',
+            'diagnostic_stage_sequence': ['retrieve', 'llm_generate'],
+            'bottleneck_stage': 'llm_generate',
+            'latency_by_stage': {'retrieve': 11.0, 'llm_generate': 22.0},
+            'features': {'trace_latency_ms': 33.0},
+            'error_stages': [],
+            'stages': [
+                {'id': '1', 'stage': 'retrieve', 'name': 'ret', 'status': 'ok',
+                 'latency_ms': 11.0, 'exclusive_latency_ms': 11.0, 'error': ''},
+                {'id': '2', 'stage': 'llm_generate', 'name': 'llm', 'status': 'ok',
+                 'latency_ms': 22.0, 'exclusive_latency_ms': 22.0, 'error': ''},
+            ],
+        }
+
+    monkeypatch.setattr(ap, 'build_trace_summary', fake_summary)
+    panel = ap.build_answer_process_panel(
+        {
+            'case_id': 'c1',
+            'trace_id': 'a' * 32,
+            'rag_answer': 'hello',
+            'retrieve_contexts': [{'content': 'x'}],
+            'answer_process': {
+                'call_chain': [{'step': 'retrieve', 'label': 'Retrieve', 'status': 'done', 'duration_ms': None}],
+                'latency_expand': {'available': False, 'stages': []},
+                'trace': {'trace_id': 'a' * 32, 'status': 'unavailable'},
+            },
+        },
+        load_trace=True,
+        attempts=2,
+        retry_seconds=0.0,
+    )
+    assert captured['attempts'] == 2
+    assert panel['call_chain'][1]['duration_ms'] == 11.0
+    assert panel['trace']['latency_available'] is True
