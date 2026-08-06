@@ -38,6 +38,7 @@ from .public_contracts import RepairPatch, build_eval_summary_root, dump_contrac
 from .repair.capabilities import DefaultCapabilityFactory
 from .repair.contracts import RepairInput
 from .repair.opencode import OpenCodeAdapter
+from .repair.ranking import rerank_repair_groups
 from .repair.session import RepairSession
 from evo.llm import LazyLLMClient
 
@@ -396,13 +397,14 @@ def _failure_summary(value: object) -> dict[str, object]:
 
 def _repair_input(run_id: str, analysis: Mapping[str, Any], policy: Mapping[str, Any]) -> RepairInput:
     queue = analysis.get('repair_group_queue')
-    group = queue[0] if isinstance(queue, list) and queue and isinstance(queue[0], Mapping) else None
+    guidance = policy.get('user_guidance')
+    ranked = rerank_repair_groups(queue, guidance or ()) if isinstance(queue, list) else []
+    group = ranked[0] if ranked else None
     if group is None:
         raise ValueError('analysis has no repairable group')
     candidate_files = [str(path).strip() for path in group.get('candidate_files') or () if str(path).strip()]
     if not candidate_files:
         raise ValueError('repair group has no candidate files')
-    guidance = policy.get('user_guidance')
     guidance_text = '\n'.join(str(item) for item in guidance) if isinstance(guidance, list) else str(guidance or '')
     source_ref = str(
         policy.get('candidate_source_dir')
