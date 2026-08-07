@@ -14,8 +14,15 @@ export default function TaskCenterPage() {
 
   return (
     <div className='task-center-page'>
-      <header className='task-center-header'><h1>{t('taskCenter.title')}</h1></header>
-      <Tabs className='task-center-tabs' activeKey={activeTab} onChange={(key) => setActiveTab(key as TaskCenterTab)} items={[
+      <header className='task-center-header'>
+        <div className='task-center-title-line'>
+          <div>
+            <h1>{t('taskCenter.title')}</h1>
+            <p>{t('taskCenter.description')}</p>
+          </div>
+        </div>
+      </header>
+      <Tabs className='task-center-tabs' activeKey={activeTab} onChange={(key: string) => setActiveTab(key as TaskCenterTab)} items={[
         { key: 'workbench', label: t('taskCenter.workbench'), children: <Workbench active={activeTab === 'workbench'} /> },
         { key: 'tasks', label: t('taskCenter.allTasks'), children: <TaskList active={activeTab === 'tasks'} /> },
         { key: 'schedules', label: t('taskCenter.schedulePlans'), children: <ScheduleList active={activeTab === 'schedules'} /> },

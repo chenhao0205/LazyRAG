@@ -15,6 +15,12 @@ from sklearn.metrics import pairwise_distances
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 
+from evo.operations.public_contracts import (
+    clean_text as _text,
+    mapping_or_empty as _mapping,
+    number_or_default as _number,
+)
+
 TRACE_FEATURES = (
     'node_count', 'edge_count', 'max_depth', 'branching_factor_avg', 'error_span_count', 'trace_latency_ms',
     'exclusive_latency_ms', 'retrieved_doc_count', 'retrieved_chunk_count',
@@ -76,11 +82,8 @@ def cluster_traces(classifications: tuple[Mapping[str, Any], ...]) -> dict[str, 
     return _result(rows, sorted(clusters, key=lambda c: c['cluster_id']), outliers)
 
 
-def _result(
-    rows: list[dict[str, Any]],
-    clusters: list[dict[str, Any]],
-    outliers: list[dict[str, Any]],
-) -> dict[str, Any]:
+def _result(rows: list[dict[str, Any]], clusters: list[dict[str, Any]], outliers: list[dict[str, Any]]
+            ) -> dict[str, Any]:
     return {
         'id': 'analysis.trace_clusters',
         'total': len(rows),
@@ -227,8 +230,8 @@ def _assign_outliers(rows: list[dict[str, Any]], distances: np.ndarray | None) -
         row['outlier_score'] = round(score, 4)
 
 
-def _cluster_summary(cluster_id: str, members: list[dict[str, Any]], matrix: np.ndarray,
-                     rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _cluster_summary(cluster_id: str, members: list[dict[str, Any]], matrix: np.ndarray, rows: list[dict[str, Any]]
+                     ) -> dict[str, Any]:
     indices = [rows.index(row) for row in members]
     rep = members[0] if len(members) == 1 else rows[indices[int(np.argmin(
         pairwise_distances(matrix[indices], np.mean(matrix[indices], axis=0).reshape(1, -1)).ravel()
@@ -282,21 +285,6 @@ def _trace(row: Mapping[str, Any]) -> Mapping[str, Any]:
     return _mapping(row.get('trace_summary'))
 
 
-def _mapping(value: object) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
 def _avg(values: Any) -> float:
     rows = [_number(value) for value in values]
     return round(float(np.mean(rows)), 4) if rows else 0.0
-
-
-def _number(value: Any) -> float:
-    try:
-        return round(float(value or 0.0), 4)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()

@@ -9,6 +9,8 @@ from typing import Any
 
 import networkx as nx
 
+from evo.operations.public_contracts import clean_text as _text, number_or_default as _number
+
 TRACE_READ_ATTEMPTS = 3
 TRACE_RETRY_SECONDS = 3.0
 
@@ -167,8 +169,8 @@ def _trace_unavailable(case_id: str, trace_id: str, reason: str) -> dict[str, An
     }
 
 
-def _walk(step: Any, parent_id: str, graph: nx.DiGraph, nodes: list[dict[str, Any]],
-          edges: list[tuple[str, str]], depth: int = 0) -> None:
+def _walk(step: Any, parent_id: str, graph: nx.DiGraph, nodes: list[dict[str, Any]], edges: list[tuple[str, str]],
+          depth: int = 0) -> None:
     node_id = _required_text(getattr(step, 'step_id', ''), 'trace step_id')
     stage = _stage(step)
     semantic = _semantic_data(step)
@@ -307,9 +309,9 @@ def _final_context_ids(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str
     return _unique(docs), _unique(chunks)
 
 
-def _features(graph: nx.DiGraph, nodes: list[dict[str, Any]], diagnostic: list[dict[str, Any]],
-              stage_counts: Counter, latency_by_stage: Mapping[str, float], errors: list[dict[str, Any]],
-              retrieval: Mapping[str, Any]) -> dict[str, float]:
+def _features(graph: nx.DiGraph, nodes: list[dict[str, Any]], diagnostic: list[dict[str, Any]], stage_counts: Counter,
+              latency_by_stage: Mapping[str, float], errors: list[dict[str, Any]], retrieval: Mapping[str, Any]
+              ) -> dict[str, float]:
     degrees = [graph.out_degree(node) for node in graph.nodes]
     features = {
         'node_count': float(len(diagnostic)),
@@ -374,17 +376,6 @@ def _list(value: Any) -> list[str]:
 
 def _unique(value: Any) -> list[str]:
     return list(dict.fromkeys(_list(value)))
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()
-
-
-def _number(value: Any) -> float:
-    try:
-        return round(float(value or 0.0), 4)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _optional_number(value: Any) -> float | None:

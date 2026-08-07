@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -6,11 +6,19 @@ import {
   Empty,
   Modal,
   Skeleton,
+  Spin,
   Tabs,
   Tag,
+  Tooltip,
+  Tree,
   message,
 } from "antd";
-import { FileSearchOutlined, RollbackOutlined } from "@ant-design/icons";
+import {
+  FileOutlined,
+  FileSearchOutlined,
+  FolderOutlined,
+  RollbackOutlined,
+} from "@ant-design/icons";
 import { getLocalizedErrorMessage } from "@/components/request";
 import type { ResourceVersionType } from "../resourceVersionApi";
 import {
@@ -22,19 +30,31 @@ import {
   type PersonalResourceRevisionRecord,
 } from '../preferenceApi';
 import {
+  compareSkillRevisionFileDiff,
+  compareSkillRevisionTreeDiff,
   getSkillRevisionFile,
+  getSkillRevisionTree,
   listSkillRevisions,
   rollbackSkill,
   RollbackConflictError as SkillRollbackConflictError,
   type SkillRevisionRecord,
+  type SkillDiffFileRecord,
+  type SkillTreeNodeRecord,
 } from '../skillApi';
+import type { DataNode } from "antd/es/tree";
 import {
   buildDiffLinesWithInline,
-  buildUnifiedDiffLines,
   formatDateTime,
   parseMarkdownFrontMatter,
 } from "../shared";
 import { DiffLineContent } from "./DiffLineContent";
+import { getDiffStatusColor, mapDiffEntryLines } from "./skillPackage/skillDiffUtils";
+import {
+  buildAntTreeData,
+  flattenSkillTree,
+  pickDefaultFilePath,
+  type SkillTreeFileItem,
+} from "./skillPackage/skillTreeUtils";
 
 interface ResourceVersionDrawerProps {
   open: boolean;
@@ -48,10 +68,93 @@ interface ResourceVersionDrawerProps {
 
 type RevisionListItem = {
   revisionId: string;
+  parentRevisionId: string;
   revisionNo: number;
   changeSource: string;
   createdAt: string;
   isHead: boolean;
+};
+
+const buildRevisionDiffTreeData = (
+  files: SkillDiffFileRecord[],
+  t: ResourceVersionDrawerProps["t"],
+): DataNode[] => {
+  type MutableNode = DataNode & { children: MutableNode[] };
+  const roots: MutableNode[] = [];
+  const nodes = new Map<string, MutableNode>();
+
+  files.forEach((file) => {
+    const parts = file.path.split("/").filter(Boolean);
+    parts.forEach((part, index) => {
+      const path = parts.slice(0, index + 1).join("/");
+      const isLeaf = index === parts.length - 1;
+      const isDirLeaf = isLeaf && file.type === "dir";
+      const isFile = isLeaf && file.type !== "dir";
+      const status = isFile || isDirLeaf ? file.status : "";
+      const existing = nodes.get(path);
+      if (existing) {
+        // Prefer explicit directory status when a later dir entry arrives.
+        if (isDirLeaf && status && status !== "unchanged") {
+          existing.title = (
+            <span className="memory-skill-tree-node-title">
+              <Tooltip title={part} placement="right">
+                <span className="memory-version-skill-tree-name">{part}</span>
+              </Tooltip>
+              <Tag bordered={false} color={getDiffStatusColor(status)}>
+                {t(`admin.memorySkillDiffStatus_${status}`, { defaultValue: status })}
+              </Tag>
+            </span>
+          );
+        }
+        return;
+      }
+      const node: MutableNode = {
+        key: path,
+        children: [],
+        icon: isFile ? <FileOutlined /> : <FolderOutlined />,
+        isLeaf: isFile,
+        selectable: isFile,
+        title: (
+          <span className="memory-skill-tree-node-title">
+            <Tooltip title={part} placement="right">
+              <span className="memory-version-skill-tree-name">{part}</span>
+            </Tooltip>
+            {status && status !== "unchanged" ? (
+              <Tag bordered={false} color={getDiffStatusColor(status)}>
+                {t(`admin.memorySkillDiffStatus_${status}`, { defaultValue: status })}
+              </Tag>
+            ) : null}
+          </span>
+        ),
+      };
+      nodes.set(path, node);
+      const parentPath = parts.slice(0, index).join("/");
+      const parent = nodes.get(parentPath);
+      if (parent) parent.children.push(node);
+      else roots.push(node);
+    });
+  });
+  return roots;
+};
+
+const isDiffContentRequestable = (
+  file?: SkillDiffFileRecord | null,
+): file is SkillDiffFileRecord =>
+  Boolean(
+    file &&
+      file.type !== "dir" &&
+      file.status?.toLowerCase() !== "unchanged" &&
+      !file.binary &&
+      !file.tooLarge,
+  );
+
+const pickDefaultDiffFilePath = (files: SkillDiffFileRecord[]) => {
+  const fileEntries = files.filter((file) => file.type !== "dir");
+  return (
+    fileEntries.find((file) => file.status !== "unchanged")?.path ||
+    fileEntries[0]?.path ||
+    ""
+  );
 };
 
 const changeSourceColorMap: Record<string, string> = {
@@ -104,6 +207,8 @@ const toPersonalResourceApiType = (
 ): PersonalResourceApiType =>
   resourceType === "memory" ? "memory" : "user_preference";
 
+const formatRevisionLabel = (revisionNo: number) => `v${revisionNo}`;
+
 const getContentLines = (content: string) =>
   (content || "-").split("\n").map((text, index) => ({
     id: `${index}-${text}`,
@@ -134,10 +239,162 @@ function VersionContentPanel({
   );
 }
 
+function SkillRevisionContentPanel({
+  tree,
+  selectedPath,
+  content,
+  loading,
+  t,
+  onSelect,
+}: {
+  tree: SkillTreeNodeRecord | null;
+  selectedPath: string;
+  content: string;
+  loading: boolean;
+  t: ResourceVersionDrawerProps["t"];
+  onSelect: (file: SkillTreeFileItem) => void;
+}) {
+  const files = useMemo(() => (tree ? flattenSkillTree(tree) : []), [tree]);
+  const selectedFile = files.find((file) => file.path === selectedPath) || null;
+  const treeData = useMemo(
+    () =>
+      tree
+        ? buildAntTreeData(tree, new Map(), (file) => (
+            <Tooltip title={file.name} placement="right">
+              <span className="memory-version-skill-tree-name">{file.name}</span>
+            </Tooltip>
+          ))
+        : [],
+    [tree],
+  );
+
+  return (
+    <div className="memory-version-skill-package">
+      <aside className="memory-version-skill-tree">
+        <div className="memory-version-content-panel-head">
+          {t("admin.memorySkillPackageTreeTitle")}
+        </div>
+        <Tree
+          blockNode
+          showIcon
+          defaultExpandAll
+          treeData={treeData}
+          selectedKeys={selectedPath ? [selectedPath] : []}
+          onSelect={(keys) => {
+            const path = String(keys[0] || "");
+            const file = files.find((item) => item.path === path);
+            if (file) onSelect(file);
+          }}
+        />
+      </aside>
+      <div className="memory-version-skill-content">
+        <div className="memory-version-content-panel-head">{selectedPath || "-"}</div>
+        {loading ? (
+          <div className="memory-version-file-loading"><Spin /></div>
+        ) : selectedFile?.binary ? (
+          <Alert showIcon type="info" message={t("admin.memoryVersionBinaryFileHint")} />
+        ) : (
+          <VersionContentPanel label={selectedPath || "-"} content={content} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SkillRevisionDiffPanel({
+  files,
+  selectedPath,
+  lines,
+  loading,
+  error,
+  t,
+  onSelect,
+}: {
+  files: SkillDiffFileRecord[];
+  selectedPath: string;
+  lines: ReturnType<typeof buildDiffLinesWithInline>;
+  loading: boolean;
+  error: string;
+  t: ResourceVersionDrawerProps["t"];
+  onSelect: (path: string) => void;
+}) {
+  const selectedFile = files.find((file) => file.path === selectedPath);
+  const treeData = useMemo(() => buildRevisionDiffTreeData(files, t), [files, t]);
+
+  return (
+    <div className="memory-version-skill-package">
+      <aside className="memory-version-skill-tree">
+        <div className="memory-version-content-panel-head">
+          {t("admin.memorySkillPackageTreeTitle")}
+        </div>
+        <Tree
+          blockNode
+          showIcon
+          defaultExpandAll
+          treeData={treeData}
+          selectedKeys={selectedPath ? [selectedPath] : []}
+          onSelect={(keys) => {
+            const path = String(keys[0] || "");
+            const file = files.find(
+              (item) => item.path === path && item.type !== "dir",
+            );
+            if (file) onSelect(file.path);
+          }}
+        />
+      </aside>
+      <div className="memory-version-skill-content">
+        <div className="memory-version-content-panel-head">{selectedPath || "-"}</div>
+        {loading ? (
+          <div className="memory-version-file-loading"><Spin /></div>
+        ) : error ? (
+          <Alert showIcon type="error" message={error} />
+        ) : selectedFile?.type === "dir" ? (
+          <Alert
+            showIcon
+            type="info"
+            message={t("admin.memoryVersionDiffDirectoryHint", {
+              status: t(`admin.memorySkillDiffStatus_${selectedFile.status}`, {
+                defaultValue: selectedFile.status,
+              }),
+            })}
+          />
+        ) : selectedFile?.binary ? (
+          <Alert showIcon type="info" message={t("admin.memoryVersionBinaryFileHint")} />
+        ) : selectedFile?.tooLarge ? (
+          <Alert showIcon type="warning" message={t("admin.memorySkillPackageDiffTooLarge")} />
+        ) : lines.length ? (
+          <div className="memory-version-diff" aria-label={t("admin.memoryVersionTabDiff")}>
+            {lines.map((line, index) => (
+              <div key={`${index}-${line.type}-${line.text}`} className={`memory-diff-line is-${line.type}`}>
+                <span className="memory-diff-prefix">
+                  {line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}
+                </span>
+                <DiffLineContent line={line} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("admin.memoryVersionDiffEmpty")} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RevisionDetail({
   revision,
   content,
   previousContent,
+  isSkillResource,
+  revisionTree,
+  selectedFilePath,
+  selectedFileContent,
+  fileLoading,
+  diffFiles,
+  selectedDiffPath,
+  selectedDiffLines,
+  diffLoading,
+  diffError,
   loading,
   error,
   canRollback,
@@ -145,10 +402,22 @@ function RevisionDetail({
   t,
   onRetry,
   onRollback,
+  onSelectFile,
+  onSelectDiffFile,
 }: {
   revision: RevisionListItem | null;
   content: string;
   previousContent: string;
+  isSkillResource: boolean;
+  revisionTree: SkillTreeNodeRecord | null;
+  selectedFilePath: string;
+  selectedFileContent: string;
+  fileLoading: boolean;
+  diffFiles: SkillDiffFileRecord[];
+  selectedDiffPath: string;
+  selectedDiffLines: ReturnType<typeof buildDiffLinesWithInline>;
+  diffLoading: boolean;
+  diffError: string;
   loading: boolean;
   error: string;
   canRollback: boolean;
@@ -156,6 +425,8 @@ function RevisionDetail({
   t: ResourceVersionDrawerProps["t"];
   onRetry: () => void;
   onRollback: () => void;
+  onSelectFile: (file: SkillTreeFileItem) => void;
+  onSelectDiffFile: (path: string) => void;
 }) {
   const currentSkill = useMemo(
     () => parseMarkdownFrontMatter(content),
@@ -215,7 +486,7 @@ function RevisionDetail({
         </div>
         <div>
           <span>{t("admin.memoryVersionRange")}</span>
-          <strong>r{revision.revisionNo}</strong>
+          <strong>{formatRevisionLabel(revision.revisionNo)}</strong>
         </div>
         <div>
           <span>{t("admin.memoryVersionChangedAt")}</span>
@@ -248,14 +519,35 @@ function RevisionDetail({
             key: "content",
             label: t("admin.memoryVersionTabAfter"),
             children: (
-              <VersionContentPanel label={t("admin.memoryVersionTabAfter")} content={bodyContent} />
+              isSkillResource ? (
+                <SkillRevisionContentPanel
+                  tree={revisionTree}
+                  selectedPath={selectedFilePath}
+                  content={selectedFileContent}
+                  loading={fileLoading}
+                  t={t}
+                  onSelect={onSelectFile}
+                />
+              ) : (
+                <VersionContentPanel label={t("admin.memoryVersionTabAfter")} content={bodyContent} />
+              )
             ),
           },
           {
             key: "diff",
             label: t("admin.memoryVersionTabDiff"),
             children: (
-              <div
+              isSkillResource ? (
+                <SkillRevisionDiffPanel
+                  files={diffFiles}
+                  selectedPath={selectedDiffPath}
+                  lines={selectedDiffLines}
+                  loading={diffLoading}
+                  error={diffError}
+                  t={t}
+                  onSelect={onSelectDiffFile}
+                />
+              ) : <div
                 className="memory-version-diff"
                 aria-label={t("admin.memoryVersionTabDiff")}
               >
@@ -331,6 +623,17 @@ export default function ResourceVersionDrawer({
   const [selectedRevisionId, setSelectedRevisionId] = useState("");
   const [content, setContent] = useState("");
   const [previousContent, setPreviousContent] = useState("");
+  const [revisionTree, setRevisionTree] = useState<SkillTreeNodeRecord | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState("");
+  const [selectedFileContent, setSelectedFileContent] = useState("");
+  const [fileLoading, setFileLoading] = useState(false);
+  const [diffFiles, setDiffFiles] = useState<SkillDiffFileRecord[]>([]);
+  const [diffRevisionId, setDiffRevisionId] = useState("");
+  const [diffBaseRevisionId, setDiffBaseRevisionId] = useState("");
+  const [selectedDiffPath, setSelectedDiffPath] = useState("");
+  const [selectedDiffLines, setSelectedDiffLines] = useState<ReturnType<typeof buildDiffLinesWithInline>>([]);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState("");
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -338,6 +641,10 @@ export default function ResourceVersionDrawer({
   const [reloadKey, setReloadKey] = useState(0);
   const [detailReloadKey, setDetailReloadKey] = useState(0);
   const [rollingBack, setRollingBack] = useState(false);
+  const fileRequestIdRef = useRef(0);
+  const diffRequestIdRef = useRef(0);
+  const revisionListRequestIdRef = useRef(0);
+  const loadedRevisionListRequestIdRef = useRef(0);
   const [skillRevisionCache, setSkillRevisionCache] = useState<SkillRevisionRecord[]>(
     [],
   );
@@ -356,6 +663,16 @@ export default function ResourceVersionDrawer({
     setSelectedRevisionId("");
     setContent("");
     setPreviousContent("");
+    setRevisionTree(null);
+    setSelectedFilePath("");
+    setSelectedFileContent("");
+    setDiffFiles([]);
+    setDiffRevisionId("");
+    setDiffBaseRevisionId("");
+    setSelectedDiffPath("");
+    setSelectedDiffLines([]);
+    setDiffLoading(false);
+    setDiffError("");
     setDetailError("");
     setRevisions([]);
     setSkillRevisionCache([]);
@@ -370,6 +687,9 @@ export default function ResourceVersionDrawer({
       return undefined;
     }
 
+    const requestId = revisionListRequestIdRef.current + 1;
+    revisionListRequestIdRef.current = requestId;
+    loadedRevisionListRequestIdRef.current = 0;
     let ignore = false;
     setLoading(true);
     setErrorMessage("");
@@ -382,6 +702,7 @@ export default function ResourceVersionDrawer({
           }
           const nextRevisions = items.map((item) => ({
             revisionId: item.revisionId,
+            parentRevisionId: item.parentRevisionId,
             revisionNo: item.revisionNo,
             changeSource: item.changeSource,
             createdAt: item.createdAt,
@@ -390,14 +711,9 @@ export default function ResourceVersionDrawer({
           setSkillRevisionCache(items);
           setPersonalRevisionCache([]);
           setRevisions(nextRevisions);
-          setSelectedRevisionId((current) => {
-            if (current) {
-              const stillExists = nextRevisions.some((r) => r.revisionId === current);
-              if (stillExists) return current;
-            }
-            const headRevision = nextRevisions.find((r) => r.isHead);
-            return headRevision?.revisionId || nextRevisions[0]?.revisionId || '';
-          });
+          loadedRevisionListRequestIdRef.current = requestId;
+          const headRevision = nextRevisions.find((r) => r.isHead);
+          setSelectedRevisionId(headRevision?.revisionId || nextRevisions[0]?.revisionId || '');
           return;
         }
 
@@ -407,6 +723,7 @@ export default function ResourceVersionDrawer({
         }
         const nextRevisions = items.map((item) => ({
           revisionId: item.revisionId,
+          parentRevisionId: "",
           revisionNo: item.revisionNo,
           changeSource: item.changeSource,
           createdAt: item.createdAt,
@@ -415,14 +732,9 @@ export default function ResourceVersionDrawer({
         setPersonalRevisionCache(items);
         setSkillRevisionCache([]);
         setRevisions(nextRevisions);
-        setSelectedRevisionId((current) => {
-          if (current) {
-            const stillExists = nextRevisions.some((r) => r.revisionId === current);
-            if (stillExists) return current;
-          }
-          const headRevision = nextRevisions.find((r) => r.isHead);
-          return headRevision?.revisionId || nextRevisions[0]?.revisionId || '';
-        });
+        loadedRevisionListRequestIdRef.current = requestId;
+        const headRevision = nextRevisions.find((r) => r.isHead);
+        setSelectedRevisionId(headRevision?.revisionId || nextRevisions[0]?.revisionId || '');
       } catch (error) {
         if (ignore) {
           return;
@@ -445,43 +757,102 @@ export default function ResourceVersionDrawer({
   }, [isSkillResource, open, personalResourceType, reloadKey, resourceId, t]);
 
   useEffect(() => {
-    if (!open || !selectedRevisionId) {
+    const revisionListReady =
+      loadedRevisionListRequestIdRef.current !== 0 &&
+      loadedRevisionListRequestIdRef.current === revisionListRequestIdRef.current;
+    if (!open || !selectedRevisionId || !revisionListReady) {
       setContent("");
       setPreviousContent("");
+      setRevisionTree(null);
+      setSelectedFilePath("");
+      setSelectedFileContent("");
+      setDiffFiles([]);
+      setDiffRevisionId("");
+      setDiffBaseRevisionId("");
+      setSelectedDiffPath("");
+      setSelectedDiffLines([]);
+      setDiffLoading(false);
+      setDiffError("");
       setDetailError("");
       return undefined;
     }
 
     let ignore = false;
+    fileRequestIdRef.current += 1;
+    diffRequestIdRef.current += 1;
     setDetailLoading(true);
+    setFileLoading(false);
     setDetailError("");
+    setDiffFiles([]);
+    setDiffRevisionId("");
+    setDiffBaseRevisionId("");
+    setSelectedDiffPath("");
+    setSelectedDiffLines([]);
+    setDiffLoading(false);
+    setDiffError("");
     void (async () => {
       try {
         if (isSkillResource) {
-          const currentIndex = skillRevisionCache.findIndex(
+          const selectedRecord = skillRevisionCache.find(
             (item) => item.revisionId === selectedRevisionId,
           );
-          const previousRevision =
-            currentIndex >= 0 ? skillRevisionCache[currentIndex + 1] : undefined;
-          const [currentContent, prevContent] = await Promise.all([
+          if (!selectedRecord) {
+            return;
+          }
+          // Rollbacks create branches, and the 50-revision retention limit may prune
+          // an item's parent. Only request a diff base that still exists in the list.
+          const previousRevision = selectedRecord.parentRevisionId
+            ? skillRevisionCache.find(
+                (item) => item.revisionId === selectedRecord.parentRevisionId,
+              )
+            : undefined;
+          const [currentContent, prevContent, tree, revisionDiff] = await Promise.all([
             getSkillRevisionFile(resourceId, selectedRevisionId),
             previousRevision
               ? getSkillRevisionFile(resourceId, previousRevision.revisionId)
               : Promise.resolve(""),
+            getSkillRevisionTree(resourceId, selectedRevisionId),
+            previousRevision
+              ? compareSkillRevisionTreeDiff(
+                  resourceId,
+                  previousRevision.revisionId,
+                  selectedRevisionId,
+                )
+              : Promise.resolve(null),
           ]);
           if (ignore) {
             return;
           }
           setContent(currentContent);
           setPreviousContent(prevContent);
+          setRevisionTree(tree);
+          const defaultPath = pickDefaultFilePath(flattenSkillTree(tree));
+          setSelectedFilePath(defaultPath);
+          setSelectedFileContent(defaultPath === "SKILL.md" ? currentContent : "");
+          const nextDiffFiles = revisionDiff?.files || flattenSkillTree(tree).map((file) => ({
+            path: file.path,
+            status: "added",
+            binary: file.binary,
+            type: file.type === "dir" ? "dir" : "file",
+            tooLarge: false,
+            diffEntryLines: [],
+          }));
+          setDiffFiles(nextDiffFiles);
+          setDiffRevisionId(selectedRevisionId);
+          setDiffBaseRevisionId(previousRevision?.revisionId || "");
+          setSelectedDiffPath(pickDefaultDiffFilePath(nextDiffFiles));
+          setSelectedDiffLines([]);
           return;
         }
 
         const currentIndex = personalRevisionCache.findIndex(
           (item) => item.revisionId === selectedRevisionId,
         );
+        if (currentIndex < 0) {
+          return;
+        }
         const previousRevision =
-          currentIndex >= 0 ? personalRevisionCache[currentIndex + 1] : undefined;
+          personalRevisionCache[currentIndex + 1];
         const [currentDetail, previousDetail] = await Promise.all([
           getPersonalResourceRevision(personalResourceType, selectedRevisionId),
           previousRevision
@@ -524,6 +895,145 @@ export default function ResourceVersionDrawer({
     t,
   ]);
 
+  useEffect(() => {
+    if (
+      !open ||
+      !isSkillResource ||
+      !selectedRevisionId ||
+      diffRevisionId !== selectedRevisionId ||
+      !selectedDiffPath ||
+      !diffFiles.some((file) => file.path === selectedDiffPath)
+    ) {
+      setSelectedDiffLines([]);
+      return undefined;
+    }
+
+    const selectedDiffFile = diffFiles.find(
+      (file) => file.path === selectedDiffPath,
+    );
+
+    // Diff panel never calls revision /file. Directories, unchanged,
+    // binary and too-large entries only need status presentation.
+    if (!isDiffContentRequestable(selectedDiffFile)) {
+      setSelectedDiffLines([]);
+      setDiffLoading(false);
+      setDiffError("");
+      return undefined;
+    }
+
+    if (selectedDiffFile.diffEntryLines.length) {
+      setSelectedDiffLines(mapDiffEntryLines(selectedDiffFile.diffEntryLines));
+      setDiffLoading(false);
+      setDiffError("");
+      return undefined;
+    }
+
+    if (!diffBaseRevisionId) {
+      setSelectedDiffLines([]);
+      setDiffLoading(false);
+      setDiffError("");
+      return undefined;
+    }
+
+    const requestId = diffRequestIdRef.current + 1;
+    diffRequestIdRef.current = requestId;
+    let ignore = false;
+    setDiffLoading(true);
+    setDiffError("");
+    void (async () => {
+      try {
+        // Re-check before requesting in case state changed mid-flight.
+        const latestSelected = diffFiles.find(
+          (file) => file.path === selectedDiffPath,
+        );
+        if (!isDiffContentRequestable(latestSelected)) {
+          if (!ignore && diffRequestIdRef.current === requestId) {
+            setSelectedDiffLines([]);
+          }
+          return;
+        }
+
+        const file = await compareSkillRevisionFileDiff(
+          resourceId,
+          diffBaseRevisionId,
+          selectedRevisionId,
+          selectedDiffPath,
+        );
+        if (ignore || diffRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        if (file.binary || file.tooLarge || file.type === "dir") {
+          setDiffFiles((prev) =>
+            prev.map((item) =>
+              item.path === selectedDiffPath
+                ? {
+                    ...item,
+                    binary: file.binary,
+                    tooLarge: file.tooLarge,
+                    type: file.type || item.type,
+                    status: file.status || item.status,
+                    diffEntryLines: file.diffEntryLines,
+                  }
+                : item,
+            ),
+          );
+          setSelectedDiffLines([]);
+          return;
+        }
+
+        setSelectedDiffLines(mapDiffEntryLines(file.diffEntryLines));
+      } catch (error) {
+        if (!ignore && diffRequestIdRef.current === requestId) {
+          console.error("Load revision diff file failed:", error);
+          setDiffError(getLocalizedErrorMessage(error));
+          setSelectedDiffLines([]);
+        }
+      } finally {
+        if (!ignore && diffRequestIdRef.current === requestId) {
+          setDiffLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      ignore = true;
+    };
+  }, [
+    diffBaseRevisionId,
+    diffFiles,
+    diffRevisionId,
+    isSkillResource,
+    open,
+    resourceId,
+    selectedDiffPath,
+    selectedRevisionId,
+  ]);
+
+  const handleSelectRevisionFile = async (file: SkillTreeFileItem) => {
+    const requestId = fileRequestIdRef.current + 1;
+    fileRequestIdRef.current = requestId;
+    setSelectedFilePath(file.path);
+    if (file.binary) {
+      setSelectedFileContent("");
+      return;
+    }
+    setFileLoading(true);
+    try {
+      const nextContent = await getSkillRevisionFile(resourceId, selectedRevisionId, file.path);
+      if (fileRequestIdRef.current === requestId) {
+        setSelectedFileContent(nextContent);
+      }
+    } catch (error) {
+      console.error("Load revision file failed:", error);
+      message.error(getLocalizedErrorMessage(error));
+    } finally {
+      if (fileRequestIdRef.current === requestId) {
+        setFileLoading(false);
+      }
+    }
+  };
+
   const handleRollback = () => {
     if (!selectedRevision || selectedRevision.isHead) {
       return;
@@ -532,7 +1042,7 @@ export default function ResourceVersionDrawer({
     Modal.confirm({
       title: t('admin.memoryVersionRollbackConfirmTitle'),
       content: t('admin.memoryVersionRollbackConfirmContent', {
-        version: `r${selectedRevision.revisionNo}`,
+        version: formatRevisionLabel(selectedRevision.revisionNo),
         name: resourceName || resourceId,
       }),
       okText: t('admin.memoryVersionRollbackButton'),
@@ -547,7 +1057,7 @@ export default function ResourceVersionDrawer({
             await rollbackPersonalResource(personalResourceType, {
               revisionId: selectedRevision.revisionId,
               expectedHeadRevisionId: headRevision?.revisionId || undefined,
-              message: `rollback to r${selectedRevision.revisionNo}`,
+              message: `rollback to ${formatRevisionLabel(selectedRevision.revisionNo)}`,
             });
           }
           message.success(t('admin.memoryVersionRollbackSuccess'));
@@ -579,7 +1089,7 @@ export default function ResourceVersionDrawer({
   return (
     <Drawer
       destroyOnHidden
-      width="min(980px, calc(100vw - 32px))"
+      width="min(1320px, calc(100vw - 24px))"
       open={open}
       title={title}
       className="memory-version-drawer"
@@ -627,7 +1137,7 @@ export default function ResourceVersionDrawer({
                   >
                     <span className="memory-version-list-item-main">
                       <strong>
-                        r{item.revisionNo}
+                        {formatRevisionLabel(item.revisionNo)}
                         {item.isHead ? (
                           <em className="memory-version-current-badge">
                             {t("admin.memoryVersionCurrentBadge")}
@@ -658,6 +1168,16 @@ export default function ResourceVersionDrawer({
             revision={selectedRevision}
             content={content}
             previousContent={previousContent}
+            isSkillResource={isSkillResource}
+            revisionTree={revisionTree}
+            selectedFilePath={selectedFilePath}
+            selectedFileContent={selectedFileContent}
+            fileLoading={fileLoading}
+            diffFiles={diffFiles}
+            selectedDiffPath={selectedDiffPath}
+            selectedDiffLines={selectedDiffLines}
+            diffLoading={diffLoading}
+            diffError={diffError}
             loading={detailLoading}
             error={detailError}
             canRollback={canRollback}
@@ -665,6 +1185,8 @@ export default function ResourceVersionDrawer({
             t={t}
             onRetry={() => setDetailReloadKey((value) => value + 1)}
             onRollback={handleRollback}
+            onSelectFile={handleSelectRevisionFile}
+            onSelectDiffFile={setSelectedDiffPath}
           />
         </section>
       </div>

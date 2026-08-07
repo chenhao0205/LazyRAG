@@ -1,6 +1,7 @@
 """Plugin API routes.
 
 Routes:
+    POST /api/writer/documents:sync      Persist a user-edited WriterDocument.
     POST /api/plugin/driver              DriverAgent evaluation endpoint (called by Go EventLoop).
     GET  /api/plugin/slot-binding        Slot binding lookup (called by Go OnArtifactEvent).
     GET  /api/plugins                    List all loaded plugins.
@@ -8,13 +9,19 @@ Routes:
 """
 from __future__ import annotations
 
+import tempfile
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from lazyllm.tools.tool_config_inject import inject_tool_config
+from lazyllm.tools.writer.data_models import PatchResult, PatchSet, WriterDocument
+from lazyllm.tools.writer.tools import WriterResourceTools, WriterRevisionTools
+from lazyllm.tools.writer.tools.revision_tools import apply_patch_to_ir
+from lazyllm.tools.writer.utils import load_artifact_json
 
 from lazymind.chat.plugin import plugin_loader
-from lazymind.chat.plugin.driver_agent import DriverEvaluationError, evaluate_step
 
 router = APIRouter()
 
@@ -42,6 +49,74 @@ class TaskCancelResponse(BaseModel):
     ok: bool
 
 
+class WriterDocumentSyncRequest(BaseModel):
+    source_document: WriterDocument
+    revised_document: WriterDocument
+    tool_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _writer_artifact(result: dict, key: Optional[str] = None) -> str:
+    path = result.get('artifact_path') if key is None else (
+        (result.get('metadata') or {}).get('artifact_paths') or {}
+    ).get(key)
+    if not path:
+        raise ValueError(f'Writer tool did not return artifact {key or "primary"!r}.')
+    return path
+
+
+@router.post('/api/writer/documents:sync', summary='Persist an edited WriterDocument to its provider')
+def sync_writer_document(request: WriterDocumentSyncRequest) -> dict:
+    source, revised = request.source_document, request.revised_document
+    if source.document_id != revised.document_id:
+        raise HTTPException(status_code=400, detail='WriterDocument document_id values must match.')
+    if not request.tool_config.get('feishu'):
+        raise HTTPException(status_code=400, detail='tool_config.feishu is required.')
+
+    try:
+        inject_tool_config(request.tool_config)
+        with tempfile.TemporaryDirectory(prefix='writer-sync-') as root:
+            revision = WriterRevisionTools(llm=None, artifact_store=root)
+            patch_output = revision.build_patch_set_from_documents(source, revised)
+            patch = load_artifact_json(_writer_artifact(patch_output), PatchSet)
+            candidate, local_result = apply_patch_to_ir(source, patch)
+            if not patch.hunks and patch.new_title is None:
+                candidate.ui_editable = True
+                local_result.message = 'No document changes.'
+                return _writer_sync_response(False, patch, local_result, candidate)
+
+            write_output = WriterResourceTools(
+                llm=None, artifact_store=root,
+            ).apply_patch_to_document(patch, source)
+            persisted = load_artifact_json(
+                _writer_artifact(write_output, 'persisted_document'), WriterDocument,
+            )
+            result = load_artifact_json(
+                _writer_artifact(write_output, 'patch_result'), PatchResult,
+            )
+            persisted.ui_editable = True
+            return _writer_sync_response(True, patch, result, persisted)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _writer_sync_response(
+    changed: bool,
+    patch: PatchSet,
+    result: PatchResult,
+    document: WriterDocument,
+) -> dict:
+    return {
+        'success': result.success,
+        'changed': changed,
+        'feishu_synced': result.success,
+        'patch_set': patch.model_dump(),
+        'patch_result': result.model_dump(),
+        'persisted_document': document.model_dump(),
+    }
+
+
 @router.post('/api/plugin/driver', response_model=DriverResponse, summary='Evaluate plugin step result')
 async def plugin_driver(req: DriverRequest) -> DriverResponse:
     """DriverAgent evaluation endpoint.
@@ -51,6 +126,8 @@ async def plugin_driver(req: DriverRequest) -> DriverResponse:
     the ChatAgent as a synthetic user turn.  The ChatAgent then decides autonomously
     whether to advance, retry, rewind, or complete the plugin.
     """
+    from lazymind.chat.plugin.driver_agent import DriverEvaluationError, evaluate_step
+
     try:
         result = evaluate_step(
             plugin_id=req.plugin_id,
@@ -132,6 +209,7 @@ async def list_plugins(
 ) -> Dict[str, Any]:
     """Return summary information for all loaded plugins with i18n labels if Accept-Language is set."""
     lang = _parse_best_lang(accept_language)
+    plugin_loader.ensure_loaded()
     if lang:
         return {'plugins': [plugin_loader.get_plugin_with_i18n(pid, lang) for pid in plugin_loader._registry]}
     return {'plugins': plugin_loader.list_plugins()}

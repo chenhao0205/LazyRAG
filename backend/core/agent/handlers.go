@@ -127,8 +127,15 @@ func CreateThread(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
 		return
 	}
-	if !hasThreadRequiredLLMConfig(requestPayload) {
-		common.ReplyErr(w, "请先配置 llm 和 evo_llm 模型后再创建任务", http.StatusUnprocessableEntity)
+	if issues := threadModelConfigIssues(requestPayload); len(issues) > 0 {
+		common.ReplyAppErr(w, common.NewAppError(
+			http.StatusUnprocessableEntity,
+			threadModelNotConfiguredCode,
+			"请先完成任务所需模型配置",
+		).WithDetail(map[string]any{
+			"reason": "model_not_configured",
+			"issues": issues,
+		}))
 		return
 	}
 
@@ -145,6 +152,10 @@ func CreateThread(w http.ResponseWriter, r *http.Request) {
 	headers := forwardedUpstreamHeaders(r)
 	upstreamPayload := buildEvoThreadCreatePayload(requestPayload)
 	if err := newEvoClient(headers).CreateThread(r.Context(), upstreamPayload, &upstreamRaw); err != nil {
+		if appErr, ok := evoCreateModelAppError(err); ok {
+			common.ReplyAppErr(w, appErr)
+			return
+		}
 		common.ReplyErrWithData(w, "create upstream thread failed", map[string]any{"detail": err.Error()}, evoProxyStatusCode(err))
 		return
 	}
@@ -507,9 +518,20 @@ func postThreadAction(w http.ResponseWriter, r *http.Request, action string) {
 			return
 		}
 		commandPayload := map[string]any{}
-		for _, key := range []string{"command_id", "until_step"} {
+		keys := []string{"command_id", "until_step"}
+		if action == "retry" {
+			keys = []string{"command_id", "stage"}
+		}
+		for _, key := range keys {
 			if value, ok := payload[key]; ok {
 				commandPayload[key] = value
+			}
+		}
+		if action == "retry" {
+			if _, hasStage := commandPayload["stage"]; !hasStage {
+				if value, ok := payload["until_step"]; ok {
+					commandPayload["stage"] = value
+				}
 			}
 		}
 		proxy, statusCode, err = newEvoClient(forwardedUpstreamHeaders(r)).PostCommand(r.Context(), threadID, action, commandPayload)

@@ -1,5 +1,6 @@
 import { Flex, Spin, Tooltip } from "antd";
 import {
+  BulbOutlined,
   CommentOutlined,
   DownOutlined,
   UpOutlined,
@@ -18,11 +19,20 @@ import { getCiteMessages } from "../utils/citeMessage";
 const ThinkIcon = new URL("../../../assets/images/think.png", import.meta.url)
   .href;
 
+const INTENT_FIELD_LABELS: Record<string, string> = {
+  goal: "chat.intentGoal",
+  deliverable: "chat.intentDeliverable",
+  execution_mode: "chat.intentExecutionMode",
+  constraints: "chat.intentConstraints",
+  corrections: "chat.intentCorrections",
+  emphasized_points: "chat.intentEmphasizedPoints",
+};
+
 interface ChatMessageContentProps {
   item: any;
   uniqueKey?: string;
-  isThinkingCollapsed: (key: string) => boolean;
-  onToggleThinkingCollapse: (key: string) => void;
+  isThinkingCollapsed: (key: string, defaultCollapsed?: boolean) => boolean;
+  onToggleThinkingCollapse: (key: string, currentCollapsed?: boolean) => void;
 }
 
 export default function ChatMessageContent({
@@ -33,15 +43,42 @@ export default function ChatMessageContent({
 }: ChatMessageContentProps) {
   const { t } = useTranslation();
   const thinkingKey = uniqueKey || item.history_id || item.id || "default";
-  const isCollapsed = isThinkingCollapsed(thinkingKey);
   const citeMessageList =
     item.role === RoleTypes.USER ? getCiteMessages(item) : [];
   const isStreaming =
     item.finish_reason !==
     ChatConversationsResponseFinishReasonEnum.FinishReasonStop;
+  const isCollapsed = isThinkingCollapsed(thinkingKey, !isStreaming);
+  const conversationIntent =
+    item.intent_updated?.scope === "conversation"
+      ? item.intent_updated.intent_context
+      : null;
+  const intentTooltip = conversationIntent ? (
+    <div className="chat-intent-tooltip">
+      {Object.entries(INTENT_FIELD_LABELS).map(([field, labelKey]) => {
+        const rawValue = conversationIntent[field];
+        const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+        const display = values.filter(Boolean).map(String).join("；");
+        return display ? (
+          <div key={field}>
+            <strong>{t(labelKey)}：</strong>
+            {display}
+          </div>
+        ) : null;
+      })}
+    </div>
+  ) : null;
 
   return (
     <Flex vertical>
+      {conversationIntent ? (
+        <Tooltip title={intentTooltip} placement="topLeft">
+          <span className="chat-intent-updated">
+            <BulbOutlined />
+            <span>{t("chat.intentUpdated")}</span>
+          </span>
+        </Tooltip>
+      ) : null}
       {item.images && <ChatImages images={item.images} />}
       {item.files && <ChatFiles files={item.files} />}
       {citeMessageList.length > 0 ? (
@@ -70,7 +107,7 @@ export default function ChatMessageContent({
         <>
           <div
             className="chat-think-status"
-            onClick={() => onToggleThinkingCollapse(thinkingKey)}
+            onClick={() => onToggleThinkingCollapse(thinkingKey, isCollapsed)}
           >
             <img src={ThinkIcon} className="chat-think-icon" alt="" />
             <span className="chat-think-title">

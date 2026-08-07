@@ -30,21 +30,10 @@ class RouterAlgorithmLedger:
         self._db_path = self._root / 'artifact_store.sqlite3'
         self._create_schema()
 
-    def claim_algorithm(
-        self,
-        *,
-        algorithm_id: str,
-        thread_id: str,
-        run_id: str,
-        candidate_ref: str,
-        router_admin_url: str,
-        service_url: str,
-        code_path: str,
-        instance_count: int,
-        config_hash: str,
-        register_request_hash: str,
-        cleanup_policy: str = 'thread_delete',
-    ) -> tuple[dict[str, Any], str | None]:
+    def claim_algorithm(self, *, algorithm_id: str, thread_id: str, run_id: str, candidate_ref: str,
+                        router_admin_url: str, service_url: str, code_path: str, instance_count: int, config_hash: str,
+                        register_request_hash: str, cleanup_policy: str = 'thread_delete'
+                        ) -> tuple[dict[str, Any], str | None]:
         _require_cleanup_policy(cleanup_policy)
         _require_owner(thread_id, run_id)
         now = time.time()
@@ -127,14 +116,8 @@ class RouterAlgorithmLedger:
                 None if previous is None else str(previous['expected_state'])
             )
 
-    def resolve_claim(
-        self,
-        algorithm_id: str,
-        thread_id: str,
-        register_request_hash: str,
-        claimed_at: float,
-        expected_state: str | None,
-    ) -> None:
+    def resolve_claim(self, algorithm_id: str, thread_id: str, register_request_hash: str, claimed_at: float,
+                      expected_state: str | None) -> None:
         with self._transaction() as conn:
             where = """
                 algorithm_id = ? AND thread_id = ?
@@ -196,12 +179,7 @@ class RouterAlgorithmLedger:
             )
             return _row_dict(self._row(conn, algorithm_id)), previous_state
 
-    def resolve_delete(
-        self,
-        algorithm_id: str,
-        claimed_at: float,
-        expected_state: str | None,
-    ) -> None:
+    def resolve_delete(self, algorithm_id: str, claimed_at: float, expected_state: str | None) -> None:
         with self._transaction() as conn:
             params = (algorithm_id, claimed_at)
             if expected_state is None:
@@ -272,14 +250,8 @@ class RouterAlgorithmLedger:
             if changed != 1:
                 raise RouterLedgerError(f'algorithm management is no longer current: {algorithm_id}')
 
-    def list_algorithms(
-        self,
-        *,
-        thread_id: str = '',
-        algorithm_id: str = '',
-        expected_state: str = '',
-        published: bool | None = None,
-    ) -> list[dict[str, Any]]:
+    def list_algorithms(self, *, thread_id: str = '', algorithm_id: str = '', expected_state: str = '',
+                        published: bool | None = None) -> list[dict[str, Any]]:
         query = 'SELECT * FROM evo_router_algorithms'
         clauses: list[str] = []
         params: list[str] = []
@@ -346,15 +318,8 @@ class RouterAlgorithmLedger:
                 (_json(status or {}), time.time(), time.time(), algorithm_id),
             )
 
-    def record_ab_strategy(
-        self,
-        *,
-        thread_id: str,
-        candidate_ref: str,
-        previous_strategy: Mapping[str, Any] | None,
-        next_strategy: Mapping[str, Any] | None,
-        reason: str,
-    ) -> None:
+    def record_ab_strategy(self, *, thread_id: str, candidate_ref: str, previous_strategy: Mapping[str, Any] | None,
+                           next_strategy: Mapping[str, Any] | None, reason: str) -> None:
         with self._transaction() as conn:
             conn.execute(
                 """

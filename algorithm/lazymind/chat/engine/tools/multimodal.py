@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import lazyllm
 from lazyllm import AutoModel
@@ -24,6 +26,31 @@ from lazymind.chat.engine.tools.infra.video_generation_support import (
     run_video_model,
     run_video_to_gif,
 )
+from lazymind.common.ffmpeg_deps import resolve_ffmpeg_binaries
+
+
+def _coerce_url_list(urls: Optional[Union[str, List[str]]]) -> Optional[List[str]]:
+    """Normalize tool urls so stringified JSON arrays from the LLM still validate.
+
+    Models sometimes emit urls as a JSON-encoded string (e.g. '["/path/a.jpg"]')
+    instead of a real array; pydantic then rejects Optional[List[str]].
+    """
+    if urls is None:
+        return None
+    if isinstance(urls, list):
+        return [str(item).strip() for item in urls if str(item or '').strip()] or None
+    text = str(urls).strip()
+    if not text:
+        return None
+    if text.startswith('['):
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item or '').strip()] or None
+    return [text]
+
 
 _VISION_EXTRACT_DEFAULT_INSTRUCTION = (
     'Describe the image in plain text. Include visible text, objects, charts, and any '
@@ -56,6 +83,12 @@ def vision_extractor(url: str, instruction: Optional[str] = None) -> Dict[str, A
     raw = str(url or '').strip()
     if not raw:
         return tool_error('vision_extractor', 'url is required')
+    if Path(raw.split('?', 1)[0]).suffix.lower() == '.pdf':
+        return tool_error(
+            'vision_extractor',
+            'vision_extractor only supports image files; use kb_tmp_search to read PDF content',
+            error_type='UnsupportedFileType',
+        )
 
     local_path = resolve_tool_image_path(raw)
     if not local_path:
@@ -100,6 +133,8 @@ def image_generator(
     Returns:
         On success: ``success``, ``prompt``, ``local_path``, optional
         ``image_url`` / ``image_markdown``, and ``images`` (list per file).
+        Copy ``image_markdown`` verbatim when answering; never rewrite signed
+        ``/static-files/`` paths or expose bare local filesystem paths.
     """
     return run_image_model(
         'image_generator',
@@ -130,7 +165,8 @@ def image_editor(
         batch_size: Number of variants to generate (default 1).
 
     Returns:
-        Same shape as ``image_generator``.
+        Same shape and rendering contract as ``image_generator``; copy
+        ``image_markdown`` verbatim when it is present.
     """
     source_files = _resolve_source_image_paths(urls)
     return run_image_model(
@@ -144,7 +180,7 @@ def image_editor(
 
 def video_generator(
     prompt: str,
-    urls: Optional[List[str]] = None,
+    urls: Optional[Union[str, List[str]]] = None,
     resolution: str = _DEFAULT_VIDEO_RESOLUTION,
     duration: int = _DEFAULT_VIDEO_DURATION,
     ratio: str = _DEFAULT_VIDEO_RATIO,
@@ -163,7 +199,10 @@ def video_generator(
 
     Args:
         prompt: Natural-language description of the video to generate.
-        urls: Optional first-frame / reference image paths or signed static URLs.
+        urls: Optional first-frame / reference image path(s) or signed static
+            URLs. Prefer a JSON array of strings; a single path string is also
+            accepted. Frames smaller than Ark's 300px minimum are auto-upscaled
+            before upload.
         resolution: Output resolution enum, e.g. ``480p`` / ``720p`` / ``1080p``.
         duration: Video length in seconds.
         ratio: Aspect ratio, e.g. ``16:9``.
@@ -175,7 +214,8 @@ def video_generator(
         ``video_url`` if markdown is absent); do not invent or rewrite
         ``/static-files/`` paths.
     """
-    source_files = _resolve_source_image_paths(urls) if urls else None
+    normalized_urls = _coerce_url_list(urls)
+    source_files = _resolve_source_image_paths(normalized_urls) if normalized_urls else None
     return run_video_model(
         'video_generator',
         prompt,
@@ -219,6 +259,21 @@ def video_to_gif(
     raw = str(url or '').strip()
     if not raw:
         return tool_error('video_to_gif', 'url is required')
+    ffmpeg_path, ffprobe_path = resolve_ffmpeg_binaries()
+    if not ffmpeg_path or not ffprobe_path:
+        return tool_error(
+            'video_to_gif',
+            (
+                'FFMPEG_DEPENDENCY_MISSING: Animated GIF output requires FFmpeg. '
+                'The generated video remains available.'
+            ),
+            error_type='MissingDependency',
+            meta={
+                'dependency': 'ffmpeg',
+                'settings_path': '/model-providers/tools#ffmpeg-dependency',
+                'fallback': 'video',
+            },
+        )
     local_path = resolve_tool_video_path(raw)
     if not local_path:
         raise ValueError(f'video file not found: {raw}')

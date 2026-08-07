@@ -445,6 +445,44 @@ type exportConversationFilePathParams struct {
 	FileID string `path:"file_id"`
 }
 
+type conversationPathParams struct {
+	Name string `path:"name"`
+}
+
+type channelCommandOpenAPI struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type channelCommandRegistryOpenAPI struct {
+	SchemaVersion  string                  `json:"schema_version"`
+	Commands       []channelCommandOpenAPI `json:"commands"`
+	SelectionRules []string                `json:"selection_rules"`
+	OutputSchema   map[string]any          `json:"output_schema"`
+}
+
+type channelIntentOpenAPIRequest struct {
+	Provider        string                        `json:"provider"`
+	Message         string                        `json:"message"`
+	State           map[string]any                `json:"state"`
+	CommandRegistry channelCommandRegistryOpenAPI `json:"command_registry"`
+}
+
+type channelIntentOpenAPIResponse struct {
+	SchemaVersion string         `json:"schema_version"`
+	Command       string         `json:"command"`
+	Parameters    map[string]any `json:"parameters"`
+}
+
+type conversationSearchConfigOpenAPIRequest struct {
+	DatasetIDs []string `json:"dataset_ids"`
+}
+
+type conversationSearchConfigOpenAPIResponse struct {
+	ConversationID string         `json:"conversation_id"`
+	SearchConfig   map[string]any `json:"search_config"`
+}
+
 type toolPathParams struct {
 	ToolName string `path:"tool_name"`
 }
@@ -567,8 +605,9 @@ type promptItemOpenAPIResponse struct {
 }
 
 type promptFacetOpenAPIResponse struct {
-	Scopes     map[string]int64 `json:"scopes"`
-	Categories map[string]int64 `json:"categories"`
+	Scopes        map[string]int64 `json:"scopes"`
+	Categories    map[string]int64 `json:"categories"`
+	CategoryTotal int64            `json:"category_total"`
 }
 
 type promptListOpenAPIResponse struct {
@@ -609,13 +648,6 @@ type agentThreadTracePathParams struct {
 type agentThreadTraceCompareQueryParams struct {
 	A string `query:"a" required:"true"`
 	B string `query:"b" required:"true"`
-}
-
-type agentThreadEvalBadCasesQueryParams struct {
-	PageSize    int32  `query:"page_size"`
-	PageToken   string `query:"page_token"`
-	Keyword     string `query:"keyword"`
-	FailureType string `query:"failure_type"`
 }
 
 type agentThreadABTestCaseDetailsQueryParams struct {
@@ -806,6 +838,7 @@ type datasetQueryParams struct {
 	OrderBy   string   `query:"order_by"`
 	Keyword   string   `query:"keyword"`
 	Tags      []string `query:"tags"`
+	Source    string   `query:"source" enum:"manual,cloud" desc:"Filter datasets by creation source."`
 }
 
 type createDatasetQueryParams struct {
@@ -897,7 +930,7 @@ type listModelProviderGroupModelsOpenAPIItem struct {
 	GroupName                string  `json:"group_name"`
 	BaseURL                  string  `json:"base_url"`
 	IsDefault                bool    `json:"is_default"`
-	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum catalog LLM or VLM input context window, for example 128K or 1M; null for other, custom, or unknown models" nullable:"true"`
+	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum catalog LLM, VLM, or embedding-model input context window, for example 512, 128K, or 1M; null for other, custom, or unknown models" nullable:"true"`
 }
 
 type listModelProviderGroupModelsOpenAPIResponse struct {
@@ -917,7 +950,7 @@ type selectedModelOpenAPIItem struct {
 	ProviderName             string  `json:"provider_name"`
 	GroupName                string  `json:"group_name"`
 	BaseURL                  string  `json:"base_url"`
-	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum selected catalog LLM or VLM input context window, for example 128K or 1M; null for other, custom, or unknown models" nullable:"true"`
+	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum selected catalog LLM, VLM, or embedding-model input context window, for example 512, 128K, or 1M; null for other, custom, or unknown models" nullable:"true"`
 }
 
 type listSelectedModelsOpenAPIResponse struct {
@@ -1358,10 +1391,10 @@ type skillSourceOpenAPIRequest struct {
 }
 
 type skillCreateManagedOpenAPIRequest struct {
-	Name        string                    `json:"name"`
-	Category    string                    `json:"category"`
+	Name        string                    `json:"name,omitempty" desc:"Legacy inline-create field. ZIP and URL imports derive name from SKILL.md frontmatter."`
+	Category    string                    `json:"category,omitempty" desc:"Legacy inline-create field. ZIP and URL imports use External."`
 	Source      skillSourceOpenAPIRequest `json:"source"`
-	Description string                    `json:"description,omitempty"`
+	Description string                    `json:"description,omitempty" desc:"Legacy inline-create field. ZIP and URL imports derive description from SKILL.md frontmatter."`
 	Tags        []string                  `json:"tags,omitempty"`
 	AutoEvo     *bool                     `json:"auto_evo,omitempty"`
 	IsEnabled   *bool                     `json:"is_enabled,omitempty"`
@@ -1381,6 +1414,8 @@ type skillDraftSummaryOpenAPIResponse struct {
 	HasUncommittedDraft bool   `json:"has_uncommitted_draft"`
 	TaskID              string `json:"task_id,omitempty"`
 	Version             int64  `json:"version"`
+	Type                string `json:"type,omitempty" desc:"Draft type. create identifies a Skill that has no formal revision yet."`
+	Status              string `json:"status,omitempty"`
 }
 
 type skillListItemOpenAPIResponse struct {
@@ -1650,6 +1685,7 @@ type remoteFSListQueryParams struct {
 	UserID string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
 	Path   string `query:"path" required:"true" desc:"RemoteFS path. Use skills for categories, skills/<category> for package list, or skills/<category>/<skill_name>[/rel_path] for package content."`
 	TaskID string `query:"task_id,omitempty" desc:"Optional for skills root/category list; required when path enters a package. Prefix review_ reads/writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
+	Mode   string `query:"mode" enum:"auto,manual" desc:"Conversation mode. auto marks a newly created Skill draft for idle-time auto commit."`
 }
 
 type remoteFSQueryParams struct {
@@ -1657,11 +1693,13 @@ type remoteFSQueryParams struct {
 	Path     string `query:"path" required:"true" desc:"RemoteFS package path: skills/<category>/<skill_name>[/rel_path]."`
 	TaskID   string `query:"task_id" required:"true" desc:"Required package content task id. Prefix review_ reads/writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
 	Encoding string `query:"encoding,omitempty" enum:"raw,base64" desc:"Optional content encoding for GET /remote-fs/content."`
+	Mode     string `query:"mode" enum:"auto,manual" desc:"Conversation mode."`
 }
 
 type remoteFSTaskQueryParams struct {
 	UserID string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
 	TaskID string `query:"task_id" required:"true" desc:"Required mutation task id. Prefix review_ writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
+	Mode   string `query:"mode" enum:"auto,manual" desc:"Conversation mode. auto marks a newly created Skill draft for idle-time auto commit."`
 }
 
 type remoteFSUserQueryParams struct {
@@ -1746,7 +1784,8 @@ type marketInstallOpenAPIResponse struct {
 
 type marketPublishOpenAPIRequest struct {
 	Name     string                    `json:"name"`
-	Category string                    `json:"category"`
+	Tags     []string                  `json:"tags" desc:"Marketplace discovery tags."`
+	Category string                    `json:"category,omitempty" desc:"Deprecated compatibility field; converted to one marketplace tag when tags is empty."`
 	Source   skillSourceOpenAPIRequest `json:"source"`
 }
 
@@ -1757,7 +1796,8 @@ type marketPublishOpenAPIResponse struct {
 
 type marketEditOpenAPIRequest struct {
 	Name        *string                    `json:"name,omitempty"`
-	Category    *string                    `json:"category,omitempty"`
+	Tags        []string                   `json:"tags,omitempty" desc:"Marketplace discovery tags."`
+	Category    *string                    `json:"category,omitempty" desc:"Deprecated compatibility field; converted to one marketplace tag when tags is omitted."`
 	Description *string                    `json:"description,omitempty"`
 	Source      *skillSourceOpenAPIRequest `json:"source,omitempty"`
 	VersionNote *string                    `json:"version_note,omitempty"`
@@ -1768,6 +1808,7 @@ type marketItemOpenAPIResponse struct {
 	MarketItemID     string                      `json:"market_item_id"`
 	SourceSkillID    string                      `json:"source_skill_id,omitempty"`
 	Status           string                      `json:"status,omitempty"`
+	Tags             []string                    `json:"tags"`
 	Installed        bool                        `json:"installed,omitempty"`
 	InstalledSkillID string                      `json:"installed_skill_id,omitempty"`
 	Icon             string                      `json:"icon,omitempty"`
@@ -1784,6 +1825,12 @@ type marketListOpenAPIResponse struct {
 	Page     int32                       `json:"page"`
 	PageSize int32                       `json:"page_size"`
 	Total    int32                       `json:"total"`
+}
+
+type marketDeleteOpenAPIResponse struct {
+	Deleted       bool   `json:"deleted"`
+	MarketItemID  string `json:"market_item_id"`
+	SourceSkillID string `json:"source_skill_id"`
 }
 
 type skillDeleteOpenAPIResponse struct {
@@ -1952,13 +1999,15 @@ type personalizationSettingOpenAPIResponse struct {
 }
 
 type userUIPreferencesPatchOpenAPIRequest struct {
-	ChatPreferenceNoticeDismissed *bool `json:"chat_preference_notice_dismissed,omitempty"`
-	DeveloperModeActive           *bool `json:"developer_mode_active,omitempty"`
+	ChatPreferenceNoticeDismissed *bool   `json:"chat_preference_notice_dismissed,omitempty"`
+	DeveloperModeActive           *bool   `json:"developer_mode_active,omitempty"`
+	AcceptedUserAgreementVersion  *string `json:"accepted_user_agreement_version,omitempty"`
 }
 
 type userUIPreferencesOpenAPIResponse struct {
 	ChatPreferenceNoticeDismissed bool   `json:"chat_preference_notice_dismissed"`
 	DeveloperModeActive           bool   `json:"developer_mode_active"`
+	AcceptedUserAgreementVersion  string `json:"accepted_user_agreement_version"`
 	UserPreferenceConfigured      bool   `json:"user_preference_configured"`
 	UpdatedAt                     string `json:"updated_at"`
 }
@@ -2026,6 +2075,18 @@ type pluginRepairPreviewOpenAPIRequest struct {
 	Mode   string `json:"mode"`
 }
 
+type writerDocumentSyncPathParams struct {
+	SessionID string `path:"session_id"`
+	SlotID    string `path:"slot_id"`
+	ListIndex int    `path:"list_index"`
+}
+
+type writerDocumentSyncOpenAPIRequest struct {
+	BaseRevision    int            `json:"base_revision"`
+	SourceDocument  map[string]any `json:"source_document"`
+	RevisedDocument map[string]any `json:"revised_document"`
+}
+
 func registeredCoreOperations() []openAPIOperation {
 	jsonBodyOf := func(v any, required bool) *openAPIBody {
 		return &openAPIBody{Required: required, ContentType: "application/json", Schema: schemaSource{Type: v}}
@@ -2081,6 +2142,15 @@ func registeredCoreOperations() []openAPIOperation {
 		{Method: "POST", Path: "/plugin-drafts/{draft_id}:confirm-workflow", Summary: "Confirm Skill workflow candidate", Tags: []string{"plugin"}, PathParams: pluginDraftPathParams{}, RequestBody: jsonBodyOf(pluginWorkflowConfirmOpenAPIRequest{}, true), Responses: map[int]openAPIResponse{200: evoJSONResp("Confirmation result")}},
 		{Method: "POST", Path: "/plugin-drafts/{draft_id}:repair-preview", Summary: "Preview Plugin repair", Tags: []string{"plugin"}, PathParams: pluginDraftPathParams{}, RequestBody: jsonBodyOf(pluginRepairPreviewOpenAPIRequest{}, true), Responses: map[int]openAPIResponse{200: evoJSONResp("Repair preview")}},
 		{Method: "GET", Path: "/plugin-drafts/{draft_id}/repair-runs/{repair_id}", Summary: "Get Plugin repair run", Tags: []string{"plugin"}, PathParams: pluginRepairRunPathParams{}, Responses: map[int]openAPIResponse{200: evoJSONResp("Repair run")}},
+		{
+			Method:      "POST",
+			Path:        "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}:sync-writer-document",
+			Summary:     "Sync an edited WriterDocument to Feishu",
+			Tags:        []string{"plugin", "writer"},
+			PathParams:  writerDocumentSyncPathParams{},
+			RequestBody: jsonBodyOf(writerDocumentSyncOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: evoJSONResp("WriterDocument sync result")},
+		},
 		{
 			Method:      "GET",
 			Path:        "/datasets",
@@ -2659,6 +2729,14 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Skill organize task accepted", skillOrganizeOpenAPIResponse{})},
 		},
 		{
+			Method:      "GET",
+			Path:        "/skill-organize/tasks",
+			Summary:     "List current user's Skill organize tasks",
+			Tags:        []string{"skills"},
+			QueryParams: skillReviewTaskListQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Skill organize task list", skillReviewTaskListOpenAPIResponse{})},
+		},
+		{
 			Method:      "POST",
 			Path:        "/skills",
 			Summary:     "Create directory skill",
@@ -3051,6 +3129,13 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Market skill list", marketListOpenAPIResponse{})},
 		},
 		{
+			Method:    "GET",
+			Path:      "/skill-market/tags",
+			Summary:   "List published market skill tags",
+			Tags:      []string{"skill-market"},
+			Responses: map[int]openAPIResponse{200: resp("Market skill tag list", skillTagsOpenAPIResponse{})},
+		},
+		{
 			Method:     "GET",
 			Path:       "/skill-market/{market_item_id}",
 			Summary:    "Get market skill details",
@@ -3092,6 +3177,14 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Edited market skill", marketItemOpenAPIResponse{})},
 		},
 		{
+			Method:     "DELETE",
+			Path:       "/admin/skill-market/{market_item_id}",
+			Summary:    "Permanently delete market skill item",
+			Tags:       []string{"skill-market"},
+			PathParams: marketItemPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Deleted market skill", marketDeleteOpenAPIResponse{})},
+		},
+		{
 			Method:     "POST",
 			Path:       "/admin/skill-market/{market_item_id}:offline",
 			Summary:    "Unpublish market skill item",
@@ -3115,6 +3208,14 @@ func registeredCoreOperations() []openAPIOperation {
 			PathParams:  marketItemPathParams{},
 			RequestBody: jsonBodyOf(marketEditOpenAPIRequest{}, true),
 			Responses:   map[int]openAPIResponse{200: resp("Edited market skill", marketItemOpenAPIResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/skill-market/admin/items/{market_item_id}",
+			Summary:    "Permanently delete market skill item",
+			Tags:       []string{"skill-market"},
+			PathParams: marketItemPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Deleted market skill", marketDeleteOpenAPIResponse{})},
 		},
 		{
 			Method:     "POST",
@@ -3262,7 +3363,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/models",
 			Summary:     "List current user's models by model_type",
-			Description: "Requires query model_type (e.g. llm or vlm). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Each item includes nullable max_input_tokens, the catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M; other, custom, or unknown models return null. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
+			Description: "Requires query model_type (e.g. llm, vlm, or embed). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Each item includes nullable max_input_tokens, the catalog model's maximum input context window expressed as a string such as 512, 128K, or 1M; custom or unknown models return null. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
 			Tags:        []string{"model_providers"},
 			QueryParams: listUserModelsByModelTypeQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Models list", listModelProviderGroupModelsOpenAPIResponse{})},
@@ -3271,7 +3372,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/selected_models",
 			Summary:     "Get selected models by model_type",
-			Description: "Returns the current user's selected model for each model_type. Each selection includes nullable max_input_tokens, the selected catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M; other, custom, or unknown models return null.",
+			Description: "Returns the current user's selected model for each model_type. Each selection includes nullable max_input_tokens, the selected catalog model's maximum input context window expressed as a string such as 512, 128K, or 1M; custom or unknown models return null.",
 			Tags:        []string{"model_providers"},
 			Responses:   map[int]openAPIResponse{200: resp("Selected models", listSelectedModelsOpenAPIResponse{})},
 		},
@@ -3326,7 +3427,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/{model_provider_id}/groups/{group_id}/models",
 			Summary:     "List models under a connection group",
-			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models) and nullable max_input_tokens, the catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M. Other, custom, or unknown models return null.",
+			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models) and nullable max_input_tokens, the catalog model's maximum input context window expressed as a string such as 512, 128K, or 1M. Custom or unknown models return null.",
 			Tags:        []string{"model_providers"},
 			PathParams:  modelProviderGroupByIDPathParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Group models list", listModelProviderGroupModelsOpenAPIResponse{})},
@@ -3688,6 +3789,25 @@ func registeredCoreOperations() []openAPIOperation {
 			PathParams:  mcpServerPathParams{},
 			RequestBody: jsonBodyOf(mcp.UpdateToolsRequest{}, true),
 			Responses:   map[int]openAPIResponse{200: resp("Updated MCP server tools", mcp.ServerResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/channel-intents:classify",
+			Summary:     "Classify a channel message",
+			Description: "Classifies an external-channel message against the caller-provided command registry and parameter schemas.",
+			Tags:        []string{"channels"},
+			RequestBody: jsonBodyOf(channelIntentOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Classified channel command", channelIntentOpenAPIResponse{})},
+		},
+		{
+			Method:      "PATCH",
+			Path:        "/conversations/{name}:search-config",
+			Summary:     "Update conversation knowledge bases",
+			Description: "Replaces the knowledge bases on an existing conversation while preserving its other search settings.",
+			Tags:        []string{"conversations"},
+			PathParams:  conversationPathParams{},
+			RequestBody: jsonBodyOf(conversationSearchConfigOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Updated conversation search config", conversationSearchConfigOpenAPIResponse{})},
 		},
 		{
 			Method:      "POST",

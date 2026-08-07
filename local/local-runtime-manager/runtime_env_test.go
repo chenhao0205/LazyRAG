@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestServiceRuntimeEnvDisablesPythonBytecodeWrites(t *testing.T) {
 	repo := t.TempDir()
@@ -12,6 +15,16 @@ func TestServiceRuntimeEnvDisablesPythonBytecodeWrites(t *testing.T) {
 
 	assertEnvContains(t, serviceRuntimeEnv(paths), "PYTHONDONTWRITEBYTECODE=1")
 	assertEnvContains(t, runtimeCommandEnv(paths, cfg), "PYTHONDONTWRITEBYTECODE=1")
+	assertEnvContains(
+		t,
+		localRuntimeEnv(cfg),
+		localProxyChannelHostPortEnvVar+"="+strconv.Itoa(cfg.ChannelGateway.Port),
+	)
+	assertEnvContains(
+		t,
+		runtimeCommandEnv(paths, cfg),
+		localProxyChannelHostPortEnvVar+"="+strconv.Itoa(cfg.ChannelGateway.Port),
+	)
 }
 
 func TestRuntimeEnvCarriesLocalAutoLoginLANFlag(t *testing.T) {
@@ -51,7 +64,7 @@ func TestInstallerWarmupUsesPerProcessCapabilities(t *testing.T) {
 	assertEnvContains(t, authEnv, "HF_HUB_OFFLINE=1")
 	assertEnvContains(t, authEnv, "TRANSFORMERS_OFFLINE=1")
 	assertEnvContains(t, authEnv, "PIP_NO_INDEX=1")
-	assertEnvContains(t, authEnv, "PYTHONDONTWRITEBYTECODE=0")
+	assertEnvContains(t, authEnv, "PYTHONDONTWRITEBYTECODE=1")
 	assertEnvContains(t, authEnv, "LAZYMIND_CLOUD_AUTH_HEALTH_CHECK_ENABLED=false")
 
 	coreEnv := runtimeProcessEnvironment(base, cfg, plan, coreProcessName)
@@ -62,7 +75,7 @@ func TestInstallerWarmupUsesPerProcessCapabilities(t *testing.T) {
 	chatEnv := runtimeProcessEnvironment(base, cfg, plan, chatProcessName)
 	assertEnvContains(t, chatEnv, "LAZYMIND_BACKGROUND_JOBS_ENABLED=false")
 	assertEnvContains(t, chatEnv, "LAZYMIND_ROUTER_CHILD_PROCESSES_ENABLED=false")
-	assertEnvContains(t, chatEnv, "PYTHONDONTWRITEBYTECODE=0")
+	assertEnvContains(t, chatEnv, "PYTHONDONTWRITEBYTECODE=1")
 }
 
 func TestMaintenanceModeIsAcceptedOnlyFromTypedOptions(t *testing.T) {

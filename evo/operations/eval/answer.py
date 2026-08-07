@@ -11,6 +11,7 @@ from evo.operations.route.chat_router import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_WAIT_MAX_SECONDS,
     RouterChatRequest,
+    async_call_router_chat,
     call_router_chat,
 )
 
@@ -20,6 +21,20 @@ DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS = 60.0
 
 
 def answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> dict[str, Any]:
+    failure, kb_id = _preflight(case, target_config)
+    return failure if failure is not None else call_chat_answer(case, target_config, kb_id)
+
+
+async def async_answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> dict[str, Any]:
+    failure, kb_id = _preflight(case, target_config)
+    return failure if failure is not None else await async_call_chat_answer(
+        case,
+        target_config,
+        kb_id,
+    )
+
+
+def _preflight(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
     kb_id = case_kb_id(case, target_config)
     target = {
         'router_chat_url': str(target_config.get('router_chat_url') or ''),
@@ -28,19 +43,39 @@ def answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> di
         'kb_id': kb_id,
     }
     if not kb_id:
-        return failed_rag_answer(case, {}, target, 'dataset_contract_error',
-                                 'case routing metadata missing kb_id')
+        return failed_rag_answer(
+            case,
+            {},
+            target,
+            'dataset_contract_error',
+            'case routing metadata missing kb_id',
+        ), kb_id
     if not _has_role(target_config.get('llm_config'), 'llm'):
-        return failed_rag_answer(case, {}, target, 'chat_config_error',
-                                 'eval.target_config.llm_config.llm missing; '
-                                 'eval must be launched through core model-config injection')
+        return failed_rag_answer(
+            case,
+            {},
+            target,
+            'chat_config_error',
+            'eval.target_config.llm_config.llm missing; '
+            'eval must be launched through core model-config injection',
+        ), kb_id
     if not target['router_admin_url']:
-        return failed_rag_answer(case, {}, target, 'chat_config_error',
-                                 'eval.target_config.router_admin_url missing')
+        return failed_rag_answer(
+            case,
+            {},
+            target,
+            'chat_config_error',
+            'eval.target_config.router_admin_url missing',
+        ), kb_id
     if not target['algorithm_id']:
-        return failed_rag_answer(case, {}, target, 'chat_config_error',
-                                 'eval.target_config.algorithm_id missing')
-    return call_chat_answer(case, target_config, kb_id)
+        return failed_rag_answer(
+            case,
+            {},
+            target,
+            'chat_config_error',
+            'eval.target_config.algorithm_id missing',
+        ), kb_id
+    return None, kb_id
 
 
 def case_kb_id(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> str:
@@ -74,62 +109,78 @@ def _kb_ids_text(value: object) -> str:
 
 def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> dict[str, Any]:
     try:
-        kb_ids = tuple(dict.fromkeys(item.strip() for item in str(kb_id or '').split(';') if item.strip()))
-        session_id = str(target_config.get('session_id') or uuid4().hex).strip().lower()
-        session_id = session_id if HEX.fullmatch(session_id) else uuid4().hex
-        target = _target(target_config, kb_ids, session_id)
-        if not kb_ids:
-            return failed_rag_answer(case, {}, target, 'dataset_contract_error',
-                                     'case routing metadata missing kb_id')
-
-        result = call_router_chat(RouterChatRequest(
-            router_chat_url=target['router_chat_url'],
-            router_admin_url=target['router_admin_url'],
-            algorithm_id=target['algorithm_id'],
-            query=str(case.get('question') or ''),
-            kb_ids=kb_ids,
-            trace_id=session_id,
-            conversation_id=target['conversation_id'],
-            user_id=target['user_id'],
-            llm_config=target_config.get('llm_config') if isinstance(target_config.get('llm_config'), Mapping) else None,
-            connect_timeout_seconds=_number(target_config.get('connect_timeout_seconds'), 5.0),
-            write_timeout_seconds=_number(target_config.get('write_timeout_seconds'), 60.0),
-            pool_timeout_seconds=_number(target_config.get('pool_timeout_seconds'), 5.0),
-            case_deadline_seconds=_number(
-                target_config.get('case_deadline_seconds') or os.getenv('LAZYMIND_EVO_CHAT_CASE_DEADLINE_SECONDS'),
-                DEFAULT_CASE_DEADLINE_SECONDS,
-            ),
-            first_frame_timeout_seconds=_number(
-                target_config.get('first_frame_timeout_seconds')
-                or os.getenv('LAZYMIND_EVO_CHAT_FIRST_FRAME_TIMEOUT_SECONDS'),
-                DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS,
-            ),
-            max_attempts=_configured_value(
-                target_config,
-                'chat_max_attempts',
-                'LAZYMIND_EVO_CHAT_MAX_ATTEMPTS',
-                DEFAULT_MAX_ATTEMPTS,
-            ),
-            retry_wait_max_seconds=_configured_value(
-                target_config,
-                'chat_retry_wait_max_seconds',
-                'LAZYMIND_EVO_CHAT_RETRY_WAIT_MAX_SECONDS',
-                DEFAULT_RETRY_WAIT_MAX_SECONDS,
-            ),
-        ))
+        result = call_router_chat(_chat_request(case, target_config, kb_id))
     except (TypeError, ValueError) as exc:
         target = _raw_target(target_config, kb_id)
         return failed_rag_answer(case, {}, target, 'chat_config_error', str(exc))
     return _with_case(case, result)
 
 
-def failed_rag_answer(
-    case: Mapping[str, Any],
-    stream: Mapping[str, Any],
-    target: Mapping[str, Any],
-    error_type: str,
-    message: str,
-) -> dict[str, Any]:
+async def async_call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str
+                                 ) -> dict[str, Any]:
+    try:
+        result = await async_call_router_chat(
+            _chat_request(case, target_config, kb_id)
+        )
+    except (TypeError, ValueError) as exc:
+        target = _raw_target(target_config, kb_id)
+        return failed_rag_answer(case, {}, target, 'chat_config_error', str(exc))
+    return _with_case(case, result)
+
+
+def _chat_request(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> RouterChatRequest:
+    kb_ids = tuple(dict.fromkeys(
+        item.strip()
+        for item in str(kb_id or '').split(';')
+        if item.strip()
+    ))
+    session_id = str(target_config.get('session_id') or uuid4().hex).strip().lower()
+    session_id = session_id if HEX.fullmatch(session_id) else uuid4().hex
+    target = _target(target_config, kb_ids, session_id)
+    if not kb_ids:
+        raise ValueError('case routing metadata missing kb_id')
+    llm_config = target_config.get('llm_config')
+    query = str(case.get('question') or '')
+    return RouterChatRequest(
+        router_chat_url=target['router_chat_url'],
+        router_admin_url=target['router_admin_url'],
+        algorithm_id=target['algorithm_id'],
+        query=query,
+        kb_ids=kb_ids,
+        trace_id=session_id,
+        conversation_id=target['conversation_id'],
+        user_id=target['user_id'],
+        llm_config=llm_config if isinstance(llm_config, Mapping) else None,
+        connect_timeout_seconds=_number(target_config.get('connect_timeout_seconds'), 5.0),
+        write_timeout_seconds=_number(target_config.get('write_timeout_seconds'), 60.0),
+        pool_timeout_seconds=_number(target_config.get('pool_timeout_seconds'), 5.0),
+        case_deadline_seconds=_number(
+            target_config.get('case_deadline_seconds')
+            or os.getenv('LAZYMIND_EVO_CHAT_CASE_DEADLINE_SECONDS'),
+            DEFAULT_CASE_DEADLINE_SECONDS,
+        ),
+        first_frame_timeout_seconds=_number(
+            target_config.get('first_frame_timeout_seconds')
+            or os.getenv('LAZYMIND_EVO_CHAT_FIRST_FRAME_TIMEOUT_SECONDS'),
+            DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS,
+        ),
+        max_attempts=_configured_value(
+            target_config,
+            'chat_max_attempts',
+            'LAZYMIND_EVO_CHAT_MAX_ATTEMPTS',
+            DEFAULT_MAX_ATTEMPTS,
+        ),
+        retry_wait_max_seconds=_configured_value(
+            target_config,
+            'chat_retry_wait_max_seconds',
+            'LAZYMIND_EVO_CHAT_RETRY_WAIT_MAX_SECONDS',
+            DEFAULT_RETRY_WAIT_MAX_SECONDS,
+        ),
+    )
+
+
+def failed_rag_answer(case: Mapping[str, Any], stream: Mapping[str, Any], target: Mapping[str, Any], error_type: str,
+                      message: str) -> dict[str, Any]:
     return _answer_base(case, stream, target) | {
         'status': 'failed',
         'chat_error': {'type': error_type, 'message': message},
@@ -143,6 +194,14 @@ def _with_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, 
     answer.update(dict(result))
     _align_evidence_refs(answer)
     answer['case_id'] = str(case.get('id') or answer.get('case_id') or '')
+    answer['case'] = dict(case)
+    answer['case_metadata'] = {
+        'kb_id': (
+            answer.get('target', {}).get('kb_id', '')
+            if isinstance(answer.get('target'), Mapping)
+            else ''
+        ),
+    }
     answer['question'] = str(case.get('question') or '')
     answer['evidence_status'] = _evidence_status(answer)
     return answer
@@ -182,6 +241,8 @@ def _raw_target(target_config: Mapping[str, Any], kb_id: str) -> dict[str, str]:
 def _answer_base(case: Mapping[str, Any], stream: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'case_id': str(case.get('id') or ''),
+        'case': dict(case),
+        'case_metadata': {'kb_id': target.get('kb_id', '')},
         'question': str(case.get('question') or ''),
         'answer': str(stream.get('answer') or ''),
         'tool_errors': [],

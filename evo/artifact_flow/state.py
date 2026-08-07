@@ -1,89 +1,199 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Literal, cast
 
-from evo.artifact_runtime.kernel.artifact import ArtifactKey, ArtifactRef
+from evo.artifact_runtime import (
+    ArtifactKey,
+    ArtifactRecord,
+    ArtifactRef,
+    ArtifactRetryRequest,
+    AttemptSnapshot,
+    CaseFailure,
+    CaseSnapshot,
+    OperationDefinitionSnapshot,
+    RecordedOperationEvent,
+    RunHistory,
+    RuntimeErrorInfo,
+    RuntimeProgress,
+    RuntimeSnapshot,
+)
 
 
-FlowStatus: TypeAlias = Literal['idle', 'paused', 'cancelled', 'failed']
-FLOW_STATUSES = ('idle', 'paused', 'cancelled', 'failed')
+FlowStatus = Literal[
+    'idle',
+    'running',
+    'pausing',
+    'paused',
+    'awaiting_approval',
+    'cancelling',
+    'cancelled',
+    'failed',
+    'completed',
+]
+
+StageStatus = Literal[
+    'pending',
+    'running',
+    'pausing',
+    'paused',
+    'awaiting_approval',
+    'cancelling',
+    'cancelled',
+    'failed',
+    'completed',
+]
 
 
 @dataclass(frozen=True)
-class Checkpoint:
-    step: str
-    root: ArtifactKey
-    ref: ArtifactRef
+class ArtifactUpdate:
+    target_ref: ArtifactRef
+    value: object
 
     def __post_init__(self) -> None:
-        _require_text(self.step, 'step')
-        if not isinstance(self.root, ArtifactKey):
-            raise TypeError('root must be ArtifactKey')
-        if not isinstance(self.ref, ArtifactRef):
-            raise TypeError('ref must be ArtifactRef')
-        if self.ref.key != self.root:
-            raise ValueError('checkpoint ref key must match root')
+        if not isinstance(self.target_ref, ArtifactRef):
+            raise TypeError('artifact update target_ref must be ArtifactRef')
 
 
 @dataclass(frozen=True)
-class CheckpointPolicy:
-    pause_after_steps: tuple[str, ...] = ('dataset', 'eval', 'analysis', 'repair')
+class StageProgress:
+    stage: str
+    result_key: ArtifactKey
+    result_ref: ArtifactRef | None = None
+    approval_key: ArtifactKey | None = None
+    approval_ref: ArtifactRef | None = None
+    status: StageStatus = 'pending'
+    operation_ids: tuple[str, ...] = ()
+    progress: RuntimeProgress = RuntimeProgress()
+    failures: tuple[CaseFailure, ...] = ()
+    error: RuntimeErrorInfo | None = None
 
     def __post_init__(self) -> None:
-        steps = self.pause_after_steps
-        if not isinstance(steps, tuple):
-            raise TypeError('pause_after_steps must be tuple')
-        for step in steps:
-            _require_text(step, 'step')
-        if len(set(steps)) != len(steps):
-            raise ValueError('pause_after_steps must be unique')
+        if not isinstance(self.stage, str) or not self.stage.strip():
+            raise ValueError('stage must be non-empty')
+        if not isinstance(self.result_key, ArtifactKey):
+            raise TypeError('result_key must be ArtifactKey')
+        if self.result_ref is not None and self.result_ref.key != self.result_key:
+            raise ValueError('result_ref must identify result_key')
+        if self.approval_key is not None and not isinstance(self.approval_key, ArtifactKey):
+            raise TypeError('approval_key must be ArtifactKey or None')
+        if self.approval_ref is not None and (
+            self.approval_key is None or self.approval_ref.key != self.approval_key
+        ):
+            raise ValueError('approval_ref must identify approval_key')
+        if self.status not in {
+            'pending', 'running', 'pausing', 'paused', 'awaiting_approval',
+            'cancelling', 'cancelled', 'failed', 'completed',
+        }:
+            raise ValueError(f'unknown stage status: {self.status}')
+        operation_ids = tuple(self.operation_ids)
+        if not all(isinstance(operation_id, str) and operation_id.strip() for operation_id in operation_ids):
+            raise TypeError('operation_ids must contain non-empty strings')
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ValueError('operation_ids must be unique')
+        if not isinstance(self.progress, RuntimeProgress):
+            raise TypeError('progress must be RuntimeProgress')
+        failures = tuple(self.failures)
+        if not all(isinstance(failure, CaseFailure) for failure in failures):
+            raise TypeError('failures must contain CaseFailure values')
+        if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
+            raise TypeError('error must be RuntimeErrorInfo or None')
+        object.__setattr__(self, 'operation_ids', operation_ids)
+        object.__setattr__(self, 'failures', failures)
+
+    @property
+    def completed(self) -> bool:
+        return self.status in {'awaiting_approval', 'completed'}
+
+    @property
+    def approved(self) -> bool:
+        return self.status == 'completed' and self.approval_key is not None and self.approval_ref is not None
 
 
 @dataclass(frozen=True)
-class FlowRunState:
-    run_id: str
-    status: FlowStatus = 'idle'
-    status_version: int = 0
-    pending_checkpoint: Checkpoint | None = None
-    released_checkpoints: Mapping[str, ArtifactRef] = field(default_factory=dict)
-    last_error: str = ''
+class StageSnapshot:
+    progress: StageProgress
+    operations: tuple[OperationDefinitionSnapshot, ...] = ()
+    attempts: tuple[AttemptSnapshot, ...] = ()
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    operation_events: tuple[RecordedOperationEvent, ...] = ()
+    retries: tuple[ArtifactRetryRequest, ...] = ()
+    versions: tuple[tuple[ArtifactRecord, ArtifactRecord | None], ...] = ()
+
+
+@dataclass(frozen=True)
+class FlowCaseSnapshot:
+    runtime: CaseSnapshot
+    stages: tuple[str, ...]
+    current_stage: str
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    attempts: tuple[AttemptSnapshot, ...] = ()
+    operation_events: tuple[RecordedOperationEvent, ...] = ()
+    retries: tuple[ArtifactRetryRequest, ...] = ()
+
+
+@dataclass(frozen=True)
+class FlowRunHistory:
+    snapshot: FlowSnapshot
+    runtime: RunHistory
+    stages: tuple[StageSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class FlowSnapshot:
+    runtime: RuntimeSnapshot
+    stages: tuple[StageProgress, ...]
+    progress: RuntimeProgress
+    failures: tuple[CaseFailure, ...]
 
     def __post_init__(self) -> None:
-        _require_text(self.run_id, 'run_id')
-        if self.status not in FLOW_STATUSES:
-            raise ValueError('status must be a FlowStatus')
-        if not isinstance(self.status_version, int) or isinstance(self.status_version, bool):
-            raise TypeError('status_version must be int')
-        if self.status_version < 0:
-            raise ValueError('status_version must be >= 0')
-        if self.pending_checkpoint is not None and not isinstance(self.pending_checkpoint, Checkpoint):
-            raise TypeError('pending_checkpoint must be Checkpoint or None')
-        if not isinstance(self.released_checkpoints, Mapping):
-            raise TypeError('released_checkpoints must be mapping')
-        released = dict(self.released_checkpoints)
-        for step, ref in released.items():
-            _require_text(step, 'step')
-            if not isinstance(ref, ArtifactRef):
-                raise TypeError('released checkpoint values must be ArtifactRef')
-        if not isinstance(self.last_error, str):
-            raise TypeError('last_error must be str')
-        object.__setattr__(self, 'released_checkpoints', MappingProxyType(released))
+        if not isinstance(self.runtime, RuntimeSnapshot):
+            raise TypeError('runtime must be RuntimeSnapshot')
+        stages = tuple(self.stages)
+        if not stages or not all(isinstance(stage, StageProgress) for stage in stages):
+            raise TypeError('stages must contain StageProgress values')
+        if len({stage.stage for stage in stages}) != len(stages):
+            raise ValueError('stage progress names must be unique')
+        if not isinstance(self.progress, RuntimeProgress):
+            raise TypeError('progress must be RuntimeProgress')
+        failures = tuple(self.failures)
+        if not all(isinstance(failure, CaseFailure) for failure in failures):
+            raise TypeError('failures must contain CaseFailure values')
+        object.__setattr__(self, 'stages', stages)
+        object.__setattr__(self, 'failures', failures)
 
+    @property
+    def run_id(self) -> str:
+        return self.runtime.run_id
 
-def _require_text(value: str, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise ValueError(f'{name} must be non-empty')
+    @property
+    def status(self) -> FlowStatus:
+        if self.runtime.status == 'created':
+            return 'idle'
+        if self.runtime.status in {'pausing', 'paused', 'cancelling', 'cancelled'}:
+            return cast(FlowStatus, self.runtime.status)
+        if self.current_progress.status in {'failed', 'awaiting_approval'}:
+            return cast(FlowStatus, self.current_progress.status)
+        if all(stage.status == 'completed' for stage in self.stages):
+            return 'completed'
+        if self.runtime.status == 'completed':
+            return 'running'
+        return cast(FlowStatus, self.runtime.status)
+
+    @property
+    def pending_approval(self) -> StageProgress | None:
+        return next((stage for stage in self.stages if stage.status == 'awaiting_approval'), None)
+
+    @property
+    def current_stage(self) -> str:
+        return self.current_progress.stage
+
+    @property
+    def current_progress(self) -> StageProgress:
+        return next((stage for stage in self.stages if stage.status != 'completed'), self.stages[-1])
 
 
 __all__ = [
-    'Checkpoint',
-    'CheckpointPolicy',
-    'FLOW_STATUSES',
-    'FlowRunState',
-    'FlowStatus',
+    'ArtifactUpdate', 'FlowCaseSnapshot', 'FlowRunHistory', 'FlowSnapshot', 'FlowStatus',
+    'StageProgress', 'StageSnapshot', 'StageStatus',
 ]

@@ -4,20 +4,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .cleanup import delete_algorithm_artifacts, delete_managed_workspace
+from .cleanup import delete_managed_workspace
 from .router_ledger import RouterAlgorithmLedger, RouterLedgerError, json_hash
 from .router_manager import RouterAlgorithmSpec, RouterManager, RouterManagerError
 
 
-def ensure_owned_algorithm(
-    manager: RouterManager,
-    ledger: RouterAlgorithmLedger,
-    spec: RouterAlgorithmSpec,
-    owner: Mapping[str, str],
-    *,
-    timeout_s: float,
-    restart_unhealthy: bool = True,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+def ensure_owned_algorithm(manager: RouterManager, ledger: RouterAlgorithmLedger, spec: RouterAlgorithmSpec,
+                           owner: Mapping[str, str], *, timeout_s: float, restart_unhealthy: bool = True
+                           ) -> tuple[dict[str, Any], dict[str, Any]]:
     with ledger.router_mutation():
         request_hash = json_hash(spec.payload())
         thread_id = owner['thread_id']
@@ -71,13 +65,8 @@ def ensure_owned_algorithm(
         return registration, detail
 
 
-def delete_owned_algorithm(
-    manager: RouterManager,
-    ledger: RouterAlgorithmLedger,
-    algorithm_id: str,
-    managed_repair_root: str | Path,
-    artifact_store_root: str | Path,
-) -> dict[str, Any]:
+def delete_owned_algorithm(manager: RouterManager, ledger: RouterAlgorithmLedger, algorithm_id: str,
+                           managed_repair_root: str | Path) -> dict[str, Any]:
     with ledger.router_mutation():
         claim, previous_state = ledger.begin_delete(algorithm_id)
         claimed_at = float(claim['updated_at'])
@@ -90,11 +79,6 @@ def delete_owned_algorithm(
             raise
 
         try:
-            artifacts_deleted = delete_algorithm_artifacts(
-                Path(artifact_store_root),
-                str(claim['run_id']),
-                algorithm_id,
-            )
             workspace = delete_managed_workspace(claim, ledger, Path(managed_repair_root))
         except Exception:
             ledger.resolve_delete(algorithm_id, claimed_at, 'stopped')
@@ -106,23 +90,19 @@ def delete_owned_algorithm(
             'router_status': 'missing' if detail is None else 'disabled',
             'router_record_retained': detail is not None,
             'ledger_deleted': True,
-            'artifacts_deleted': artifacts_deleted,
             'workspace': workspace,
             'retained_history': [
                 'router_metadata',
                 'router_ab_strategy_history',
                 'evo_ab_audit',
+                'abtest_artifacts',
                 'repair_artifacts',
                 'repair_trace',
             ],
         }
 
 
-def discard_owned_algorithm(
-    manager: RouterManager,
-    ledger: RouterAlgorithmLedger,
-    algorithm_id: str,
-) -> None:
+def discard_owned_algorithm(manager: RouterManager, ledger: RouterAlgorithmLedger, algorithm_id: str) -> None:
     with ledger.router_mutation():
         if ledger.get_algorithm(algorithm_id) is None:
             return
@@ -136,20 +116,7 @@ def discard_owned_algorithm(
         ledger.resolve_delete(algorithm_id, claimed_at, None)
 
 
-def discard_unpublished_algorithms(ledger: RouterAlgorithmLedger, thread_id: str) -> None:
-    for row in ledger.list_algorithms(thread_id=thread_id, published=False):
-        discard_owned_algorithm(
-            RouterManager(str(row['router_admin_url']), str(row['service_url'])),
-            ledger,
-            str(row['algorithm_id']),
-        )
-
-
-def publish_owned_algorithm(
-    manager: RouterManager,
-    ledger: RouterAlgorithmLedger,
-    algorithm_id: str,
-) -> None:
+def publish_owned_algorithm(manager: RouterManager, ledger: RouterAlgorithmLedger, algorithm_id: str) -> None:
     with ledger.router_mutation():
         row = ledger.get_algorithm(algorithm_id)
         if row is None:
@@ -166,14 +133,8 @@ def publish_owned_algorithm(
         ledger.publish_algorithm(algorithm_id)
 
 
-def manage_owned_algorithm(
-    manager: RouterManager,
-    ledger: RouterAlgorithmLedger,
-    algorithm_id: str,
-    action: str,
-    *,
-    timeout_s: float,
-) -> dict[str, Any]:
+def manage_owned_algorithm(manager: RouterManager, ledger: RouterAlgorithmLedger, algorithm_id: str, action: str, *,
+                           timeout_s: float) -> dict[str, Any]:
     if action == 'healthcheck':
         health = manager.healthcheck(algorithm_id)
         ledger.record_router_status(algorithm_id, health)

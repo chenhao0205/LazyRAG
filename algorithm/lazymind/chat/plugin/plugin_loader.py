@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +38,8 @@ _PLUGINS_DIR = Path(_cfg['plugins_dir'])
 # Registry: {plugin_id: PluginSpec}
 _registry: Dict[str, 'PluginSpec'] = {}
 _runtime_registry: Dict[tuple[str, str, str], 'PluginSpec'] = {}
+_load_lock = threading.Lock()
+_loaded = False
 
 
 def resolve_remote_plugin(entry: Dict[str, Any]) -> tuple[str, 'PluginSpec']:
@@ -58,7 +61,7 @@ def resolve_remote_plugin(entry: Dict[str, Any]) -> tuple[str, 'PluginSpec']:
     if not final_dir.exists():
         tmp_dir = Path(tempfile.mkdtemp(prefix='plugin-', dir=str(cache_root)))
         try:
-            from lazymind.chat.integrations.remote_fs import RemoteFS
+            from lazymind.common.integrations.remote_fs import RemoteFS
             RemoteFS().materialize_dir(remote_root, str(tmp_dir), revision_id=revision_id)
             rows = []
             for file_path in sorted(p for p in tmp_dir.rglob('*') if p.is_file()):
@@ -244,11 +247,11 @@ class PluginSpec:
 
         required_framework_tools = self.yaml.get('required_framework_tools') or []
         if required_framework_tools:
-            from lazymind.chat.service.component.tool_registry import DEFAULT_TOOLS, group_is_active
+            from lazymind.chat.service.component.tool_registry import DEFAULT_TOOLS, tool_is_active
             by_name = {cfg.name: cfg for cfg in DEFAULT_TOOLS}
             unavailable = [
                 name for name in required_framework_tools
-                if name not in by_name or not group_is_active(by_name[name])
+                if name not in by_name or not tool_is_active(by_name[name])
             ]
             if unavailable:
                 raise ValueError(f'plugin requires unavailable framework tools: {unavailable}')
@@ -307,34 +310,44 @@ class PluginSpec:
 
 
 def load_all() -> None:
-    """Discover and load all plugins from the plugins directory. Called at startup."""
-    global _registry
-    _registry = {}
-    if not _PLUGINS_DIR.is_dir():
-        LOG.warning('[PluginLoader] plugins directory not found: %s', _PLUGINS_DIR)
-        return
+    """Discover and load all plugins from the plugins directory on demand."""
+    global _registry, _loaded
+    with _load_lock:
+        _registry = {}
+        if not _PLUGINS_DIR.is_dir():
+            LOG.warning('[PluginLoader] plugins directory not found: %s', _PLUGINS_DIR)
+            _loaded = True
+            return
 
-    for entry in sorted(_PLUGINS_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-        plugin_yaml = entry / 'plugin.yaml'
-        if not plugin_yaml.exists():
-            continue
-        plugin_id = entry.name
-        try:
-            spec = PluginSpec(plugin_id=plugin_id, plugin_dir=entry)
-            _registry[plugin_id] = spec
-            LOG.info('[PluginLoader] loaded plugin: %s', plugin_id)
-        except Exception as exc:
-            LOG.error('[PluginLoader] failed to load plugin %s: %s', plugin_id, exc)
+        for entry in sorted(_PLUGINS_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            plugin_yaml = entry / 'plugin.yaml'
+            if not plugin_yaml.exists():
+                continue
+            plugin_id = entry.name
+            try:
+                spec = PluginSpec(plugin_id=plugin_id, plugin_dir=entry)
+                _registry[plugin_id] = spec
+                LOG.info('[PluginLoader] loaded plugin: %s', plugin_id)
+            except Exception as exc:
+                LOG.error('[PluginLoader] failed to load plugin %s: %s', plugin_id, exc)
+        _loaded = True
+
+
+def ensure_loaded() -> None:
+    if not _loaded:
+        load_all()
 
 
 def get_plugin(plugin_id: str) -> Optional[PluginSpec]:
+    ensure_loaded()
     return _registry.get(plugin_id)
 
 
 def list_plugins() -> List[Dict[str, Any]]:
     """Return summary info for all loaded plugins."""
+    ensure_loaded()
     out = []
     for spec in _registry.values():
         steps = [
@@ -451,9 +464,10 @@ def get_plugin_intro(plugin_id: str) -> str:
     if not spec:
         return ''
     plugin_id_val = spec.plugin_id
+    workflow_name = str(spec.yaml.get('name') or plugin_id_val).strip()
     description = (spec.yaml.get('description') or '').strip()
     when_to_use = (spec.yaml.get('when_to_use') or '').strip()
-    lines = [f'## Plugin: {plugin_id_val}']
+    lines = [f'## Workflow: {workflow_name} (id: {plugin_id_val})']
     if description:
         lines.append(description)
     if when_to_use:
@@ -481,7 +495,3 @@ def list_script_tool_names(plugin_id: str) -> List[str]:
     """Return names of all script tools registered for a plugin."""
     spec = get_plugin(plugin_id)
     return spec.list_script_tool_names() if spec else []
-
-
-# Auto-load on import.
-load_all()

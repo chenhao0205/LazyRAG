@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestBuildChatRequestBodyUsesConversationIDDerivedSessionID(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{}, nil, "", 1)
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{}, nil, "", 1)
 	sessionID, ok := body["session_id"].(string)
 	if !ok {
 		t.Fatalf("expected session_id string, got %T", body["session_id"])
@@ -31,6 +32,94 @@ func TestBuildChatRequestBodyUsesConversationIDDerivedSessionID(t *testing.T) {
 	}
 	if _, err := strconv.ParseInt(suffix, 10, 64); err != nil {
 		t.Fatalf("expected millisecond timestamp suffix, got %q: %v", suffix, err)
+	}
+}
+
+func TestBuildChatRequestBodyPropagatesSensitiveFilterBypass(t *testing.T) {
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{"skip_sensitive_filter": true}, nil, "", 1)
+	if skip, _ := body["skip_sensitive_filter"].(bool); !skip {
+		t.Fatalf("expected skip_sensitive_filter=true, got %#v", body["skip_sensitive_filter"])
+	}
+	req := buildLazyChatRequest(body)
+	if !req.Runtime.SkipSensitiveFilter {
+		t.Fatal("expected upstream runtime to skip repeated sensitive filtering")
+	}
+}
+
+func TestApplyIntentOperationsPreservesUnchangedFields(t *testing.T) {
+	doc := map[string]any{
+		"version":        2,
+		"revision":       3,
+		"goal":           "总结经验",
+		"execution_mode": "analysis_only",
+		"constraints":    []any{"不要执行原任务"},
+	}
+
+	updated, err := applyIntentOperations(doc, []IntentOperation{
+		{Op: "add", Field: "corrections", Value: "必须检查 GitHub", Evidence: "检查 GitHub"},
+	})
+	if err != nil {
+		t.Fatalf("apply intent operations: %v", err)
+	}
+	if updated["goal"] != "总结经验" || updated["execution_mode"] != "analysis_only" {
+		t.Fatalf("unchanged intent fields were lost: %#v", updated)
+	}
+	if intentRevision(updated) != 4 {
+		t.Fatalf("expected revision 4, got %#v", updated["revision"])
+	}
+}
+
+func TestApplyIntentOperationsRejectsInvalidBatch(t *testing.T) {
+	_, err := applyIntentOperations(map[string]any{}, []IntentOperation{
+		{Op: "set", Field: "constraints", Value: "invalid"},
+	})
+	if err == nil {
+		t.Fatal("expected invalid scalar/list operation to fail")
+	}
+}
+
+func TestMergeIntentUpdatedIntoExtPreservesExistingFields(t *testing.T) {
+	ext := json.RawMessage(`{"mentions":[{"id":"m1"}]}`)
+	intent := &IntentUpdatedEvent{
+		Scope:         "conversation",
+		IntentContext: map[string]any{"goal": "总结经验", "revision": 2},
+	}
+
+	merged := mergeIntentUpdatedIntoExt(ext, intent)
+	var got map[string]any
+	if err := json.Unmarshal(merged, &got); err != nil {
+		t.Fatalf("unmarshal merged ext: %v", err)
+	}
+	if got["mentions"] == nil {
+		t.Fatalf("existing ext field was lost: %#v", got)
+	}
+	updated, ok := got["intent_updated"].(map[string]any)
+	if !ok || updated["scope"] != "conversation" {
+		t.Fatalf("unexpected intent update: %#v", got["intent_updated"])
+	}
+}
+
+func TestMergeChunksRetainsConversationIntentUpdate(t *testing.T) {
+	intent := &IntentUpdatedEvent{Scope: "conversation", IntentContext: map[string]any{"goal": "新目标"}}
+	merged := mergeChunksToFirstChunk([]*ChatChunkResponse{
+		{Delta: "前", IntentUpdated: intent},
+		{Delta: "后", FinishReason: "FINISH_REASON_STOP"},
+	})
+	if merged.Delta != "前后" || merged.IntentUpdated != intent {
+		t.Fatalf("intent update was not retained: %#v", merged)
+	}
+}
+
+func TestBuildLazyChatRequestIncludesConversationIntent(t *testing.T) {
+	req := buildLazyChatRequest(map[string]any{
+		"conversation_id": "conv-1",
+		"intent_context": map[string]any{
+			"version": 2,
+			"goal":    "总结经验",
+		},
+	})
+	if req.Conversation.IntentContext["goal"] != "总结经验" {
+		t.Fatalf("unexpected intent context: %#v", req.Conversation.IntentContext)
 	}
 }
 
@@ -67,7 +156,7 @@ func TestPluginStepParamsFromEventParamsPreservesChatSessionID(t *testing.T) {
 }
 
 func TestBuildChatRequestBodyUsesDatasetListFilters(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
 		"conversation": map[string]any{
 			"search_config": map[string]any{
 				"dataset_list": []any{
@@ -111,7 +200,7 @@ func TestBuildChatRequestBodyUsesDatasetListFilters(t *testing.T) {
 }
 
 func TestBuildLazyChatRequestPreservesDatasetListFilters(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
 		"conversation": map[string]any{
 			"search_config": map[string]any{
 				"dataset_list": []any{
@@ -165,7 +254,7 @@ func TestBuildChatRequestBodyLoadsFiltersFromConversationDB(t *testing.T) {
 
 func TestBuildChatRequestBodyKeepsExistingFilters(t *testing.T) {
 	existing := map[string]any{"kb_id": []string{"manual"}}
-	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
 		"filters": existing,
 		"conversation": map[string]any{
 			"search_config": map[string]any{
@@ -197,7 +286,7 @@ func TestBuildChatRequestBodyAddsEvolutionContext(t *testing.T) {
 		UserPreference:     "preference-content",
 		UsePersonalization: true,
 	}
-	body := buildChatRequestBody(nil, nil, "conv-1", "session-1", "hello", nil, map[string]any{}, ctx, "user-1", 1)
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "session-1", "hello", nil, map[string]any{}, ctx, "user-1", 1)
 
 	if got := body["session_id"]; got != "session-1" {
 		t.Fatalf("expected session_id to be preserved, got %#v", got)
@@ -228,6 +317,31 @@ func TestBuildChatRequestBodyAddsEvolutionContext(t *testing.T) {
 	}
 }
 
+func TestBuildChatRequestBodyMergesRequestDisabledTools(t *testing.T) {
+	ctx := &evolution.ChatResourceContext{DisabledTools: []string{"bing"}}
+	body := buildChatRequestBody(
+		context.TODO(), nil, "conv-1", "session-1", "hello", nil,
+		map[string]any{"disabled_tools": []any{"ask_user"}}, ctx, "user-1", 1,
+	)
+
+	disabled, ok := body["disabled_tools"].([]string)
+	if !ok || len(disabled) != 2 || disabled[0] != "ask_user" || disabled[1] != "bing" {
+		t.Fatalf("expected request and persisted disabled tools to merge, got %#v", body["disabled_tools"])
+	}
+}
+
+func TestReplaceAskUserToolResultSupportsJSONCarrier(t *testing.T) {
+	content := `before<tool_result>{"id":"call-1","name":"ask_user","result":"Question sent"}</tool_result>after`
+	replaced := replaceAskUserToolResult(content, "Q1: Purpose\n  Answer: Personal use")
+
+	if strings.Contains(replaced, `"result":"Question sent"`) {
+		t.Fatalf("expected placeholder result to be replaced, got %s", replaced)
+	}
+	if !strings.Contains(replaced, `"result":"Q1: Purpose\n  Answer: Personal use"`) {
+		t.Fatalf("expected structured answer context, got %s", replaced)
+	}
+}
+
 func TestBuildChatRequestBodySkipsMemoryAndPreferenceWhenPersonalizationDisabled(t *testing.T) {
 	ctx := &evolution.ChatResourceContext{
 		DisabledTools:      []string{},
@@ -236,7 +350,7 @@ func TestBuildChatRequestBodySkipsMemoryAndPreferenceWhenPersonalizationDisabled
 		UserPreference:     "preference-content",
 		UsePersonalization: false,
 	}
-	body := buildChatRequestBody(nil, nil, "conv-1", "session-1", "hello", nil, map[string]any{}, ctx, "", 1)
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "session-1", "hello", nil, map[string]any{}, ctx, "", 1)
 
 	if got, ok := body["use_memory"].(bool); !ok || got {
 		t.Fatalf("expected use_memory false, got %#v", body["use_memory"])
@@ -250,12 +364,44 @@ func TestBuildChatRequestBodySkipsMemoryAndPreferenceWhenPersonalizationDisabled
 }
 
 func TestBuildChatRequestBodyPreservesExplicitReasoningFalse(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
 		"reasoning": false,
 	}, nil, "", 1)
 
 	if got, ok := body["reasoning"].(bool); !ok || got {
 		t.Fatalf("expected reasoning false, got %#v", body["reasoning"])
+	}
+}
+
+func TestBuildChatRequestBodyForwardsThinkingDepth(t *testing.T) {
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
+		"thinking_depth": "low",
+	}, nil, "", 1)
+
+	if got := body["thinking_depth"]; got != "low" {
+		t.Fatalf("expected low thinking depth, got %#v", got)
+	}
+	req := buildLazyChatRequest(body)
+	if req.Runtime.ThinkingDepth != "low" {
+		t.Fatalf("expected upstream low thinking depth, got %q", req.Runtime.ThinkingDepth)
+	}
+}
+
+func TestBuildChatRequestBodyDefaultsInvalidThinkingDepth(t *testing.T) {
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
+		"thinking_depth": "turbo",
+	}, nil, "", 1)
+	if got := body["thinking_depth"]; got != "medium" {
+		t.Fatalf("expected medium thinking depth, got %#v", got)
+	}
+}
+
+func TestBuildChatRequestBodyAcceptsMaxThinkingDepth(t *testing.T) {
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "hello", nil, map[string]any{
+		"thinking_depth": "MAX",
+	}, nil, "", 1)
+	if got := body["thinking_depth"]; got != "max" {
+		t.Fatalf("expected max thinking depth, got %#v", got)
 	}
 }
 
@@ -285,6 +431,59 @@ func TestBuildChatHistoryExtPreservesMultimodalInput(t *testing.T) {
 	}
 	if got := payload.Input[1]["input_base64"]; got != "data:image/jpeg;base64,/9j/abc" {
 		t.Fatalf("expected image base64 to be preserved, got %#v", got)
+	}
+}
+
+func TestBuildChatHistoryExtUsesDisplayQueryForAutomatedContext(t *testing.T) {
+	ext := buildChatHistoryExt(map[string]any{
+		"input": []any{
+			map[string]any{"input_type": "text", "text": "large internal model context"},
+			map[string]any{"input_type": "image", "uri": "/uploads/dog.jpg"},
+		},
+		"display_query": "用户任务描述",
+	}, "用户任务描述")
+	var payload struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(ext, &payload); err != nil {
+		t.Fatalf("unmarshal ext: %v", err)
+	}
+	if len(payload.Input) != 2 {
+		t.Fatalf("expected text+image input items, got %#v", payload.Input)
+	}
+	if got := payload.Input[0]["text"]; got != "用户任务描述" {
+		t.Fatalf("expected display query text, got %#v", got)
+	}
+	if strings.Contains(string(ext), "large internal model context") {
+		t.Fatalf("history ext must not keep internal model text: %s", ext)
+	}
+	if got := payload.Input[1]["uri"]; got != "/uploads/dog.jpg" {
+		t.Fatalf("expected image uri to be preserved, got %#v", got)
+	}
+}
+
+func TestCollectedInputsForConversationReturnsSnapshotAndSummary(t *testing.T) {
+	db, err := orm.Connect(orm.DriverSQLite, t.TempDir()+"/collected-inputs.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&orm.TaskCenterTask{}, &orm.TaskRunInput{}, &orm.TaskRunOutput{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := db.Create(&orm.TaskCenterTask{ID: "downstream", UserID: "u", ConversationID: "weekly-conv", TaskType: "scheduled", Status: "succeeded", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&orm.TaskRunOutput{ID: "output", TaskID: "upstream", ConversationID: "daily-conv", SummaryText: "日报摘要", OutputStatus: "ready", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := json.Marshal(map[string]any{"source_name": "Github调研", "executed_at": now, "mode": "摘要"})
+	if err := db.Create(&orm.TaskRunInput{ID: "input", DownstreamTaskID: "downstream", UpstreamTaskID: "upstream", DependencyID: "dep", OutputID: "output", Position: 0, SnapshotJSON: snapshot, CreatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	items := collectedInputsForConversation(context.Background(), db.DB, "weekly-conv")
+	if len(items) != 1 || items[0]["summary"] != "日报摘要" || items[0]["source_name"] != "Github调研" || items[0]["conversation_id"] != "daily-conv" {
+		t.Fatalf("unexpected collected inputs: %#v", items)
 	}
 }
 
@@ -372,6 +571,53 @@ func TestChatHistoryResponseIncludesMentions(t *testing.T) {
 	mentions, ok := item["mentions"].([]any)
 	if !ok || len(mentions) != 1 {
 		t.Fatalf("mentions missing from history response: %#v", item["mentions"])
+	}
+}
+
+func TestChatHistoryResponseIncludesThinkingDuration(t *testing.T) {
+	item := chatHistoryToResponseItem(orm.ChatHistory{
+		Result:            "<think>分析并调用工具</think>最终答案",
+		ThinkingDurationS: 7,
+	})
+	if got := item["thinking_time_s"]; got != int64(7) {
+		t.Fatalf("thinking_time_s: got %#v want 7", got)
+	}
+	if got := item["reasoning_content"]; got != "分析并调用工具" {
+		t.Fatalf("reasoning_content: got %#v", got)
+	}
+}
+
+func TestChatHistoryResponseHidesLegacyCollectedContext(t *testing.T) {
+	item := chatHistoryToResponseItem(orm.ChatHistory{
+		RawContent: `<collected-task-context>large internal context</collected-task-context>
+<current-task-request>
+这是当前需要执行的任务要求，请使用上方已完成的历史执行结果作答：
+生成本周调研报告
+</current-task-request>`,
+	})
+	if got := item["query"]; got != "生成本周调研报告" {
+		t.Fatalf("query = %q", got)
+	}
+}
+
+func TestElapsedThinkingSecondsRoundsUp(t *testing.T) {
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    int64
+	}{
+		{name: "initial reasoning chunk", elapsed: 0, want: 1},
+		{name: "sub-second reasoning", elapsed: 250 * time.Millisecond, want: 1},
+		{name: "exact second", elapsed: time.Second, want: 1},
+		{name: "partial next second", elapsed: time.Second + time.Millisecond, want: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := elapsedThinkingSeconds(tc.elapsed); got != tc.want {
+				t.Fatalf("elapsedThinkingSeconds(%s) = %d, want %d", tc.elapsed, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -557,7 +803,7 @@ func TestGetConversationHistoryReturnsStoredMultimodalInput(t *testing.T) {
 }
 
 func TestBuildChatRequestBodyMergesInputURIsIntoFiles(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "sid", "what animal", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "sid", "what animal", nil, map[string]any{
 		"input": []any{
 			map[string]any{"input_type": "text", "text": "hello"},
 			map[string]any{"input_type": "image", "uri": "/var/lib/lazymind/uploads/tmp/u1/a.png"},
@@ -579,7 +825,7 @@ func TestBuildChatRequestBodyMergesInputURIsIntoFiles(t *testing.T) {
 }
 
 func TestBuildChatRequestBodyFilesMergeDedupesAndSkipsHTTP(t *testing.T) {
-	body := buildChatRequestBody(nil, nil, "conv-1", "sid", "q", nil, map[string]any{
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "sid", "q", nil, map[string]any{
 		"files": []any{"/data/x.jpg"},
 		"input": []any{
 			map[string]any{"input_type": "image", "uri": "https://cdn.example.com/p.png"},

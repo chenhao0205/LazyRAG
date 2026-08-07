@@ -1,7 +1,7 @@
+import json
 import sys
 from pathlib import Path
 
-import json
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -10,7 +10,7 @@ for _p in (_ROOT / 'algorithm', _ROOT):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-from lazymind.config import config
+from lazymind.config import config  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ import (
 	"lazymind/core/scheduler"
 	skillv2handler "lazymind/core/skillv2/handler"
 	"lazymind/core/subagent"
+	"lazymind/core/systemdeps"
 	"lazymind/core/taskcenter"
 	"lazymind/core/userprefs"
 	"lazymind/core/wordgroup"
@@ -57,6 +58,10 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/datasets/{dataset}:unsetDefault", []string{"document.write"}, doc.UnsetDefault)
 	handleAPI(r, "GET", "/data-sources/local-fs-chat-setting", []string{"document.read"}, datasource.GetLocalFSChatSetting)
 	handleAPI(r, "PUT", "/data-sources/local-fs-chat-setting", []string{"document.write"}, datasource.SetLocalFSChatSetting)
+	handleAPI(r, "GET", "/system-dependencies/ffmpeg", []string{"document.read"}, systemdeps.GetFFmpegDependency)
+	handleAPI(r, "PUT", "/system-dependencies/ffmpeg", []string{"document.write"}, systemdeps.UpdateFFmpegDependency)
+	handleAPI(r, "POST", "/system-dependencies/ffmpeg:check", []string{"document.read"}, systemdeps.CheckFFmpegDependency)
+	handleAPI(r, "POST", "/system-dependencies/ffmpeg:install", []string{"document.write"}, systemdeps.InstallFFmpegDependency)
 	handleAPI(r, "GET", "/data-sources/database-connections", []string{"document.read"}, datasource.ListDatabaseConnections)
 	handleAPI(r, "POST", "/data-sources/database-connections", []string{"document.write"}, datasource.CreateDatabaseConnection)
 	handleAPI(r, "POST", "/data-sources/database-connections/{connection}:check", []string{"document.write"}, datasource.CheckDatabaseConnection)
@@ -154,6 +159,7 @@ func registerAllRoutes(r *mux.Router) {
 
 	// ----- text -----
 	handleAPI(r, "POST", "/chat", []string{"qa.write"}, chat.Chat)
+	handleAPI(r, "POST", "/channel-intents:classify", []string{"qa.write"}, chat.ClassifyChannelIntent)
 	handleAPI(r, "GET", "/tools", []string{"qa.read"}, chat.ListTools)
 	handleAPI(r, "POST", "/tools/{tool_name}:disable", []string{"qa.read"}, chat.DisableTool)
 	handleAPI(r, "POST", "/tools/{tool_name}:enable", []string{"qa.read"}, chat.EnableTool)
@@ -202,13 +208,17 @@ func registerAllRoutes(r *mux.Router) {
 
 	// ----- Conversation -----
 	handleAPI(r, "POST", "/conversations:chat", []string{"qa.write"}, chat.ChatConversations)
+	handleAPI(r, "POST", "/conversations:estimateContextUsage", []string{"qa.read"}, chat.EstimateContextUsage)
+	handleAPI(r, "POST", "/conversations:exportContextPrompt", []string{"qa.read"}, chat.ExportContextPrompt)
 	handleAPI(r, "POST", "/conversations:resumeChat", []string{"qa.write"}, chat.ResumeChat)
 	handleAPI(r, "POST", "/conversations:stopChatGeneration", []string{"qa.write"}, chat.StopChatGeneration)
 	handleAPI(r, "POST", "/conversations/{conversation_id}:stop", []string{"qa.write"}, chat.StopChatGeneration)
+	handleAPI(r, "POST", "/conversations/{conversation_id}:toolLimitDecision", []string{"qa.write"}, chat.DecideToolLimit)
 	handleAPI(r, "GET", "/conversations/{conversation_id}:status", []string{"qa.read"}, chat.GetChatStatus)
 
 	// ----- SubAgent (Task Center) -----
 	handleAPI(r, "GET", "/conversations/{conversation_id}/tasks", []string{"qa.read"}, subagent.ListConversationTasks)
+	handleAPI(r, "GET", "/conversations/{conversation_id}/artifacts", []string{"qa.read"}, chat.ListConversationArtifacts)
 	handleAPI(r, "GET", "/conversations/{conversation_id}/events", []string{"qa.read"}, chat.StreamConvEvents)
 	handleAPI(r, "GET", "/tasks/{task_id}:stream", []string{"qa.read"}, subagent.StreamTask)
 	handleAPI(r, "GET", "/tasks/{task_id}/artifacts", []string{"qa.read"}, subagent.GetTaskArtifacts)
@@ -246,7 +256,6 @@ func registerAllRoutes(r *mux.Router) {
 
 	// ----- Task Center -----
 	handleAPI(r, "GET", "/task-center/tasks", []string{"qa.read"}, taskcenter.ListTasks)
-	handleAPI(r, "POST", "/task-center/tasks", []string{"qa.write"}, taskcenter.AddTaskHandler)
 	handleAPI(r, "GET", "/task-center/tasks/{task_id}", []string{"qa.read"}, taskcenter.GetTaskByID)
 	handleAPI(r, "POST", "/task-center/tasks/{task_id}:cancel", []string{"qa.write"}, taskcenter.CancelTaskByID)
 	handleAPI(r, "POST", "/task-center/tasks/{task_id}:remove", []string{"qa.write"}, taskcenter.RemoveTaskHandler)
@@ -259,12 +268,19 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/schedules/{schedule_id}:cancel", []string{"qa.write"}, scheduler.CancelScheduleHandler)
 	handleAPI(r, "POST", "/schedules/{schedule_id}:enable", []string{"qa.write"}, scheduler.EnableScheduleHandler)
 	handleAPI(r, "POST", "/schedules/{schedule_id}:run-now", []string{"qa.write"}, scheduler.RunNowHandler)
+	handleAPI(r, "POST", "/schedules/{schedule_id}:move", []string{"qa.write"}, scheduler.MoveScheduleHandler)
+	handleAPI(r, "GET", "/automation-groups", []string{"qa.read"}, scheduler.ListGroupsHandler)
+	handleAPI(r, "POST", "/automation-groups", []string{"qa.write"}, scheduler.CreateGroupHandler)
+	handleAPI(r, "DELETE", "/automation-groups/{group_id}", []string{"qa.write"}, scheduler.DeleteGroupHandler)
+	handleAPI(r, "POST", "/automation-groups:batch-create", []string{"qa.write"}, scheduler.BatchCreateHandler)
 
 	// ----- User Chat Settings (global plugin/subagent defaults) -----
 	handleAPI(r, "GET", "/user/chat-settings", []string{"qa.read"}, chat.GetChatSettings)
 	handleAPI(r, "PATCH", "/user/chat-settings", []string{"qa.write"}, chat.PatchChatSettings)
-	handleAPI(r, "GET", "/user/ui-preferences", []string{"qa.read"}, userprefs.GetUIPreferences)
-	handleAPI(r, "PATCH", "/user/ui-preferences", []string{"qa.write"}, userprefs.PatchUIPreferences)
+	// Legal consent is a login prerequisite and must not depend on optional QA permissions.
+	// The handlers still require the gateway-injected X-User-Id identity.
+	handleAPI(r, "GET", "/user/ui-preferences", []string{}, userprefs.GetUIPreferences)
+	handleAPI(r, "PATCH", "/user/ui-preferences", []string{}, userprefs.PatchUIPreferences)
 	handleAPI(r, "PATCH", "/conversations/{conversation_id}/plugin-settings", []string{"qa.write"}, chat.PatchConversationPluginSettings)
 
 	// ----- Plugin Sessions -----
@@ -289,6 +305,7 @@ func registerAllRoutes(r *mux.Router) {
 	// Stable list_index-based routes (preferred).
 	handleAPI(r, "DELETE", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}", []string{"qa.write"}, plugin.DeleteSlotItemByIndex)
 	handleAPI(r, "PATCH", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}", []string{"qa.write"}, plugin.PatchSlotItemByIndex)
+	handleAPI(r, "POST", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}:sync-writer-document", []string{"qa.write"}, chat.SyncWriterDocument)
 	handleAPI(r, "GET", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}/versions", []string{"qa.read"}, plugin.GetSlotItemVersionsByIndex)
 	handleAPI(r, "POST", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}/rollback", []string{"qa.write"}, plugin.RollbackSlotItemByIndex)
 	handleAPI(r, "PATCH", "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}/caption", []string{"qa.write"}, plugin.PatchSlotCaptionByIndex)
@@ -361,19 +378,22 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/skill-diff/tree", []string{"qa.read"}, skillv2handler.DiffTree)
 	handleAPI(r, "POST", "/skill-diff/file", []string{"qa.read"}, skillv2handler.DiffFile)
 	handleAPI(r, "GET", "/skill-market", []string{"qa.read"}, skillv2handler.MarketList)
+	handleAPI(r, "GET", "/skill-market/tags", []string{"qa.read"}, skillv2handler.MarketTags)
 	handleAPI(r, "GET", "/skill-market/{market_item_id}", []string{"qa.read"}, skillv2handler.MarketGet)
 	handleAPI(r, "POST", "/skill-market:install", []string{"qa.write"}, skillv2handler.MarketInstall)
 	handleAPI(r, "POST", "/skill-market/{market_item_id}:install", []string{"qa.write"}, skillv2handler.MarketInstall)
-	handleAPI(r, "POST", "/admin/skill-market", []string{"qa.write"}, skillv2handler.MarketPublish)
-	handleAPI(r, "PATCH", "/admin/skill-market/{market_item_id}", []string{"qa.write"}, skillv2handler.MarketEdit)
-	handleAPI(r, "POST", "/admin/skill-market/{market_item_id}:offline", []string{"qa.write"}, skillv2handler.MarketUnpublish)
-	handleAPI(r, "POST", "/skill-market/admin/items", []string{"qa.write"}, skillv2handler.MarketPublish)
-	handleAPI(r, "PATCH", "/skill-market/admin/items/{market_item_id}", []string{"qa.write"}, skillv2handler.MarketEdit)
-	handleAPI(r, "POST", "/skill-market/admin/items/{market_item_id}:unpublish", []string{"qa.write"}, skillv2handler.MarketUnpublish)
+	handleAPI(r, "POST", "/admin/skill-market", []string{"user.admin"}, skillv2handler.MarketPublish)
+	handleAPI(r, "PATCH", "/admin/skill-market/{market_item_id}", []string{"user.admin"}, skillv2handler.MarketEdit)
+	handleAPI(r, "DELETE", "/admin/skill-market/{market_item_id}", []string{"user.admin"}, skillv2handler.MarketDelete)
+	handleAPI(r, "POST", "/admin/skill-market/{market_item_id}:offline", []string{"user.admin"}, skillv2handler.MarketUnpublish)
+	handleAPI(r, "POST", "/skill-market/admin/items", []string{"user.admin"}, skillv2handler.MarketPublish)
+	handleAPI(r, "PATCH", "/skill-market/admin/items/{market_item_id}", []string{"user.admin"}, skillv2handler.MarketEdit)
+	handleAPI(r, "DELETE", "/skill-market/admin/items/{market_item_id}", []string{"user.admin"}, skillv2handler.MarketDelete)
+	handleAPI(r, "POST", "/skill-market/admin/items/{market_item_id}:unpublish", []string{"user.admin"}, skillv2handler.MarketUnpublish)
 	handleAPI(r, "GET", "/skill-review:summary", []string{"qa.read"}, resourceupdate.GetSkillReviewSummary)
 	handleAPI(r, "POST", "/skill-review:run", []string{"qa.write"}, resourceupdate.RunSkillReview)
 	handleAPI(r, "GET", "/skill-review/tasks", []string{"qa.read"}, resourceupdate.ListSkillReviewTasks)
-	handleAPI(r, "GET", "/skill-review-results/{review_result_id}", []string{"qa.read"}, resourceupdate.GetSkillReviewResult)
+	handleAPI(r, "GET", "/skill-organize/tasks", []string{"qa.read"}, resourceupdate.ListSkillOrganizeTasks)
 	handleAPI(r, "PATCH", "/personal-resource/{resource_type}", []string{"qa.write"}, resourcefs.PatchMetadata)
 	handleAPI(r, "GET", "/personal-resource/{resource_type}:file", []string{"qa.read"}, resourcefs.GetFile)
 	handleAPI(r, "PUT", "/personal-resource/{resource_type}:file", []string{"qa.write"}, resourcefs.WriteDraft)
@@ -388,6 +408,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/personal-resource/{resource_type}/revisions/{revision_id}", []string{"qa.read"}, resourcefs.GetRevision)
 	handleAPI(r, "POST", "/personal-resource/{resource_type}:rollback", []string{"qa.write"}, resourcefs.Rollback)
 
+	handleAPI(r, "PATCH", "/conversations/{name}:search-config", []string{"qa.write"}, chat.PatchConversationSearchConfig)
 	handleAPI(r, "GET", "/conversations/{name}:detail", []string{"qa.read"}, chat.GetConversationDetail)
 	handleAPI(r, "GET", "/conversations/{name}:history", []string{"qa.read"}, chat.GetConversationHistory)
 	handleAPI(r, "GET", "/conversations/{name}", []string{"qa.read"}, chat.GetConversation)

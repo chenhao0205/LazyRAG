@@ -3,12 +3,12 @@ import { Alert, Button, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   AimOutlined,
-  FileSearchOutlined,
   SearchOutlined,
   ThunderboltOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
+import { getEvalQuestionTypeLabel } from "../../shared";
 import type { CsvBadcaseRow, EvalReportSummary } from "./types";
 import { EVAL_BADCASE_PAGE_SIZE } from "./dataUtils";
 import { formatOptionalPercent } from "./traceUtils";
@@ -56,20 +56,42 @@ export function EvalReportPanel({
 }) {
   const { t } = useTranslation();
   const [currentPage, setCurrentPage] = useState(1);
-  const selectedRow = rows.find((item) => item.caseId === selectedCaseId) || rows[0];
+  const [statusFilter, setStatusFilter] = useState("");
+  const [questionTypeFilter, setQuestionTypeFilter] = useState("");
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const statusOptions = useMemo(
+    () => Array.from(new Set(rows.map((item) => item.traceStatus).filter(Boolean))),
+    [rows],
+  );
+  const questionTypeOptions = useMemo(
+    () => Array.from(new Set(rows.map((item) => item.questionType).filter((item) => item && item !== "-"))),
+    [rows],
+  );
+  const filteredRows = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
+    return rows.filter(
+      (item) =>
+        (!statusFilter || item.traceStatus === statusFilter) &&
+        (!questionTypeFilter || item.questionType === questionTypeFilter) &&
+        (!keyword ||
+          item.caseId.toLowerCase().includes(keyword) ||
+          item.query.toLowerCase().includes(keyword)),
+    );
+  }, [questionTypeFilter, rows, searchKeyword, statusFilter]);
+  const selectedRow = filteredRows.find((item) => item.caseId === selectedCaseId) || filteredRows[0];
   const pagedRows = useMemo(() => {
     const start = (currentPage - 1) * EVAL_BADCASE_PAGE_SIZE;
-    return rows.slice(start, start + EVAL_BADCASE_PAGE_SIZE);
-  }, [currentPage, rows]);
+    return filteredRows.slice(start, start + EVAL_BADCASE_PAGE_SIZE);
+  }, [currentPage, filteredRows]);
 
   useEffect(() => {
     setCurrentPage(1);
   }, [summary.reportId]);
 
   useEffect(() => {
-    const lastPage = Math.max(1, Math.ceil(rows.length / EVAL_BADCASE_PAGE_SIZE));
+    const lastPage = Math.max(1, Math.ceil(filteredRows.length / EVAL_BADCASE_PAGE_SIZE));
     setCurrentPage((page) => Math.min(page, lastPage));
-  }, [rows.length]);
+  }, [filteredRows.length]);
   const columns: ColumnsType<CsvBadcaseRow> = [
     { title: "Case", dataIndex: "caseId", key: "caseId", width: 104 },
     {
@@ -80,11 +102,13 @@ export function EvalReportPanel({
       render: (value: number) => <span className={value < 0.5 ? "is-low-score" : ""}>{value.toFixed(2)}</span>,
     },
     {
-      title: t("selfEvolutionRun.observation.failureReason"),
-      dataIndex: "failureType",
-      key: "failureType",
-      width: 110,
-      render: (value: string, row) => <Tag className={`self-evolution-eval-reason is-${row.failureTone}`}>{value}</Tag>,
+      title: t("selfEvolutionRun.observation.questionType"),
+      dataIndex: "questionType",
+      key: "questionType",
+      width: 130,
+      render: (value: string) => (
+        <Tag className="self-evolution-eval-reason is-blue">{getEvalQuestionTypeLabel(value)}</Tag>
+      ),
     },
     {
       title: "Defect",
@@ -131,14 +155,34 @@ export function EvalReportPanel({
         <div className="self-evolution-eval-filter-row">
           <label>
             {t("selfEvolutionRun.observation.statusLabel")}
-            <select aria-label={t("selfEvolutionRun.observation.badcaseStatusFilterAria")}>
-              <option>{t("selfEvolutionRun.observation.all")}</option>
+            <select
+              aria-label={t("selfEvolutionRun.observation.badcaseStatusFilterAria")}
+              value={statusFilter}
+              onChange={(event) => {
+                setStatusFilter(event.target.value);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="">{t("selfEvolutionRun.observation.all")}</option>
+              {statusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
             </select>
           </label>
           <label>
-            {t("selfEvolutionRun.observation.failureTypeLabel")}
-            <select aria-label={t("selfEvolutionRun.observation.badcaseFailureTypeFilterAria")}>
-              <option>{t("selfEvolutionRun.observation.all")}</option>
+            {t("selfEvolutionRun.observation.questionTypeLabel")}
+            <select
+              aria-label={t("selfEvolutionRun.observation.badcaseQuestionTypeFilterAria")}
+              value={questionTypeFilter}
+              onChange={(event) => {
+                setQuestionTypeFilter(event.target.value);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="">{t("selfEvolutionRun.observation.all")}</option>
+              {questionTypeOptions.map((questionType) => (
+                <option key={questionType} value={questionType}>
+                  {getEvalQuestionTypeLabel(questionType)}
+                </option>
+              ))}
             </select>
           </label>
           <label className="self-evolution-eval-search">
@@ -146,9 +190,24 @@ export function EvalReportPanel({
             <input
               aria-label={t("selfEvolutionRun.observation.searchCaseAria")}
               placeholder={t("selfEvolutionRun.observation.searchCasePlaceholder")}
+              value={searchKeyword}
+              onChange={(event) => {
+                setSearchKeyword(event.target.value);
+                setCurrentPage(1);
+              }}
             />
           </label>
-          <Button size="small">{t("selfEvolutionRun.observation.reset")}</Button>
+          <Button
+            size="small"
+            onClick={() => {
+              setStatusFilter("");
+              setQuestionTypeFilter("");
+              setSearchKeyword("");
+              setCurrentPage(1);
+            }}
+          >
+            {t("selfEvolutionRun.observation.reset")}
+          </Button>
         </div>
         {rowsError ? (
           <Alert
@@ -168,7 +227,7 @@ export function EvalReportPanel({
             pagination={{
               current: currentPage,
               pageSize: EVAL_BADCASE_PAGE_SIZE,
-              total: rows.length,
+              total: filteredRows.length,
               showSizeChanger: false,
               showQuickJumper: false,
               onChange: (page) => setCurrentPage(page),
@@ -192,6 +251,8 @@ export function EvalReportPanel({
               <span className="is-low-score">{selectedRow.score.toFixed(2)}</span>
               <Tag className={`self-evolution-eval-reason is-${selectedRow.failureTone}`}>{selectedRow.failureType}</Tag>
             </dd>
+            <dt>{t("selfEvolutionRun.observation.questionType")}</dt>
+            <dd>{getEvalQuestionTypeLabel(selectedRow.questionType)}</dd>
             <dt>{t("selfEvolutionRun.observation.failureReason")}</dt>
             <dd>{selectedRow.failureReason}</dd>
             <dt>Defect</dt>
@@ -199,10 +260,6 @@ export function EvalReportPanel({
             <dt>Reason</dt>
             <dd>{selectedRow.reason}</dd>
           </dl>
-          <div className="self-evolution-eval-case-actions">
-            <Button type="primary">{t("selfEvolutionRun.observation.viewAgenticTrace")}</Button>
-            <Button icon={<FileSearchOutlined />}>{t("selfEvolutionRun.observation.viewRawTrace")}</Button>
-          </div>
         </div>
       )}
     </section>

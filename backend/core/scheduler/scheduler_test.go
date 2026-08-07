@@ -59,6 +59,82 @@ func TestCreateAndCancelSchedule(t *testing.T) {
 	}
 }
 
+func TestNextCronTimeAfterUsesScheduleTimezone(t *testing.T) {
+	now := time.Date(2026, time.July, 30, 5, 30, 0, 0, time.UTC)
+
+	next, err := nextCronTimeAfter("0 14 * * *", "Asia/Shanghai", now)
+	if err != nil {
+		t.Fatalf("nextCronTimeAfter: %v", err)
+	}
+	want := time.Date(2026, time.July, 30, 6, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+}
+
+func TestNextCronTimeRejectsUnknownTimezone(t *testing.T) {
+	if _, err := nextCronTimeAfter("0 14 * * *", "Invalid/Timezone", time.Now()); err == nil {
+		t.Fatal("expected an invalid timezone error")
+	}
+	if _, err := previousCronTime("0 14 * * *", "Invalid/Timezone", time.Now()); err == nil {
+		t.Fatal("expected an invalid timezone error for previous cron time")
+	}
+}
+
+func TestRepairFutureScheduleNextRunsCorrectsTimezoneFallback(t *testing.T) {
+	db := newTestSchedulerDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 30, 5, 30, 0, 0, time.UTC)
+	wrongFuture := time.Date(2026, time.July, 30, 14, 0, 0, 0, time.UTC)
+	overdue := time.Date(2026, time.July, 29, 6, 0, 0, 0, time.UTC)
+
+	for _, schedule := range []*orm.UserSchedule{
+		{
+			ID:             "sched-wrong-timezone",
+			UserID:         "user-1",
+			CronExpr:       "0 14 * * *",
+			Timezone:       "Asia/Shanghai",
+			PromptTemplate: "future",
+			Enabled:        true,
+			NextRunAt:      wrongFuture,
+			CreatedAt:      now.Add(-time.Hour),
+		},
+		{
+			ID:             "sched-overdue",
+			UserID:         "user-1",
+			CronExpr:       "0 14 * * *",
+			Timezone:       "Asia/Shanghai",
+			PromptTemplate: "overdue",
+			Enabled:        true,
+			NextRunAt:      overdue,
+			CreatedAt:      now.Add(-48 * time.Hour),
+		},
+	} {
+		if err := db.Create(schedule).Error; err != nil {
+			t.Fatalf("seed schedule %s: %v", schedule.ID, err)
+		}
+	}
+
+	repairFutureScheduleNextRunsAt(ctx, db.DB, now)
+
+	var repaired orm.UserSchedule
+	if err := db.First(&repaired, "id = ?", "sched-wrong-timezone").Error; err != nil {
+		t.Fatalf("fetch repaired schedule: %v", err)
+	}
+	want := time.Date(2026, time.July, 30, 6, 0, 0, 0, time.UTC)
+	if !repaired.NextRunAt.Equal(want) {
+		t.Fatalf("repaired next run = %s, want %s", repaired.NextRunAt, want)
+	}
+
+	var preserved orm.UserSchedule
+	if err := db.First(&preserved, "id = ?", "sched-overdue").Error; err != nil {
+		t.Fatalf("fetch overdue schedule: %v", err)
+	}
+	if !preserved.NextRunAt.Equal(overdue) {
+		t.Fatalf("overdue next run changed to %s, want %s", preserved.NextRunAt, overdue)
+	}
+}
+
 // ──────────────────────────────────────────────
 // Optimistic lock — only one attempt fires per tick
 // ──────────────────────────────────────────────
@@ -97,5 +173,41 @@ func TestFireOne_OptimisticLock(t *testing.T) {
 		Updates(map[string]any{"last_run_at": time.Now().UTC(), "next_run_at": newNext})
 	if r2.RowsAffected != 0 {
 		t.Fatalf("second attempt should be skipped (optimistic lock), got %d rows affected", r2.RowsAffected)
+	}
+}
+
+func TestMatchDayOfMonthSupportsMonthEndOffsets(t *testing.T) {
+	loc := time.UTC
+	if !matchDayOfMonth("-1", time.Date(2026, time.February, 28, 9, 0, 0, 0, loc)) {
+		t.Fatal("expected -1 to match the last day of February")
+	}
+	if !matchDayOfMonth("-2", time.Date(2026, time.April, 29, 9, 0, 0, 0, loc)) {
+		t.Fatal("expected -2 to match the second-to-last day of April")
+	}
+	if matchDayOfMonth("-1", time.Date(2026, time.April, 29, 9, 0, 0, 0, loc)) {
+		t.Fatal("expected -1 not to match before the last day")
+	}
+}
+
+func TestCadenceExpression(t *testing.T) {
+	interval, unit, cronExpr, err := parseCadenceExpr("@every:2:week;0 9 * * 1")
+	if err != nil || interval != 2 || unit != "week" || cronExpr != "0 9 * * 1" {
+		t.Fatalf("unexpected cadence parse: %d %q %q %v", interval, unit, cronExpr, err)
+	}
+	matching := time.Date(2026, time.January, 5, 9, 0, 0, 0, time.UTC)
+	if matchCadence(matching, 2, "week") == matchCadence(matching.AddDate(0, 0, 7), 2, "week") {
+		t.Fatal("adjacent ISO weeks must not both match a two-week cadence")
+	}
+}
+
+func TestPreviousCronTimeUsesPriorScheduledCycle(t *testing.T) {
+	next := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
+	previous, err := previousCronTime("0 12 * * 4", "UTC", next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	if !previous.Equal(want) {
+		t.Fatalf("previous cycle = %s, want %s", previous, want)
 	}
 }

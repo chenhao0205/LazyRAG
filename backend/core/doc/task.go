@@ -476,6 +476,12 @@ func UploadTempFile(w http.ResponseWriter, r *http.Request) {
 			common.ReplyErr(w, "save upload file failed", http.StatusInternalServerError)
 			return
 		}
+		size, normalizeErr := normalizeUploadedTextFileInPlace(finalPath, fh.Filename, size)
+		if normalizeErr != nil {
+			_ = os.Remove(finalPath)
+			common.ReplyErr(w, fmt.Sprintf("%s: %v", "normalize upload text encoding failed", normalizeErr), http.StatusBadRequest)
+			return
+		}
 		contentType := fh.Header.Get("Content-Type")
 		row := orm.UploadedFile{UploadFileID: uploadFileID, DatasetID: "", TenantID: "", TaskID: "", DocumentID: "", Status: UploadedFileStateUploaded, Ext: mustJSON(uploadedFileExt{StoredPath: finalPath, StoredName: storedName, OriginalFilename: fh.Filename, FileSize: size, ContentType: contentType}), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
 		if err := store.DB().WithContext(r.Context()).Create(&row).Error; err != nil {
@@ -1227,6 +1233,10 @@ func completeUploadInternal(ctx context.Context, session orm.UploadSession, args
 
 	switch meta.UploadScope {
 	case uploadScopeTemp:
+		totalSize, err = normalizeUploadedTextFileInPlace(mergedPath, meta.OriginalFilename, totalSize)
+		if err != nil {
+			return CompleteUploadResponse{}, http.StatusBadRequest, fmt.Errorf("normalize upload text encoding failed: %w", err)
+		}
 		finalDir := buildTempUploadFileDir(firstNonEmpty(meta.CreateUserID, session.CreateUserID), session.UploadID)
 		if err := os.MkdirAll(finalDir, 0o755); err != nil {
 			return CompleteUploadResponse{}, http.StatusInternalServerError, fmt.Errorf("create final dir failed")
@@ -1440,6 +1450,7 @@ func startParseTasksInternal(r *http.Request, datasetID string, taskIDs []string
 		log.Printf("[startParseTasksInternal] failed to load llm_config for user=%s: %v", userID, err)
 		llmConfig = nil
 	}
+	llmConfig = normalizeParsingLLMConfig(llmConfig)
 	ocrConfig, err := modelconfig.LoadOCRConfig(r.Context(), store.DB(), userID)
 	if err != nil {
 		log.Printf("[startParseTasksInternal] failed to load ocr_config for user=%s: %v", userID, err)
@@ -2247,7 +2258,7 @@ func createUploadedTaskAndDocument(r *http.Request, ds *orm.Dataset, datasetID, 
 		return orm.Task{}, orm.Document{}, documentExt{}, fmt.Errorf("normalize upload text encoding failed: %w", err)
 	}
 	docExt := newDocumentExt(finalPath, storedName, fh.Filename, size, fh.Header.Get("Content-Type"), relativePath, tags)
-	docRow := orm.Document{ID: documentID, LazyllmDocID: "", DatasetID: datasetID, DisplayName: fh.Filename, PID: documentPID, Tags: mustJSON(tags), FileID: documentID, PDFConvertResult: docExt.ConvertStatus, Ext: mustJSON(docExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
+	docRow := orm.Document{ID: documentID, LazyllmDocID: "", DatasetID: datasetID, DisplayName: fh.Filename, DocumentType: fileDocumentTypeFromName(fh.Filename), PID: documentPID, Tags: mustJSON(tags), FileID: documentID, PDFConvertResult: docExt.ConvertStatus, Ext: mustJSON(docExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
 	tExt := taskExt{TaskType: string(TaskTypeParseUploaded), DocumentPID: documentPID, DisplayName: fh.Filename, DataSourceType: "LOCAL_FILE", Files: []TaskFile{{DisplayName: fh.Filename, StoredName: storedName, StoredPath: finalPath, FileSize: size, RelativePath: relativePath, ContentType: fh.Header.Get("Content-Type")}}, DocumentTags: tags}
 	taskRow := orm.Task{ID: taskID, LazyllmTaskID: "", DocID: documentID, KbID: datasetID, AlgoID: datasetAlgoIDByID(datasetID), DatasetID: datasetID, TaskType: string(TaskTypeParseUploaded), DocumentPID: documentPID, DisplayName: fh.Filename, Ext: mustJSON(tExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
 	if err := store.DB().WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
@@ -2477,7 +2488,7 @@ func createTaskFromUploadedFile(r *http.Request, datasetID, userID, userName str
 			tFiles = []TaskFile{{DisplayName: displayName, StoredName: upExt.StoredName, StoredPath: upExt.StoredPath, FileSize: upExt.FileSize, RelativePath: upExt.RelativePath, ContentType: upExt.ContentType}}
 		}
 		tExt := taskExt{TaskType: tType, DocumentPID: documentPID, DisplayName: displayName, TargetDatasetID: strings.TrimSpace(item.Task.TargetDatasetID), TargetPID: strings.TrimSpace(item.Task.TargetPID), TargetPath: strings.TrimSpace(item.Task.TargetPath), DataSourceType: firstNonEmpty(strings.TrimSpace(item.Task.DataSourceType), "LOCAL_FILE"), Files: tFiles, DocumentTags: tags}
-		docRow := orm.Document{ID: documentID, LazyllmDocID: "", DatasetID: datasetID, DisplayName: displayName, PID: documentPID, Tags: mustJSON(tags), FileID: documentID, PDFConvertResult: docExt.ConvertStatus, Ext: mustJSON(docExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
+		docRow := orm.Document{ID: documentID, LazyllmDocID: "", DatasetID: datasetID, DisplayName: displayName, DocumentType: fileDocumentTypeFromName(displayName), PID: documentPID, Tags: mustJSON(tags), FileID: documentID, PDFConvertResult: docExt.ConvertStatus, Ext: mustJSON(docExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
 		taskRow := orm.Task{ID: taskID, LazyllmTaskID: "", DocID: documentID, KbID: datasetID, AlgoID: datasetAlgoIDByID(datasetID), DatasetID: datasetID, TaskType: tType, DocumentPID: documentPID, TargetPID: strings.TrimSpace(item.Task.TargetPID), TargetDatasetID: strings.TrimSpace(item.Task.TargetDatasetID), DisplayName: displayName, Ext: mustJSON(tExt), BaseModel: orm.BaseModel{CreateUserID: userID, CreateUserName: userName, CreatedAt: now, UpdatedAt: now}}
 		if err := tx.Create(&docRow).Error; err != nil {
 			return fmt.Errorf("create document failed")
@@ -2605,6 +2616,7 @@ func createTasksFromZipUpload(r *http.Request, datasetID, userID, userName, uplo
 			ID:               documentID,
 			DatasetID:        datasetID,
 			DisplayName:      filename,
+			DocumentType:     fileDocumentTypeFromName(filename),
 			PID:              documentPID,
 			Tags:             mustJSON(tags),
 			FileID:           documentID,
@@ -2745,6 +2757,7 @@ func startReparseTasksInternal(r *http.Request, datasetID string, taskIDs []stri
 		log.Printf("[startReparseTasksInternal] failed to load llm_config for user=%s: %v", userID, err)
 		llmConfig = nil
 	}
+	llmConfig = normalizeParsingLLMConfig(llmConfig)
 	ocrConfig, err := modelconfig.LoadOCRConfig(r.Context(), store.DB(), userID)
 	if err != nil {
 		log.Printf("[startReparseTasksInternal] failed to load ocr_config for user=%s: %v", userID, err)
@@ -2865,6 +2878,52 @@ func startReparseTasksInternal(r *http.Request, datasetID string, taskIDs []stri
 		Strs("ng_names", ngNames).
 		Msg("reparse tasks submitted")
 	return results, nil
+}
+
+func normalizeParsingLLMConfig(cfg map[string]any) map[string]any {
+	if len(cfg) == 0 {
+		return cfg
+	}
+	out := make(map[string]any, len(cfg)+4)
+	for k, v := range cfg {
+		out[k] = v
+	}
+
+	type roleAlias struct {
+		from      string
+		to        string
+		modelType string
+	}
+	aliases := []roleAlias{
+		{from: "stt", to: "speech_to_text", modelType: "stt"},
+		{from: "text2image", to: "image_generator", modelType: "text2image"},
+		{from: "image_editing", to: "image_editor", modelType: "image_editing"},
+		{from: "text2video", to: "video_generator", modelType: "text2video"},
+	}
+	for _, alias := range aliases {
+		value, exists := out[alias.to]
+		if !exists {
+			value, exists = out[alias.from]
+		}
+		if !exists {
+			continue
+		}
+		roleConfig, ok := value.(map[string]any)
+		if !ok {
+			out[alias.to] = value
+			continue
+		}
+		normalized := make(map[string]any, len(roleConfig)+1)
+		for key, field := range roleConfig {
+			normalized[key] = field
+		}
+		modelType, _ := normalized["type"].(string)
+		if strings.TrimSpace(modelType) == "" {
+			normalized["type"] = alias.modelType
+		}
+		out[alias.to] = normalized
+	}
+	return out
 }
 
 func validateTransferTarget(ctx context.Context, targetDatasetID, targetPID string) error {
@@ -3071,10 +3130,13 @@ func prepareTransferTargets(ctx context.Context, taskRow orm.Task, rootDoc orm.D
 		if node.ID != rootDoc.ID {
 			newPID = idMap[node.PID]
 		}
+		var ext documentExt
+		_ = json.Unmarshal(node.Ext, &ext)
 		clone := node
 		clone.ID = newID
 		clone.LazyllmDocID = ""
 		clone.DatasetID = targetDatasetID
+		clone.DocumentType = resolveDocumentType(node.DocumentType, firstNonEmpty(node.DisplayName, ext.OriginalFilename))
 		clone.PID = newPID
 		clone.FileID = newID
 		clone.CreatedAt = now
@@ -3083,8 +3145,6 @@ func prepareTransferTargets(ctx context.Context, taskRow orm.Task, rootDoc orm.D
 		if err := store.DB().WithContext(ctx).Create(&clone).Error; err != nil {
 			return nil, nil, fmt.Errorf("precreate target document failed")
 		}
-		var ext documentExt
-		_ = json.Unmarshal(node.Ext, &ext)
 		sourceLazyDocID := strings.TrimSpace(node.LazyllmDocID)
 		storedPath := strings.TrimSpace(firstNonEmpty(ext.ParseStoredPath, ext.StoredPath))
 		isFolder := isFolderLikeDocument(node)
@@ -3135,7 +3195,7 @@ func isFolderLikeDocument(doc orm.Document) bool {
 	var ext documentExt
 	_ = json.Unmarshal(doc.Ext, &ext)
 	name := strings.TrimSpace(firstNonEmpty(doc.DisplayName, ext.OriginalFilename))
-	return documentTypeFromName(name) == "FOLDER"
+	return resolveDocumentType(doc.DocumentType, name) == "FOLDER"
 }
 
 func bindTransferTargetsFromReadonly(ctx context.Context, taskRow orm.Task, bindings []transferBinding) ([]transferBinding, error) {
@@ -3450,12 +3510,13 @@ func createTopLevelFolder(ctx context.Context, datasetID, userID, userName strin
 	folderID := newDocID()
 	now := time.Now().UTC()
 	folder := orm.Document{
-		ID:          folderID,
-		DatasetID:   datasetID,
-		DisplayName: folderName,
-		PID:         "",
-		FileID:      "",
-		Ext:         json.RawMessage(`{}`),
+		ID:           folderID,
+		DatasetID:    datasetID,
+		DisplayName:  folderName,
+		DocumentType: "FOLDER",
+		PID:          "",
+		FileID:       "",
+		Ext:          json.RawMessage(`{}`),
 		BaseModel: orm.BaseModel{
 			CreateUserID:   userID,
 			CreateUserName: userName,
@@ -3494,12 +3555,13 @@ func ensureTopLevelFolder(ctx context.Context, datasetID, userID, userName strin
 	folderID := newDocID()
 	now := time.Now().UTC()
 	folder := orm.Document{
-		ID:          folderID,
-		DatasetID:   datasetID,
-		DisplayName: folderName,
-		PID:         "",
-		FileID:      "",
-		Ext:         json.RawMessage(`{}`),
+		ID:           folderID,
+		DatasetID:    datasetID,
+		DisplayName:  folderName,
+		DocumentType: "FOLDER",
+		PID:          "",
+		FileID:       "",
+		Ext:          json.RawMessage(`{}`),
 		BaseModel: orm.BaseModel{
 			CreateUserID:   userID,
 			CreateUserName: userName,

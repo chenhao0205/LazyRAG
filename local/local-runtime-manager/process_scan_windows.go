@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const windowsProcessScanTimeout = 10 * time.Second
+// CIM process enumeration can take longer while Windows Defender is scanning
+// a freshly extracted desktop runtime. Keep the scan bounded, but allow enough
+// time for slower supported Windows runner and user machines.
+const windowsProcessScanTimeout = 30 * time.Second
+const desktopOwnerPIDEnvVar = "LAZYMIND_DESKTOP_OWNER_PID"
 
 type windowsProcessInfo struct {
 	ProcessID       uint32  `json:"ProcessId"`
@@ -26,7 +30,7 @@ type windowsProcessInfo struct {
 // Windows inventory API and lets the orphan scanner match Python/Node children
 // whose executable itself lives outside the LazyMind runtime tree.
 func scanLocalRuntimeProcesses(paths RuntimePaths) ([]LocalProcessRecord, error) {
-	command := "$p=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine); ConvertTo-Json -InputObject $p -Compress"
+	command := "$p=@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,ExecutablePath,CommandLine); ConvertTo-Json -InputObject $p -Compress"
 	ctx, cancel := context.WithTimeout(context.Background(), windowsProcessScanTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
@@ -50,6 +54,10 @@ func scanLocalRuntimeProcesses(paths RuntimePaths) ([]LocalProcessRecord, error)
 	for pid := parents[os.Getpid()]; pid > 0 && !excluded[pid]; pid = parents[pid] {
 		excluded[pid] = true
 	}
+	ownerPID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv(desktopOwnerPIDEnvVar)))
+	if ownerPID > 0 {
+		excludeProcessTree(excluded, parents, ownerPID)
+	}
 	records := make([]LocalProcessRecord, 0, len(processes))
 	for _, process := range processes {
 		pid := int(process.ProcessID)
@@ -71,6 +79,23 @@ func scanLocalRuntimeProcesses(paths RuntimePaths) ([]LocalProcessRecord, error)
 		})
 	}
 	return records, nil
+}
+
+func excludeProcessTree(excluded map[int]bool, parents map[int]int, rootPID int) {
+	if rootPID <= 0 {
+		return
+	}
+	excluded[rootPID] = true
+	for pid := range parents {
+		seen := map[int]bool{}
+		for ancestor := pid; ancestor > 0 && !seen[ancestor]; ancestor = parents[ancestor] {
+			if ancestor == rootPID {
+				excluded[pid] = true
+				break
+			}
+			seen[ancestor] = true
+		}
+	}
 }
 
 func nullableText(value *string) string {

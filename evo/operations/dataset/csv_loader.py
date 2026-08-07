@@ -8,6 +8,8 @@ from typing import Any
 CASE_FIELDS = tuple('answer difficulty difficulty_rationale grading_guidance id question question_type reasoning_steps '
                     'reference_chunk_ids reference_context reference_doc reference_doc_ids source_message_id '
                     'source_preparation type_rationale'.split())
+# Flattened from dataset.finalize_case enhancement; optional for CSV import.
+ENHANCE_FIELDS = ('key_points', 'forbidden_claims')
 AUDIT_FIELDS = ('original_id', 'source', 'kb_id', 'csv_path')
 DEFAULT_MIN_CASE_COUNT = 100
 QUESTION_TYPES = ('single_hop', 'single_doc_multi_hop', 'multi_doc_multi_hop', 'table_list', 'formula')
@@ -74,14 +76,18 @@ def normalize_eval_case(raw: Mapping[str, Any], *, default_id: str = '') -> dict
     if not isinstance(raw, Mapping):
         raise ValueError('eval case must be an object')
     prep = raw.get('source_preparation')
-    prep = json_object(prep, message='source_preparation must be valid JSON') if isinstance(prep, str) and prep.strip() \
-        else prep if isinstance(prep, Mapping) else {}
+    prep = (
+        json_object(prep, message='source_preparation must be valid JSON')
+        if isinstance(prep, str) and prep.strip() else prep if isinstance(prep, Mapping) else {}
+    )
     row = {field: raw.get(field, '') for field in CASE_FIELDS}
     row.update({'id': as_text(row['id'] or default_id), 'question_type': as_text(row['question_type']),
                 'difficulty': as_text(row['difficulty']), 'source_message_id': as_text(row['source_message_id']),
                 'source_preparation': dict(prep)})
     for field in LIST_FIELDS:
         row[field] = as_list(row[field])
+    row['key_points'] = _key_points(raw.get('key_points'))
+    row['forbidden_claims'] = _forbidden_claims(raw.get('forbidden_claims'))
 
     refs = row['source_preparation'].get('context_reference')
     if refs and (not isinstance(refs, list) or not all(isinstance(item, Mapping) for item in refs)):
@@ -97,6 +103,37 @@ def normalize_eval_case(raw: Mapping[str, Any], *, default_id: str = '') -> dict
     if row['difficulty'] not in DIFFICULTIES:
         raise ValueError(f'unsupported difficulty: {row["difficulty"]}')
     return row
+
+
+def _key_points(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    rows = []
+    for index, item in enumerate(value, 1):
+        if isinstance(item, Mapping):
+            statement = as_text(item.get('statement') or item.get('text') or item.get('point'))
+            if not statement:
+                continue
+            evidence = item.get('evidence_chunk_ids')
+            rows.append({
+                'id': as_text(item.get('id')) or f'kp_{index}',
+                'statement': statement,
+                'evidence_chunk_ids': (
+                    [as_text(chunk_id) for chunk_id in evidence if as_text(chunk_id)]
+                    if isinstance(evidence, list | tuple) else []
+                ),
+            })
+            continue
+        statement = as_text(item)
+        if statement:
+            rows.append({'id': f'kp_{index}', 'statement': statement, 'evidence_chunk_ids': []})
+    return rows
+
+
+def _forbidden_claims(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [as_text(item) for item in value if as_text(item)]
 
 
 def load_eval_dataset_csv(path: str | Path) -> list[dict[str, Any]]:

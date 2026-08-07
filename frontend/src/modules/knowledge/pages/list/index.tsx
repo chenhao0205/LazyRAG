@@ -154,6 +154,7 @@ const KnowledgePage: FC = () => {
   const syncCreateVm = useSyncKnowledgeBaseCreation({
     onSuccess: () => {
       getTableData();
+      createKnowledgeRef.current?.onClose();
     },
   });
   const cloudSourceRequestSeqRef = useRef(0);
@@ -748,7 +749,7 @@ const KnowledgePage: FC = () => {
             return relArr?.[0];
           }
           if (
-            ["pdf", "docx", "doc", "pptx"].includes(
+            ["pdf", "docx", "doc", "pptx", "pptm"].includes(
               rel_path?.split(".")?.at(-1) ?? "",
             )
           ) {
@@ -874,6 +875,8 @@ const KnowledgePage: FC = () => {
           pageSize: pageSize,
           keyword: values.keyword,
           tags: values?.tags && values.tags !== ALL_TAGS ? [values.tags] : [],
+        }, {
+          params: { source: "manual" },
         })
         .then((res) => {
           handleSuccess(

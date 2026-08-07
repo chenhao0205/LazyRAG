@@ -159,6 +159,8 @@ export type SelfEvolutionPageView = "home" | "detail";
 
 export type SelfEvolutionRouteState = {
   openWorkbench?: boolean;
+  activeWorkbenchTab?: "messages" | "processes" | "artifacts" | null;
+  selectedViewStage?: ThreadEventStage;
 };
 
 export type KnowledgeBaseOption = {
@@ -301,6 +303,23 @@ export type PxCategoryMetricAverage = {
   category: string;
   caseCount: number;
   metrics: Record<PxMetricKey, number>;
+};
+
+export type EvalReportMetricKey =
+  | "correctness"
+  | "relevance"
+  | "completeness"
+  | "groundedness"
+  | "format_compliance"
+  | "answer_quality"
+  | "retrieval_quality"
+  | "overall";
+
+export type EvalReportQuestionTypeSummary = {
+  questionType: string;
+  caseCount: number;
+  scoredCaseCount: number;
+  metrics: Record<EvalReportMetricKey, number>;
 };
 
 export type EvalQuestionTypeSummary = {

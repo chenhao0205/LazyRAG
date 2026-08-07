@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { message } from "antd";
 import {
   AppstoreOutlined,
   BookOutlined,
@@ -68,7 +69,7 @@ const groups: Array<{
 }> = [
   { type: "knowledge_base", shortcut: "kb", labelKey: "chat.mentionKnowledgeBase", icon: <DatabaseOutlined /> },
   { type: "skill", shortcut: "skill", labelKey: "chat.mentionSkill", icon: <BulbOutlined /> },
-  { type: "plugin", shortcut: "plugin", labelKey: "chat.mentionPlugin", icon: <AppstoreOutlined /> },
+  { type: "plugin", shortcut: "workflow", labelKey: "chat.mentionPlugin", icon: <AppstoreOutlined /> },
   { type: "tool", shortcut: "tool", labelKey: "chat.mentionTool", icon: <ThunderboltOutlined /> },
   { type: "prompt", shortcut: "prompt", labelKey: "chat.mentionPrompt", icon: <BookOutlined /> },
   { type: "conversation", shortcut: "chat", labelKey: "chat.mentionConversation", icon: <CommentOutlined /> },
@@ -333,6 +334,13 @@ const MentionEditor = forwardRef<MentionEditorRef, {
     const editor = editorRef.current;
     const currentQuery = queryRef.current;
     if (!editor || !currentQuery) return;
+    if (
+      candidate.type === "plugin" &&
+      serializeEditor(editor).mentions.some((mention) => mention.type === "plugin")
+    ) {
+      message.warning(t("chat.mentionSinglePluginOnly"));
+      return;
+    }
     const selection = window.getSelection();
     currentQuery.range.deleteContents();
     if (candidate.type === "prompt") {
@@ -366,7 +374,7 @@ const MentionEditor = forwardRef<MentionEditorRef, {
     setActiveIndex(-1);
     emit();
     editor.focus();
-  }, [emit]);
+  }, [emit, t]);
 
   const visibleCandidates = candidates.filter((candidate) => {
     if (expandedTypes.has(candidate.type)) return true;

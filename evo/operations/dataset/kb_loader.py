@@ -65,8 +65,8 @@ def build_corpus_snapshot(report: Mapping[str, Any], source_config: Mapping[str,
             'case_provenance': list(report.get('case_provenance') or [])}
 
 
-def load_kb_doc_nodes(kb_doc: Any, *, kb_id: str, doc_id: str = '', group: str = 'block',
-                      page_size: int = 100) -> Iterable[Any]:
+def load_kb_doc_nodes(kb_doc: Any, *, kb_id: str, doc_id: str = '', group: str = 'block', page_size: int = 100
+                      ) -> Iterable[Any]:
     offset = 0
     while True:
         doc_filter = {'doc_ids': {doc_id}} if doc_id else {}
@@ -240,7 +240,8 @@ def _direct_kb_units(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     for item in config.get('documents') or ():
         if isinstance(item, Mapping) and not as_text(item.get('content') or item.get('text')):
             doc_ids.append(as_text(item.get('doc_id')))
-    if not kb_id: return []
+    if not kb_id:
+        return []
     units, kb_doc = [], _document_client()
     for doc_id in (tuple(dict.fromkeys(item for item in doc_ids if item)) or ('',)):
         for group in KB_GROUPS:
@@ -299,8 +300,7 @@ def _document_client() -> Any:
     return _DOCUMENTS[key]
 
 
-def _verify_kb_evidence_with_timeout(
-    kb_id: str, doc_ids: Iterable[str], chunk_ids: Iterable[str], timeout: float,
-) -> tuple[bool, str]:
+def _verify_kb_evidence_with_timeout(kb_id: str, doc_ids: Iterable[str], chunk_ids: Iterable[str], timeout: float
+                                     ) -> tuple[bool, str]:
     del timeout
     return verify_kb_evidence(kb_id, doc_ids, chunk_ids)

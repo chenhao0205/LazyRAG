@@ -10,6 +10,7 @@ import {
   RightOutlined,
   ApiOutlined,
   CheckOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 
 import {
@@ -22,12 +23,17 @@ import {
   useTaskCenterStore,
 } from "@/modules/chat/store/taskCenter";
 import { usePluginStore } from "@/modules/chat/store/pluginPanel";
-import { resolveCoreAssetUrl } from "@/modules/knowledge/utils/imageUrl";
+import {
+  basenameFromPath,
+  resolveCoreAssetUrl,
+} from "@/modules/knowledge/utils/imageUrl";
+import { downloadStream } from "@/modules/chat/utils/download";
 import "./index.scss";
 
 interface Props {
   sessionId: string;
   onClose?: () => void;
+  showHeader?: boolean;
 }
 
 const EMPTY_TASKS: SubAgentTask[] = [];
@@ -50,6 +56,25 @@ function imageUrlOf(value: any): string {
     return resolved;
   }
   return "";
+}
+
+function isLikelyImage(path: string): boolean {
+  const pathname = path.split(/[?#]/, 1)[0].toLowerCase();
+  return /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/.test(pathname);
+}
+
+// Extract the raw text content from a text/json artifact value for download.
+function extractTextContent(artifact: TaskArtifact): string {
+  const v = artifact.value;
+  if (!v) return "";
+  if (artifact.content_type === "json") {
+    try {
+      return JSON.stringify(v.data ?? v, null, 2);
+    } catch {
+      return String(v.data ?? v ?? "");
+    }
+  }
+  return v.text ?? "";
 }
 
 // Strip lazyllm tool-call/result XML tags from think content, keeping only the pure reasoning text.
@@ -224,77 +249,147 @@ function ArtifactGrid({ artifacts }: { artifacts: TaskArtifact[] }) {
     (a) => a.content_type === "text" || a.content_type === "json",
   );
 
-  const fileListPaths = fileLists.flatMap((a) =>
-    Array.isArray(a.value?.paths) ? a.value.paths : [],
-  );
   const imageUrls = images
     .map((a) => ({
       key: `img-${a.slot}-${a.seq}`,
       src: imageUrlOf(a.value),
+      filename:
+        a.value?.filename ||
+        basenameFromPath(a.value?.url || a.value?.path || a.slot) ||
+        "image",
     }))
     .filter((img) => Boolean(img.src));
-  const fileListUrls = fileListPaths
-    .map((p: string, i: number) => ({
-      key: `fl-${i}`,
-      src: resolveCoreAssetUrl(p),
-    }))
-    .filter(
-      (img) =>
-        Boolean(img.src) &&
-        (img.src.startsWith("/static-files/") ||
-          img.src.startsWith("/api/core/static-files/") ||
-          img.src.startsWith("http://") ||
-          img.src.startsWith("https://")),
-    );
+  const fileListItems = fileLists.flatMap((artifact) => {
+    const paths: string[] = Array.isArray(artifact.value?.paths)
+      ? artifact.value.paths.filter(
+          (path: unknown): path is string => typeof path === "string",
+        )
+      : [];
+    return paths
+      .map((path: string, pathIndex: number) => ({
+        key: `fl-${artifact.slot}-${artifact.seq}-${pathIndex}`,
+        src: resolveCoreAssetUrl(path),
+        filename: basenameFromPath(path) || `${artifact.slot}-${pathIndex + 1}`,
+        isImage: isLikelyImage(path),
+      }))
+      .filter((item) => Boolean(item.src));
+  });
+  const fileListImages = fileListItems.filter((item) => item.isImage);
+  const fileListFiles = fileListItems.filter((item) => !item.isImage);
+  const previewImages = [...imageUrls, ...fileListImages].filter(
+    (image, index, items) =>
+      items.findIndex((candidate) => candidate.src === image.src) === index,
+  );
 
   const total =
-    imageUrls.length + fileListUrls.length + files.length + texts.length;
+    previewImages.length + fileListFiles.length + files.length + texts.length;
 
   return (
     <CollapsibleSection title={`${t("taskCenter.artifacts")} (${total})`}>
       <div className="task-artifacts-inner">
-        {(imageUrls.length > 0 || fileListUrls.length > 0) && (
+        {previewImages.length > 0 && (
           <div className="task-artifacts-grid">
             <Image.PreviewGroup>
-              {imageUrls.map((img) => (
-                <Image
-                  key={img.key}
-                  src={img.src}
-                  width={64}
-                  height={64}
-                  className="task-artifact-thumb"
-                />
-              ))}
-              {fileListUrls.map((img) => (
-                <Image
-                  key={img.key}
-                  src={img.src}
-                  width={64}
-                  height={64}
-                  className="task-artifact-thumb"
-                />
+              {previewImages.map((img) => (
+                <div className="task-artifact-preview" key={img.key}>
+                  <Image
+                    src={img.src}
+                    width={64}
+                    height={64}
+                    className="task-artifact-thumb"
+                  />
+                  <a
+                    href={img.src}
+                    download={img.filename}
+                    className="task-artifact-preview-download"
+                    title={`${t("taskCenter.download")} ${img.filename}`}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <DownloadOutlined />
+                  </a>
+                </div>
               ))}
             </Image.PreviewGroup>
           </div>
         )}
-        {files.map((a) => (
-          <div className="task-artifact-file" key={`file-${a.slot}-${a.seq}`}>
+        {fileListFiles.map((file) => (
+          <div className="task-artifact-file" key={file.key}>
             <FileTextOutlined />
-            <span className="task-artifact-file-name">
-              {a.value?.filename || a.slot}
-            </span>
+            <a
+              href={file.src}
+              download={file.filename}
+              className="task-artifact-file-name task-artifact-file-link"
+              title={`${t("taskCenter.download")} ${file.filename}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {file.filename}
+            </a>
           </div>
         ))}
-        {texts.map((a) => (
-          <div className="task-artifact-text" key={`txt-${a.slot}-${a.seq}`}>
-            <div className="task-artifact-text-key">{a.slot}</div>
-            <div className="task-artifact-text-body">
-              {a.content_type === "json"
-                ? JSON.stringify(a.value?.data ?? a.value)
-                : a.value?.text}
+        {files.map((a) => {
+          const downloadUrl = resolveCoreAssetUrl(a.value?.url || "");
+          const fileName: string =
+            a.value?.filename || a.slot || "download";
+
+          return (
+            <div
+              className="task-artifact-file"
+              key={`file-${a.slot}-${a.seq}`}
+            >
+              <FileTextOutlined />
+              {downloadUrl ? (
+                <a
+                  href={downloadUrl}
+                  download={fileName}
+                  className="task-artifact-file-name task-artifact-file-link"
+                  title={`${t("taskCenter.download")} ${fileName}`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {fileName}
+                </a>
+              ) : (
+                <span className="task-artifact-file-name">
+                  {fileName}
+                </span>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
+        {texts.map((a) => {
+          const textContent = extractTextContent(a);
+          const textFileName =
+            a.slot && a.slot.includes(".")
+              ? a.slot
+              : `${a.slot || "artifact"}.txt`;
+
+          return (
+            <div className="task-artifact-text" key={`txt-${a.slot}-${a.seq}`}>
+              <div className="task-artifact-text-header">
+                <span className="task-artifact-text-key">{a.slot}</span>
+                <button
+                  type="button"
+                  className="task-artifact-download-btn"
+                  title={`${t("taskCenter.download")} ${textFileName}`}
+                  aria-label={`${t("taskCenter.download")} ${textFileName}`}
+                  onClick={() =>
+                    downloadStream(
+                      new Blob([textContent], { type: "text/plain;charset=utf-8" }),
+                      textFileName,
+                    )
+                  }
+                >
+                  <DownloadOutlined />
+                  {t("taskCenter.download")}
+                </button>
+              </div>
+              <div className="task-artifact-text-body">
+                {a.content_type === "json"
+                  ? JSON.stringify(a.value?.data ?? a.value)
+                  : a.value?.text}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </CollapsibleSection>
   );
@@ -372,7 +467,11 @@ function TaskCard({ task }: { task: SubAgentTask }) {
         >
           {collapsed ? <RightOutlined /> : <DownOutlined />}
         </button>
-        <span className="task-card-title">{task.title}</span>
+        <Tooltip title={task.title} placement="topLeft">
+          <span className="task-card-title" title={task.title}>
+            {task.title}
+          </span>
+        </Tooltip>
         <span className="task-card-tag">{t("taskCenter.panelTitle")}</span>
         <StatusBadge status={task.status} />
       </div>
@@ -418,7 +517,7 @@ function TaskCard({ task }: { task: SubAgentTask }) {
 type FilterKey = "all" | "running" | "succeeded" | "failed";
 
 const TaskCenter = (props: Props) => {
-  const { sessionId, onClose } = props;
+  const { sessionId, onClose, showHeader = true } = props;
   const { t } = useTranslation();
   const [filter, setFilter] = useState<FilterKey>("all");
 
@@ -453,7 +552,7 @@ const TaskCenter = (props: Props) => {
 
   return (
     <div className="task-center">
-      <div className="task-center-header">
+      {showHeader && <div className="task-center-header">
         <span className="task-center-title">
           {t("taskCenter.panelTitle")}
         </span>
@@ -467,7 +566,7 @@ const TaskCenter = (props: Props) => {
             <RightOutlined />
           </button>
         )}
-      </div>
+      </div>}
       <div className="task-center-filters">
         {filterDefs.map(({ key, label }) => (
           <button

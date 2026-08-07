@@ -4,16 +4,15 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+from evo.operations.public_contracts import clean_text as _text, mapping_or_empty as _mapping
+
 from .classify import classify_case
 from .cluster import cluster_traces
 from .repair_groups import build_repair_group_queue
 from .trace_summary import build_trace_summary
 
 
-def build_analysis_detail(
-    classifications: tuple[Mapping[str, Any], ...],
-    clusters: Mapping[str, Any],
-) -> dict[str, Any]:
+def build_analysis_detail(classifications: tuple[Mapping[str, Any], ...], clusters: Mapping[str, Any]) -> dict[str, Any]:
     rows = sorted(
         (dict(row) for row in classifications if isinstance(row, Mapping)),
         key=lambda row: _text(row.get('case_id')),
@@ -64,20 +63,14 @@ def build_analysis_detail(
     }
 
 
-def build_analysis_summary(
-    run_id: str,
-    classifications: tuple[Mapping[str, Any], ...],
-    clusters: Mapping[str, Any],
-) -> dict[str, Any]:
+def build_analysis_summary(run_id: str, classifications: tuple[Mapping[str, Any], ...], clusters: Mapping[str, Any]
+                           ) -> dict[str, Any]:
     _validate_clusters(classifications, clusters)
     return build_analysis_detail(classifications, clusters) | {'run_id': str(run_id)}
 
 
-def build_analysis_from_answers(
-    cases: Mapping[str, Mapping[str, Any]],
-    answers: Mapping[str, Mapping[str, Any]],
-    judges: Mapping[str, Mapping[str, Any]],
-) -> dict[str, Any]:
+def build_analysis_from_answers(cases: Mapping[str, Mapping[str, Any]], answers: Mapping[str, Mapping[str, Any]],
+                                judges: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     classifications = []
     for case_id, case in cases.items():
         trace = build_trace_summary(case, answers[case_id])
@@ -161,10 +154,6 @@ def top_failure_patterns(rows: list[Mapping[str, Any]], clusters: Mapping[str, A
     ]
 
 
-def _mapping(value: object) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
 def _avg(values: Any) -> float:
     rows = []
     for value in values:
@@ -173,7 +162,3 @@ def _avg(values: Any) -> float:
         except (TypeError, ValueError):
             pass
     return round(sum(rows) / len(rows), 4) if rows else 0.0
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()

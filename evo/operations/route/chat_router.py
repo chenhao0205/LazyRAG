@@ -19,7 +19,7 @@ from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_ra
 
 DEFAULT_DISABLED_TOOLS = tuple(
     'temp_kb calculator wikipedia web_search academic_search url_fetch multimodal image_generator image_editor '
-    'vocab_learn read_memory memory_editor skill_editor local_fs feishu notion '
+    'vocab_learn skill_editor local_fs feishu notion '
     'schedule create_schedule list_schedules cancel_schedule update_schedule trigger_schedule '
     'ask_user create_subagent list_subagents read_user_attachment find_user_attachment mcp plugin'.split()
 )
@@ -189,11 +189,7 @@ async def _call_router_chat_once(request: RouterChatRequest) -> dict[str, Any]:
         return _failed({}, _target(request), 'chat_unknown_error', f'{type(exc).__name__}: {exc}')
 
 
-async def _stream_chat(
-    request: RouterChatRequest,
-    timeout: httpx.Timeout,
-    deadline: float,
-) -> dict[str, Any]:
+async def _stream_chat(request: RouterChatRequest, timeout: httpx.Timeout, deadline: float) -> dict[str, Any]:
     target = _target(request)
     state = ChatStreamState(frames=[], answer_parts=[], sources=[])
     stream_cm: Any | None = None
@@ -234,15 +230,9 @@ async def _stream_chat(
             await _exit_stream(stream_cm)
 
 
-async def _consume_response(
-    client: httpx.AsyncClient,
-    request: RouterChatRequest,
-    target: Mapping[str, Any],
-    state: ChatStreamState,
-    response: httpx.Response,
-    deadline: float,
-    first_frame_deadline: float,
-) -> dict[str, Any]:
+async def _consume_response(client: httpx.AsyncClient, request: RouterChatRequest, target: Mapping[str, Any],
+                            state: ChatStreamState, response: httpx.Response, deadline: float,
+                            first_frame_deadline: float) -> dict[str, Any]:
     pending_data_lines: list[str] = []
     lines = response.aiter_lines()
 
@@ -268,11 +258,8 @@ async def _consume_response(
             return result
 
 
-def _target_with_router_detail(
-    target: Mapping[str, Any],
-    detail: Mapping[str, Any],
-    request: RouterChatRequest,
-) -> dict[str, Any]:
+def _target_with_router_detail(target: Mapping[str, Any], detail: Mapping[str, Any], request: RouterChatRequest
+                               ) -> dict[str, Any]:
     instance_urls = [str(url) for url in detail.get('healthy_instance_urls') or [] if str(url).strip()]
     if not instance_urls:
         raise ValueError('router detail did not include a healthy instance URL')
@@ -284,11 +271,8 @@ def _target_with_router_detail(
     }
 
 
-async def _router_algorithm_detail(
-    client: httpx.AsyncClient,
-    request: RouterChatRequest,
-    deadline: float,
-) -> dict[str, Any]:
+async def _router_algorithm_detail(client: httpx.AsyncClient, request: RouterChatRequest, deadline: float
+                                   ) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return _failed({}, _target(request), 'router_algorithm_timeout',
@@ -356,11 +340,7 @@ def _payload(request: RouterChatRequest) -> dict[str, Any]:
     return payload
 
 
-def _accept_payload(
-    target: Mapping[str, Any],
-    state: ChatStreamState,
-    payload_text: str,
-) -> dict[str, Any] | None:
+def _accept_payload(target: Mapping[str, Any], state: ChatStreamState, payload_text: str) -> dict[str, Any] | None:
     text = payload_text.strip()
     try:
         frame = json.loads(text)
@@ -445,12 +425,8 @@ def _normalize(target: Mapping[str, Any], stream: Mapping[str, Any] | ChatStream
     }
 
 
-def _failed(
-    stream: Mapping[str, Any] | ChatStreamState,
-    target: Mapping[str, Any],
-    error_type: str,
-    message: str,
-) -> dict[str, Any]:
+def _failed(stream: Mapping[str, Any] | ChatStreamState, target: Mapping[str, Any], error_type: str, message: str
+            ) -> dict[str, Any]:
     answer = stream.answer if isinstance(stream, ChatStreamState) else str(stream.get('answer') or '')
     return {
         'status': 'failed',
@@ -470,12 +446,8 @@ def _failed(
     }
 
 
-async def _cancel_chat(
-    request: RouterChatRequest,
-    target: Mapping[str, Any],
-    *,
-    client: httpx.AsyncClient | None = None,
-) -> dict[str, Any]:
+async def _cancel_chat(request: RouterChatRequest, target: Mapping[str, Any], *, client: httpx.AsyncClient | None = None
+                       ) -> dict[str, Any]:
     urls = _cancel_urls(request.router_admin_url, target.get('healthy_instance_urls'))
     owns_client = client is None
     active_client = client or httpx.AsyncClient(timeout=ROUTER_CANCEL_TIMEOUT_SECONDS)
@@ -767,7 +739,7 @@ def _trace_span_may_have_kb_result(span: Mapping[str, Any], attrs: Mapping[str, 
     if str(attrs.get('lazyllm.semantic_type') or '') != 'tool':
         return False
     text = str(attrs.get('lazyllm.io.input') or '') + str(attrs.get('lazyllm.io.output') or '')
-    return 'KBToolGroup' in text or any(tool in text for tool in KB_TOOL_NAMES)
+    return 'KBToolkit' in text or any(tool in text for tool in KB_TOOL_NAMES)
 
 
 def _tool_result_payloads(text: str) -> list[Mapping[str, Any]]:
@@ -881,10 +853,8 @@ def _unique_sources(sources: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     return result
 
 
-def _source_refs(
-    sources: Sequence[Mapping[str, Any]],
-    target: Mapping[str, Any],
-) -> tuple[list[Any], list[str], list[str]]:
+def _source_refs(sources: Sequence[Mapping[str, Any]], target: Mapping[str, Any]
+                 ) -> tuple[list[Any], list[str], list[str]]:
     contexts: list[Any] = []
     doc_ids: list[str] = []
     chunk_ids: list[str] = []

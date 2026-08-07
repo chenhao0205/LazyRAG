@@ -19,11 +19,11 @@ fake_repair = types.ModuleType('json_repair')
 fake_repair.repair_json = lambda raw, return_objects=False: json.loads(raw) if return_objects else raw
 sys.modules.setdefault('json_repair', fake_repair)
 
+import evo.operations.eval.judge
 from evo.operations.eval.judge import judge_case
-from evo.operations.eval.materializers import (
+from evo.operations.eval.summary import (
     build_eval_detail_summary,
     build_eval_frontend_view,
-    eval_materializers,
 )
 from evo.operations.eval.answer import call_chat_answer, case_kb_id, _with_case
 from evo.operations.route.chat_router import RouterChatRequest, async_call_router_chat
@@ -247,6 +247,7 @@ def test_zero_diagnostic_scores_do_not_fallback_to_positive_defaults(monkeypatch
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeZeroDiagnosticsLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeZeroDiagnosticsLLM)
     case = {
         'id': 'case_zero',
         'question': 'What fact is supported?',
@@ -282,6 +283,7 @@ def test_evidence_mapping_falls_back_and_separates_reference_and_retrieved_suppo
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeClaimsWithoutMappingLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeClaimsWithoutMappingLLM)
     case = {
         'id': 'case_mapping',
         'question': 'What fact is supported?',
@@ -320,6 +322,7 @@ def test_judge_adds_key_point_and_rank_diagnostics(monkeypatch):
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeLLM)
     case = {
         'id': 'case_0001',
         'question': 'When is launch and what is the price?',
@@ -375,83 +378,14 @@ def test_judge_adds_key_point_and_rank_diagnostics(monkeypatch):
     assert result['score_breakdown']['answer_quality_score']['weights']['key_point_recall'] == 0.20
 
 
-def test_eval_judge_materializer_merges_dataset_pr5_case_enhance(monkeypatch):
-    import evo.operations.eval.materializers as materializers_module
 
-    captured = {}
-
-    def fake_judge_case(case, answer, policy):
-        captured['case'] = case
-        return {
-            'case_id': case['id'],
-            'case': dict(case),
-            'rag_answer': dict(answer),
-            'trace_id': 'trace-enhance',
-            'target': {},
-            'tool_errors': [],
-            'answer_correctness': 1.0,
-            'answer_relevance': 1.0,
-            'completeness': 1.0,
-            'groundedness': 1.0,
-            'format_compliance': 1.0,
-            'failure_type': 'none',
-            'reason': 'ok',
-            'defect': '',
-            'key_point_recall': 1.0,
-            'key_point_precision': 1.0,
-            'semantic_similarity': 1.0,
-            'claim_support_rate': 1.0,
-            'unsupported_claim_rate': 0.0,
-            'retrieval_hit_at_k': 1.0,
-            'retrieval_recall_at_k': 1.0,
-            'retrieval_precision_at_k': 1.0,
-            'retrieval_mrr': 1.0,
-            'retrieval_ndcg': 1.0,
-            'context_relevance_avg': 1.0,
-            'context_noise_rate': 0.0,
-            'answer_quality_score': 1.0,
-            'retrieval_quality_score': 1.0,
-            'overall_score': 1.0,
-            'retrieval_failure_type': 'none',
-            'quality_label': 'good',
-            'is_correct': True,
-            'matched_key_points': case['key_points'],
-            'missing_points': [],
-            'wrong_points': [],
-            'extra_points': [],
-            'unsupported_claims': [],
-            'evidence_mapping': [],
-            'claims': [],
-            'metric_layers': {},
-            'score_breakdown': {},
-        }
-
-    monkeypatch.setattr(materializers_module, 'judge_case', fake_judge_case)
-
-    output = eval_materializers()['eval.judge'](None, {
-        'case': {
-            'id': 'case-enhance',
-            'question': 'q',
-            'answer': 'a',
-            'key_points': [{'id': 'old', 'statement': 'old'}],
-        },
-        'case_enhance': {
-            'key_points': [{'id': 'new', 'statement': 'new', 'evidence_chunk_ids': ['chunk-a']}],
-            'forbidden_claims': ['forbidden'],
-        },
-        'answer': {'status': 'ok', 'answer': 'a'},
-        'policy': {},
-    })
-
-    assert captured['case']['key_points'][0]['id'] == 'new'
-    assert captured['case']['forbidden_claims'] == ['forbidden']
-    assert output['judge']['case']['key_points'][0]['id'] == 'new'
 
 
 def test_optional_forbidden_claim_metrics_output_only_when_present(monkeypatch):
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeContradictionLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeContradictionLLM)
     case = {
         'id': 'case_0006',
         'question': 'What fact is supported?',
@@ -488,6 +422,7 @@ def test_wrong_answer_is_labeled_bad(monkeypatch):
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeBadLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeBadLLM)
     case = {
         'id': 'case_0008',
         'question': 'What fact is supported?',
@@ -522,6 +457,7 @@ def test_failed_rag_answer_is_labeled_infra_failure(monkeypatch):
     import evo.llm
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeLLM)
     case = {
         'id': 'case_0009',
         'question': 'What fact is supported?',
@@ -559,6 +495,7 @@ def test_eval_detail_summary_exposes_frontend_overview_fields(monkeypatch):
     import evo.operations.eval.answer_process as answer_process
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeLLM)
 
     def fake_panel(row, **kwargs):
         return {
@@ -655,7 +592,7 @@ def test_eval_detail_summary_exposes_frontend_overview_fields(monkeypatch):
         }
 
     monkeypatch.setattr(answer_process, 'build_answer_process_panel', fake_panel)
-    monkeypatch.setattr('evo.operations.eval.materializers.build_answer_process_panel', fake_panel)
+    monkeypatch.setattr('evo.operations.eval.summary.build_answer_process_panel', fake_panel)
 
     case = {
         'id': 'case_frontend_1',
@@ -761,6 +698,7 @@ def test_frontend_failure_status_guide_for_infra_and_retrieval(monkeypatch):
     import evo.operations.eval.answer_process as answer_process
 
     monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeLLM)
+    monkeypatch.setattr(evo.operations.eval.judge, 'LazyLLMClient', FakeLLM)
     monkeypatch.setattr(
         answer_process,
         'build_answer_process_panel',
@@ -772,7 +710,7 @@ def test_frontend_failure_status_guide_for_infra_and_retrieval(monkeypatch):
                       'status': 'missing', 'hint': '', 'raw_entry': 'advanced'},
         },
     )
-    monkeypatch.setattr('evo.operations.eval.materializers.build_answer_process_panel',
+    monkeypatch.setattr('evo.operations.eval.summary.build_answer_process_panel',
                         answer_process.build_answer_process_panel)
 
     infra = {

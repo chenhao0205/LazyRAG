@@ -28,7 +28,11 @@ import {
   withModelProviderJsonOptions,
 } from "../api";
 import ToolManagementSection from "../components/ToolManagementSection";
-import { isDeveloperModeActive } from "@/utils/developerMode";
+import DependencyInstallSection from "../components/DependencyInstallSection";
+import {
+  DEVELOPER_ACTIVE_EVENT,
+  isDeveloperModeActive,
+} from "@/utils/developerMode";
 
 type ServiceCategoryKey = "parsing" | "search" | "academic";
 type ServiceProviderCategory = "ocr" | "search" | "datasource";
@@ -531,6 +535,7 @@ export default function ExternalServicesPage() {
   const [services, setServices] = useState<ExternalServiceConfig[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [developerActive, setDeveloperActive] = useState(isDeveloperModeActive);
   const requestIdRef = useRef(0);
   const normalizedSearchValue = "";
   const [categorySearchValues, setCategorySearchValues] = useState<Record<"parsing" | "search", string>>({
@@ -581,6 +586,32 @@ export default function ExternalServicesPage() {
   }, [currentLanguage, t]);
 
   useEffect(() => loadExternalServices(normalizedSearchValue), [loadExternalServices, normalizedSearchValue]);
+
+  useEffect(() => {
+    const syncDeveloperActive = () => {
+      setDeveloperActive(isDeveloperModeActive());
+    };
+    const handleDeveloperActiveChange = (event: Event) => {
+      const nextActive = (event as CustomEvent<{ active?: boolean }>).detail
+        ?.active;
+      setDeveloperActive(
+        typeof nextActive === "boolean" ? nextActive : isDeveloperModeActive(),
+      );
+    };
+
+    window.addEventListener("storage", syncDeveloperActive);
+    window.addEventListener(
+      DEVELOPER_ACTIVE_EVENT,
+      handleDeveloperActiveChange,
+    );
+    return () => {
+      window.removeEventListener("storage", syncDeveloperActive);
+      window.removeEventListener(
+        DEVELOPER_ACTIVE_EVENT,
+        handleDeveloperActiveChange,
+      );
+    };
+  }, []);
 
   function maskAPIKey(raw: string) {
     const trimmed = raw.trim();
@@ -1084,9 +1115,10 @@ export default function ExternalServicesPage() {
 
           <div className="model-provider-tools-substack">
             {renderServiceCategory("parsing")}
+            <DependencyInstallSection />
             {renderServiceCategory("search")}
             {renderServiceCategory("academic")}
-            {isDeveloperModeActive() ? <ToolManagementSection view="builtin" /> : null}
+            {developerActive ? <ToolManagementSection view="builtin" /> : null}
             <ToolManagementSection view="mcp" />
           </div>
         </div>

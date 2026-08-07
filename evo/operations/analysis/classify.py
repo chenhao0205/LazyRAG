@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from evo.operations.public_contracts import algo_id, case_source_label
+from evo.operations.public_contracts import algo_id, case_source_label, clean_text as _text
 
 Status = Literal['ok', 'failed']
 Quality = Literal['good', 'partial', 'bad', 'infra_failure']
@@ -104,12 +104,8 @@ class JudgeModel(BaseModel):
     doc_precision: float = Field(ge=0.0, le=1.0)
 
 
-def classify_case(
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> dict[str, Any]:
+def classify_case(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]
+                  ) -> dict[str, Any]:
     _validate(case, answer, judge, trace)
     case_id = _text(case.get('id') or answer.get('case_id') or judge.get('case_id'))
     decision = _decision(case, answer, judge, trace)
@@ -136,12 +132,8 @@ def classify_case(
     }
 
 
-def _decision(
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> dict[str, Any]:
+def _decision(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]
+              ) -> dict[str, Any]:
     inconsistent = _judge_inconsistency(judge)
     if judge.get('failure_type') == 'judge_contract_error':
         return _row('contract', 'judge_contract_error', 'eval_contract', 'judge_contract_error', 'high',
@@ -195,12 +187,8 @@ def _decision(
                 trace=trace)
 
 
-def _retrieval(
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> dict[str, Any] | None:
+def _retrieval(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]
+               ) -> dict[str, Any] | None:
     if judge.get('retrieval_failure_type') in {'none', 'not_applicable'}:
         return None
     retrieved_docs = _semantic_ids(trace, answer, 'retrieved_doc_ids', 'doc_ids')
@@ -259,12 +247,8 @@ def _retrieval(
                 answer=answer, trace=trace, case=case)
 
 
-def _tool_orchestration(
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> dict[str, Any] | None:
+def _tool_orchestration(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any],
+                        trace: Mapping[str, Any]) -> dict[str, Any] | None:
     if judge.get('retrieval_failure_type') in {'none', 'not_applicable'}:
         return None
     if not _kb_expected(case, answer):
@@ -286,8 +270,8 @@ def _tool_orchestration(
                 features, judge, answer=answer, trace=trace, case=case)
 
 
-def _generation(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any],
-                trace: Mapping[str, Any]) -> dict[str, Any] | None:
+def _generation(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]
+                ) -> dict[str, Any] | None:
     failure = _text(judge.get('failure_type'))
     if failure not in {'format_error', 'question_not_answered', 'partial_answer', 'wrong_answer', 'hallucination'}:
         return None
@@ -324,9 +308,9 @@ def _generation(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mappi
 
 
 def _row(category: str, issue: str, block: str, mode: str, confidence: str, pending: bool, features: list[str],
-         judge: Mapping[str, Any], *, answer: Mapping[str, Any] | None = None,
-         trace: Mapping[str, Any] | None = None, case: Mapping[str, Any] | None = None,
-         secondary_signals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+         judge: Mapping[str, Any], *, answer: Mapping[str, Any] | None = None, trace: Mapping[str, Any] | None = None,
+         case: Mapping[str, Any] | None = None, secondary_signals: list[dict[str, Any]] | None = None
+         ) -> dict[str, Any]:
     return {
         'issue_category': category,
         'issue_type': issue,
@@ -343,13 +327,8 @@ def _row(category: str, issue: str, block: str, mode: str, confidence: str, pend
     }
 
 
-def _with_tracing_signal(
-    row: dict[str, Any],
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> dict[str, Any]:
+def _with_tracing_signal(row: dict[str, Any], case: Mapping[str, Any], answer: Mapping[str, Any],
+                         judge: Mapping[str, Any], trace: Mapping[str, Any]) -> dict[str, Any]:
     tracing = _tracing_defect(case, answer, judge, trace)
     if not tracing:
         return row
@@ -366,8 +345,8 @@ def _with_tracing_signal(
     return row
 
 
-def _validate(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any],
-              trace: Mapping[str, Any]) -> None:
+def _validate(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]
+              ) -> None:
     missing = [field for field in CASE_FIELDS if field not in case]
     if missing:
         raise ValueError('eval.case missing fields: ' + ', '.join(missing))
@@ -434,12 +413,8 @@ def _stage_error(trace: Mapping[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def _chat_contract_failure(
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-    case: Mapping[str, Any],
-) -> dict[str, Any] | None:
+def _chat_contract_failure(answer: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any],
+                           case: Mapping[str, Any]) -> dict[str, Any] | None:
     error = answer.get('chat_error') if isinstance(answer.get('chat_error'), Mapping) else {}
     error_type = _text(error.get('type'))
     if error_type not in CHAT_CONTRACT_ERROR_TYPES:
@@ -463,12 +438,8 @@ def _chat_contract_failure(
     )
 
 
-def _tracing_defect(
-    case: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    judge: Mapping[str, Any],
-    trace: Mapping[str, Any],
-) -> str:
+def _tracing_defect(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any],
+                    trace: Mapping[str, Any]) -> str:
     if _trace_unavailable(trace):
         return 'trace_unavailable'
     unknown_value = trace.get('unknown_stage_count')
@@ -584,8 +555,8 @@ def _judge_evidence(judge: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _trace_evidence(trace: Mapping[str, Any], case: Mapping[str, Any],
-                    answer: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+def _trace_evidence(trace: Mapping[str, Any], case: Mapping[str, Any], answer: Mapping[str, Any] | None = None
+                    ) -> list[dict[str, Any]]:
     ref_docs, ref_chunks = _ids(case.get('reference_doc_ids')), _ids(case.get('reference_chunk_ids'))
     answer = answer or {}
     retrieved_docs = _semantic_ids(trace, answer, 'retrieved_doc_ids', 'doc_ids')
@@ -675,12 +646,7 @@ def _asks_for_external_context(answer: Mapping[str, Any]) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _semantic_ids(
-    trace: Mapping[str, Any],
-    answer: Mapping[str, Any],
-    trace_key: str,
-    answer_key: str,
-) -> set[str]:
+def _semantic_ids(trace: Mapping[str, Any], answer: Mapping[str, Any], trace_key: str, answer_key: str) -> set[str]:
     trace_ids = _trace_semantic_ids(trace, trace_key)
     return trace_ids or _ids(answer.get(answer_key))
 
@@ -780,7 +746,3 @@ def _scrub(value: Any) -> Any:
 
 def _unique(items: list[str]) -> list[str]:
     return [item for item in dict.fromkeys(str(value) for value in items if str(value or '').strip())]
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()

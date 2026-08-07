@@ -34,6 +34,7 @@ export interface CreateKnowledgeBaseModalProps {
 
 export interface CreateKnowledgeBaseModalRef {
   onOpen: (tab?: CreateTab) => void;
+  onClose: () => void;
 }
 
 const CreateKnowledgeBaseModal = forwardRef<
@@ -52,6 +53,7 @@ const CreateKnowledgeBaseModal = forwardRef<
 
   useImperativeHandle(ref, () => ({
     onOpen,
+    onClose: onCancel,
   }));
 
   useEffect(() => {
@@ -323,7 +325,7 @@ const CreateKnowledgeBaseModal = forwardRef<
                 <Paragraph className="data-source-create-provider-intro">
                   {t("knowledge.createFromCloudDocumentsIntro")}
                 </Paragraph>
-                <DataSourceProviderPicker vm={syncCreateVm} />
+                <DataSourceProviderPicker vm={syncCreateVm} showGoogleDrive />
               </div>
             ),
           },

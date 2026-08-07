@@ -6,7 +6,7 @@ Desktop mode wraps the existing host-process Local runtime in an Electron shell.
 
 | Platform | Local | Desktop |
 |----------|-------|---------|
-| macOS arm64 | `make local-up` / `make local-down` | `make desktop-darwin-arm64` |
+| macOS arm64 | `make local-up` / `make local-down` | `make desktop-darwin-arm64` (internal ZIP) / `make desktop-darwin-arm64-dmg` (signed DMG) |
 | Windows x64 | `make local-win-up` / `make local-win-down` | `make desktop-windows-x64` (portable ZIP) / `make desktop-windows-x64-installer` (installer) |
 
 Desktop packages bundle the Go services, process-compose, Caddy, the compiled frontend, Python 3.11 runtime, auth/algorithm venvs, LazyLLM, Milvus Lite 3, and the Local dependency overlay. Model weights are not bundled.
@@ -20,6 +20,7 @@ macOS:
 ```text
 desktop/dist/mac-arm64/LazyMind.app
 desktop/dist/LazyMind-darwin-arm64.zip
+desktop/dist/LazyMind-macos-arm64.dmg
 ```
 
 Windows:
@@ -31,6 +32,33 @@ desktop/dist/LazyMind-windows-x64-installer-<version>-yyyyMMdd-HHmmss-<commit>.e
 ```
 
 `LazyMind.exe` is the entry point inside `win-unpacked`; the directory also contains Electron DLLs/locales and `resources/runtime` with all LazyMind services and Python dependencies.
+
+## macOS signed DMG
+
+The local distribution build requires a `Developer ID Application` identity in
+the login keychain:
+
+```bash
+make desktop-darwin-arm64-dmg
+```
+
+`electron-builder` discovers the local Developer ID identity automatically.
+The local target signs the app and DMG but does not submit them to Apple.
+
+For CI, provide `CSC_LINK`, `CSC_KEY_PASSWORD`, and the Apple notarization
+credentials. `.github/workflows/macos-installer.yml` maps those values from
+`MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` repository secrets.
+Release builds submit a ZIP first, staple the accepted app ticket when
+available, then package and submit the DMG. A ZIP timeout falls through to DMG
+packaging; a DMG timeout uploads the pending DMG and submission record for the
+manual finalizer.
+
+A DMG drag-install cannot run a post-install script. To provide the same cache
+and runtime preparation as the Windows NSIS installer, the packaged macOS app
+runs the shared offline installer warmup once on first launch for each app
+version. A failed warmup is not marked complete and is retried on the next
+launch.
 
 Windows Desktop supports Windows 10/11 x64, runs as the current user, and does not require MinGW, administrator rights, or Developer Mode. Installer builds are unsigned unless standard electron-builder signing variables such as `CSC_LINK` are supplied.
 

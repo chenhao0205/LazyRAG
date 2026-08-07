@@ -1,6 +1,5 @@
 import {
   Configuration as CoreConfiguration,
-  DefaultApiFactory,
   SkillDiffApiFactory,
   SkillDraftsApiFactory,
   SkillFsApiFactory,
@@ -36,7 +35,6 @@ import type { DiffLine } from "./shared";
 
 const coreConfig = new CoreConfiguration({ basePath: BASE_URL });
 const skillsApi = SkillsApiFactory(coreConfig, BASE_URL, axiosInstance);
-const defaultCoreApi = DefaultApiFactory(coreConfig, BASE_URL, axiosInstance);
 const skillDraftsApi = SkillDraftsApiFactory(coreConfig, BASE_URL, axiosInstance);
 const skillFsApi = SkillFsApiFactory(coreConfig, BASE_URL, axiosInstance);
 const skillRevisionsApi = SkillRevisionsApiFactory(coreConfig, BASE_URL, axiosInstance);
@@ -47,6 +45,13 @@ const skillDiffApi = SkillDiffApiFactory(coreConfig, BASE_URL, axiosInstance);
 const coreBasePath = `${BASE_URL}/api/core`;
 
 const SKILL_MD_PATH = "SKILL.md";
+
+const createSkillOrganizeRequestId = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `org_${crypto.randomUUID()}`;
+  }
+  return `org_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+};
 
 interface ApiEnvelope<T> {
   code?: number;
@@ -136,6 +141,25 @@ export interface SkillOrganizeRunRecord {
   taskId: string;
 }
 
+export type SkillOrganizeTaskStatus =
+  | "pending"
+  | "running"
+  | "organize_plan"
+  | "organize_draft"
+  | "organize_apply"
+  | "completed"
+  | "done"
+  | "failed"
+  | "skipped";
+
+export interface SkillOrganizeTaskRecord {
+  task: ResourceUpdateTaskRecord | null;
+  requestId: string;
+  status: SkillOrganizeTaskStatus;
+  runStatus: string;
+  resultCount: number;
+}
+
 export interface ShareSkillPayload {
   targetUserIds: string[];
   targetGroupIds?: string[];
@@ -218,10 +242,23 @@ export interface SkillReviewRunRecord {
   requestId: string;
 }
 
+export type SkillReviewTaskStatus =
+  | "pending"
+  | "running"
+  | "review_draft"
+  | "review_cluster"
+  | "review_miner"
+  | "review_solution"
+  | "review_apply"
+  | "completed"
+  | "done"
+  | "failed"
+  | "skipped";
+
 export interface SkillReviewTaskStatusRecord {
   task: ResourceUpdateTaskRecord | null;
   requestId: string;
-  status: string;
+  status: SkillReviewTaskStatus;
   runStatus: string;
   resultCount: number;
 }
@@ -374,7 +411,7 @@ export interface CreateSkillPayload {
 
 export interface PublishSkillToMarketPayload {
   name: string;
-  category: string;
+  tags: string[];
   source:
     | { type: "uploaded_zip"; uploadId: string }
     | { type: "url"; url: string };
@@ -402,6 +439,7 @@ interface BuiltinSkillListItem {
   description: string;
   category: string;
   content: string;
+  tags?: string[];
   installed?: boolean;
   installed_skill_id?: string;
 }
@@ -435,6 +473,7 @@ const normalizeMarketItem = (item: MarketItemOpenAPIResponse): MarketSkillRecord
 
   return {
     ...base,
+    tags: toStringArray(item.tags),
     id: item.market_item_id || item.id || base.id,
     marketItemId: item.market_item_id || item.id || "",
     sourceSkillId: item.source_skill_id || base.skillId,
@@ -762,28 +801,9 @@ const normalizeSkillReviewTaskStatus = (
   return {
     task,
     requestId,
-    status,
+    status: status as SkillReviewTaskStatus,
     runStatus: toStringValue(raw?.run_status, ""),
     resultCount: toNumberValue(raw?.result_count, 0),
-  };
-};
-
-const normalizeSkillReviewResult = (value: unknown): SkillReviewResultRecord | null => {
-  const raw = toRawObject(value);
-  const id = toStringValue(raw?.id, "");
-
-  if (!id) {
-    return null;
-  }
-
-  return {
-    id,
-    skillName: toStringValue(raw?.skill_name, ""),
-    type: toStringValue(raw?.type, ""),
-    reviewStatus: toStringValue(raw?.review_status, ""),
-    requestId: toStringValue(raw?.requestid, ""),
-    summary: toStringValue(raw?.summary, ""),
-    time: toStringValue(raw?.time, ""),
   };
 };
 
@@ -802,16 +822,6 @@ export async function runSkillReview(): Promise<SkillReviewRunRecord> {
     summary: normalizeSkillReviewSummary(raw?.summary),
     requestId: toStringValue(raw?.requestid, ""),
   };
-}
-
-export async function getResourceUpdateTask(
-  taskId: string,
-): Promise<ResourceUpdateTaskRecord | null> {
-  const response = await axiosInstance.get(
-    `${coreBasePath}/evolution/tasks/${encodeURIComponent(taskId)}`,
-  );
-  const payload = unwrapEnvelope<unknown>(response.data);
-  return normalizeResourceUpdateTask(payload);
 }
 
 export async function listSkillReviewTasks(
@@ -838,28 +848,6 @@ export async function listSkillReviewTasks(
   };
 }
 
-export async function listSkillReviewResultsByRequest(
-  requestId: string,
-): Promise<SkillReviewResultRecord[]> {
-  if (!requestId.trim()) {
-    return [];
-  }
-
-  const response = await axiosInstance.get(`${coreBasePath}/skill-review-results`, {
-    params: {
-      page: 1,
-      page_size: 50,
-      requestid: requestId.trim(),
-    },
-  });
-  const payload = unwrapEnvelope<unknown>(response.data);
-  const raw = toRawObject(payload);
-  const items = Array.isArray(raw?.items) ? raw.items : [];
-  return items
-    .map((item) => normalizeSkillReviewResult(item))
-    .filter((item): item is SkillReviewResultRecord => Boolean(item));
-}
-
 export async function listSkillAssets(
   options: ListSkillOptions = {},
 ): Promise<SkillAssetRecord[]> {
@@ -873,7 +861,7 @@ export async function organizeSkills(
   const response = await skillsApi.apiCoreSkillOrganizePost(
     {
       skillOrganizeOpenAPIRequest: {
-        requestid: `org_${crypto.randomUUID()}`,
+        requestid: createSkillOrganizeRequestId(),
         skills,
       },
     },
@@ -885,6 +873,52 @@ export async function organizeSkills(
     status: payload.status || "",
     taskId: payload.taskid || "",
   };
+}
+
+export async function getSkillOrganizeTask(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<SkillOrganizeTaskRecord | null> {
+  const response = await axiosInstance.get(`${coreBasePath}/skill-organize/tasks`, {
+    params: {
+      requestid: requestId.trim(),
+      page: 1,
+      page_size: 1,
+    },
+    signal,
+  });
+  const payload = unwrapEnvelope<unknown>(response.data);
+  const raw = toRawObject(payload);
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  const record = normalizeSkillReviewTaskStatus(items[0]);
+  if (!record) {
+    return null;
+  }
+  return {
+    ...record,
+    status: record.status as SkillOrganizeTaskStatus,
+  };
+}
+
+const skillOrganizeTerminalStatuses = new Set<SkillOrganizeTaskStatus>([
+  "completed",
+  "done",
+  "failed",
+  "skipped",
+]);
+
+export async function waitForSkillOrganize(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<SkillOrganizeTaskRecord> {
+  while (!signal?.aborted) {
+    const task = await getSkillOrganizeTask(requestId, signal);
+    if (task && skillOrganizeTerminalStatuses.has(task.status)) {
+      return task;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+  }
+  throw new DOMException("Polling canceled", "AbortError");
 }
 
 export async function listSkillTags(): Promise<string[]> {
@@ -1088,20 +1122,18 @@ export async function removeSkillAsset(skillId: string) {
 }
 
 export async function trashSkillAsset(skillId: string) {
-  return defaultCoreApi.apiCoreSkillsSkillIdTrashPost({ skillId });
+  return removeSkillAsset(skillId);
 }
 
 export async function listTrashedSkillAssetsPage(
   options: ListSkillOptions = {},
 ): Promise<SkillAssetListResult> {
-  const response = await defaultCoreApi.apiCoreSkillsTrashGet({
-    params: {
-      keyword: options.keyword?.trim() || undefined,
-      category: options.category?.trim() || undefined,
-      tags: (options.tags ?? []).map((item) => item.trim()).filter(Boolean),
-      page: options.page ?? 1,
-      page_size: options.pageSize ?? 200,
-    },
+  const response = await skillsApi.apiCoreSkillsTrashGet({
+    keyword: options.keyword?.trim() || undefined,
+    category: options.category?.trim() || undefined,
+    tags: (options.tags ?? []).map((item) => item.trim()).filter(Boolean),
+    page: options.page ?? 1,
+    pageSize: options.pageSize ?? 200,
   });
   const payload = unwrapEnvelope<{
     items?: SkillListItemOpenAPIResponse[];
@@ -1121,19 +1153,19 @@ export async function listTrashedSkillAssetsPage(
 }
 
 export async function restoreSkillAsset(skillId: string): Promise<boolean> {
-  const response = await defaultCoreApi.apiCoreSkillsSkillIdRestorePost({ skillId });
+  const response = await skillsApi.apiCoreSkillsSkillIdRestorePost({ skillId });
   const payload = unwrapEnvelope<{ restored?: boolean }>(response.data);
   return Boolean(payload.restored);
 }
 
 export async function purgeSkillAsset(skillId: string): Promise<boolean> {
-  const response = await defaultCoreApi.apiCoreSkillsSkillIdPurgeDelete({ skillId });
+  const response = await skillsApi.apiCoreSkillsSkillIdPurgeDelete({ skillId });
   const payload = unwrapEnvelope<{ purged?: boolean }>(response.data);
   return Boolean(payload.purged);
 }
 
 export async function emptySkillTrash(): Promise<number> {
-  const response = await defaultCoreApi.apiCoreSkillsTrashDelete();
+  const response = await skillsApi.apiCoreSkillsTrashDelete();
   const payload = unwrapEnvelope<{ purged?: number }>(response.data);
   return payload.purged ?? 0;
 }
@@ -1260,6 +1292,18 @@ export async function getSkillRevisionFile(
   });
   const payload = unwrapEnvelope<SkillFileOpenAPIResponse>(response.data);
   return payload.content || "";
+}
+
+export async function getSkillRevisionTree(
+  skillId: string,
+  revisionId: string,
+): Promise<SkillTreeNodeRecord> {
+  const response = await skillRevisionsApi.apiCoreSkillsSkillIdRevisionsRevisionIdTreeGet({
+    skillId,
+    revisionId,
+  });
+  const payload = unwrapEnvelope<SkillTreeNodeOpenAPIResponse>(response.data);
+  return normalizeTreeNode(payload);
 }
 
 export class RollbackConflictError extends Error {
@@ -1422,6 +1466,18 @@ const buildHeadDraftDiffRequest = (skillId: string, path?: string) => ({
   ...(path ? { path } : {}),
 });
 
+const buildRevisionDiffRequest = (
+  skillId: string,
+  oldRevisionId: string,
+  newRevisionId: string,
+  path?: string,
+) => ({
+  old: { type: "revision", skill_id: skillId, revision_id: oldRevisionId },
+  new: { type: "revision", skill_id: skillId, revision_id: newRevisionId },
+  context_lines: 3,
+  ...(path ? { path } : {}),
+});
+
 export async function compareSkillTreeDiff(skillId: string): Promise<SkillDiffTreeRecord> {
   const response = await skillDiffApi.apiCoreSkillDiffTreePost({
     diffOpenAPIRequest: buildHeadDraftDiffRequest(skillId),
@@ -1439,6 +1495,36 @@ export async function compareSkillFileDiff(
   });
   const payload = unwrapEnvelope<DiffFileOpenAPIResponse | Record<string, unknown>>(response.data);
   return normalizeDiffFile(payload);
+}
+
+export async function compareSkillRevisionTreeDiff(
+  skillId: string,
+  oldRevisionId: string,
+  newRevisionId: string,
+): Promise<SkillDiffTreeRecord> {
+  const response = await skillDiffApi.apiCoreSkillDiffTreePost({
+    diffOpenAPIRequest: buildRevisionDiffRequest(skillId, oldRevisionId, newRevisionId),
+  });
+  return normalizeDiffTree(unwrapEnvelope<DiffTreeOpenAPIResponse>(response.data));
+}
+
+export async function compareSkillRevisionFileDiff(
+  skillId: string,
+  oldRevisionId: string,
+  newRevisionId: string,
+  path: string,
+): Promise<SkillDiffFileRecord> {
+  const response = await skillDiffApi.apiCoreSkillDiffFilePost({
+    diffOpenAPIRequest: buildRevisionDiffRequest(
+      skillId,
+      oldRevisionId,
+      newRevisionId,
+      path,
+    ),
+  });
+  return normalizeDiffFile(
+    unwrapEnvelope<DiffFileOpenAPIResponse | Record<string, unknown>>(response.data),
+  );
 }
 
 export async function submitSkillDraftReviewActions(
@@ -1611,16 +1697,13 @@ export async function listSkillMarketPage(options?: {
   page?: number;
   pageSize?: number;
   keyword?: string;
-  category?: string;
+  tags?: string[];
 }): Promise<MarketSkillListResult> {
   const response = await skillMarketApi.apiCoreSkillMarketGet({
     page: options?.page ?? 1,
     pageSize: options?.pageSize ?? 20,
     keyword: options?.keyword?.trim() || undefined,
-    category:
-      options?.category && options.category !== "all"
-        ? options.category.trim()
-        : undefined,
+    tags: options?.tags?.map((item) => item.trim()).filter(Boolean),
   });
   const payload = unwrapEnvelope<MarketListOpenAPIResponse>(response.data);
 
@@ -1630,6 +1713,14 @@ export async function listSkillMarketPage(options?: {
     page: payload.page ?? 1,
     pageSize: payload.page_size ?? 20,
   };
+}
+
+export async function listSkillMarketTags(): Promise<string[]> {
+  const response = await skillMarketApi.apiCoreSkillMarketTagsGet();
+  const payload = unwrapEnvelope<{ tags?: string[] }>(response.data);
+  return [...new Set(toStringArray(payload.tags))].sort((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 export async function listBuiltinSkills(): Promise<MarketSkillRecord[]> {
@@ -1642,7 +1733,7 @@ export async function listBuiltinSkills(): Promise<MarketSkillRecord[]> {
     skillName: item.name,
     description: item.description,
     category: item.category,
-    tags: [],
+    tags: toStringArray(item.tags),
     content: item.content,
     headRevisionId: "",
     draft: { hasUncommittedDraft: false, taskId: "", version: 0 },
@@ -1675,7 +1766,7 @@ export async function publishSkillToMarket(
   const response = await skillMarketApi.apiCoreSkillMarketAdminItemsPost({
     marketPublishOpenAPIRequest: {
       name: payload.name,
-      category: payload.category,
+      tags: payload.tags,
       source:
         payload.source.type === "uploaded_zip"
           ? { type: "uploaded_zip", upload_id: payload.source.uploadId }

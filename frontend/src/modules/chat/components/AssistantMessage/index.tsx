@@ -20,12 +20,14 @@ import {
   Source,
 } from "@/api/generated/chatbot-client";
 import { AgentAppsAuth } from "@/components/auth";
-import { ChatServiceApi } from "@/modules/chat/utils/request";
+import { ChatServiceApi, decideToolLimit } from "@/modules/chat/utils/request";
 import { usePluginStore } from "@/modules/chat/store/pluginPanel";
 import { PluginPanel } from "@/modules/chat/components/PluginPanel";
 import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
 import AskCard from "@/modules/chat/components/AskCard";
+import ToolLimitCard from "@/modules/chat/components/ToolLimitCard";
+import ArtifactDownloadButton from "@/modules/chat/components/ArtifactCollectorCard/ArtifactDownloadButton";
 
 const BotAvatarIcon = new URL(
   "../../assets/images/bot_avatar.png",
@@ -723,6 +725,10 @@ const AssistantMessage = (props: any) => {
                 onClick={() => handleCopy(answer.content)}
               />
             </Tooltip>
+            <ArtifactDownloadButton
+              sessionId={sessionId}
+              historyId={answerHistoryId}
+            />
             {showFullToolbar && index === length - 1 && (
               <Tooltip title={t("chat.regenerate")}>
                 <Button
@@ -791,6 +797,10 @@ const AssistantMessage = (props: any) => {
                 onClick={() => handleCopy(item.delta)}
               />
             </Tooltip>
+            <ArtifactDownloadButton
+              sessionId={sessionId}
+              historyId={item.history_id}
+            />
             {index === length - 1 && (
               <Tooltip title={t("chat.regenerate")}>
                 <Button
@@ -842,41 +852,42 @@ const AssistantMessage = (props: any) => {
 
   function renderBottom() {
     if (
+      item.tool_limit_pending &&
+      item.tool_limit_pending.decision_id !== item.resolved_tool_limit_decision_id &&
+      sessionId &&
       item.finish_reason ===
-      ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified
+        ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified
     ) {
       return (
-        <Button className="stop-btn" onClick={stopGeneration}>
-          {t("chat.stopGenerate")}
-        </Button>
-      );
-    }
-    if (
-      item.finish_reason ===
-      ChatConversationsResponseFinishReasonEnum.FinishReasonUnknown
-    ) {
-      return (
-        <>
-          <span style={{ color: "#b8c3d7" }}>{item.errMessage}</span>
-          <Button
-            className="stop-btn"
-            style={{ marginLeft: 10 }}
-            onClick={regenerate}
-          >
-            {t("chat.regenerate")}
-          </Button>
-        </>
+        <ToolLimitCard
+          key={item.tool_limit_pending.decision_id}
+          pending={item.tool_limit_pending}
+          onDecision={async (action) => {
+            const decisionId = item.tool_limit_pending.decision_id;
+            await decideToolLimit(
+              sessionId,
+              decisionId,
+              action,
+            );
+            updateMessage({
+              id: item.id,
+              history_id: item.history_id,
+              tool_limit_pending: undefined,
+              resolved_tool_limit_decision_id: decisionId,
+            });
+          }}
+        />
       );
     }
     // Render ask_pending card if present
     if (item.ask_pending) {
       const askPending = item.ask_pending;
-      const isAnswered = !!item.ask_answered;
+      const isReadOnly = !!item.is_history || !!item.ask_answered;
       return (
         <AskCard
           key={askPending.ask_id}
           askPending={askPending}
-          disabled={isAnswered}
+          disabled={isReadOnly}
           savedAnswers={item.ask_saved_answers}
           onAnswerChange={(idx, ans) => {
             const currentAnswers = { ...(item.ask_saved_answers || {}), [idx]: ans };
@@ -894,6 +905,35 @@ const AssistantMessage = (props: any) => {
             props.sendMessage?.(payload.text, undefined, { ask_answers_structured: payload.structured });
           }}
         />
+      );
+    }
+    // Show stop button while still streaming (no card present).
+    if (
+      item.finish_reason ===
+      ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified
+    ) {
+      return (
+        <Button className="stop-btn" onClick={stopGeneration}>
+          {t("chat.stopGenerate")}
+        </Button>
+      );
+    }
+    // Show error + regenerate on unknown/failed finish.
+    if (
+      item.finish_reason ===
+      ChatConversationsResponseFinishReasonEnum.FinishReasonUnknown
+    ) {
+      return (
+        <>
+          <span style={{ color: "#b8c3d7" }}>{item.errMessage}</span>
+          <Button
+            className="stop-btn"
+            style={{ marginLeft: 10 }}
+            onClick={regenerate}
+          >
+            {t("chat.regenerate")}
+          </Button>
+        </>
       );
     }
     return null;
@@ -992,7 +1032,7 @@ const AssistantMessage = (props: any) => {
               }
             />
           </div>
-          {index === length - 1 && renderBottom()}
+          {(item.ask_pending || index === length - 1) && renderBottom()}
           {index === length - 1 && pluginSession && sessionId && (
             <PluginPanel
               key={sessionId}
@@ -1045,7 +1085,7 @@ const AssistantMessage = (props: any) => {
             !item.onboardingInfo &&
             renderFooter()}
         </div>
-        {index === length - 1 && renderBottom()}
+        {(item.ask_pending || index === length - 1) && renderBottom()}
         {index === length - 1 && pluginSession && sessionId && (
           <PluginPanel
             key={sessionId}

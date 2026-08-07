@@ -8,6 +8,8 @@ from hashlib import sha1
 from importlib.resources import files
 from typing import Any
 
+from evo.operations.public_contracts import clean_text as _text
+
 SCORE_KEYS = (
     'answer_correctness',
     'answer_relevance',
@@ -55,8 +57,7 @@ def _group_key(row: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
     )
 
 
-def _group(block: str, mode: str, issue: str, cluster: str, route: str,
-           rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _group(block: str, mode: str, issue: str, cluster: str, route: str, rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     registry = FUNCTION_BLOCKS.get(block, {})
     case_ids = [_text(row.get('case_id')) for row in rows if _text(row.get('case_id'))]
     gid = _stable_id({
@@ -186,10 +187,6 @@ def _list(value: Any) -> list[Any]:
 def _clip(value: Any, limit: int) -> str:
     text = _text(value)
     return text if len(text) <= limit else text[:limit - 3] + '...'
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()
 
 
 def _stable_id(value: Mapping[str, Any]) -> str:

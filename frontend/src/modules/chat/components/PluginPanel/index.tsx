@@ -1,11 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Popconfirm } from 'antd';
+import { Popconfirm, Tooltip } from 'antd';
+import { FullscreenOutlined, FullscreenExitOutlined } from '@ant-design/icons';
 import { usePluginSession } from '@/modules/chat/hooks/usePlugin';
 import { usePluginStore } from '@/modules/chat/store/pluginPanel';
 import { uploadFileInChunks } from '@/modules/chat/utils/chunkUpload';
 import { PluginSessionApi } from '@/modules/chat/utils/request';
 import StateGraphModal from '@/components/StateGraphModal';
+import {
+  PLUGIN_PANEL_EXPANDED_EVENT,
+  PLUGIN_PANEL_EXPANDED_STORAGE_PREFIX,
+} from '@/modules/chat/constants/chat';
 import type {
   PluginSession,
   SlotRevision,
@@ -16,7 +22,7 @@ import type {
   CompositeColumnNode,
   InnerTabsNode,
 } from '@/modules/chat/store/pluginPanel';
-import { SlotRenderer, SlotEditingContext } from './SlotComponents';
+import { SlotRenderer, SlotDownloadContext, SlotEditingContext } from './SlotComponents';
 import './PluginPanel.scss';
 
 /** Parse a JSON intent context string and return the text field, or '' if empty/invalid. */
@@ -135,10 +141,12 @@ function AutoSlotGrid({
   session,
   onRefresh,
   onReference,
+  readOnly,
 }: {
   session: PluginSession;
   onRefresh?: () => void;
   onReference?: (slot: SlotRevision) => void;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   if (!session.slots || session.slots.length === 0) {
@@ -164,13 +172,14 @@ function AutoSlotGrid({
           <div className='plugin-panel__slot-items'>
             {revisions.map((rev) => (
               <SlotRenderer
-                key={`${rev.slot_id}-${rev.revision}-${rev.list_index ?? 0}`}
+                key={`${rev.slot_id}-${rev.list_index ?? -1}`}
                 slot={rev}
                 sessionId={session.session_id}
                 slotId={slotId}
                 revisionCount={rev.revision_count}
                 onRefresh={onRefresh}
                 onReference={onReference}
+                readOnly={readOnly}
               />
             ))}
           </div>
@@ -283,6 +292,18 @@ function getTabStepId(tab: TabDef): string | undefined {
   return tab.step_id ?? tab.id;
 }
 
+/**
+ * Lock slot editing only while the plugin session is actively running.
+ * When idle (waiting / failed / completed), ui_editable artifacts stay editable
+ * so the user can revise and re-run a later step from the updated content.
+ */
+function isPluginSessionReadOnly(
+  session: PluginSession,
+  autoRunning = false,
+): boolean {
+  return autoRunning || session.status === 'active';
+}
+
 function revisionMatchesTabScope(
   session: PluginSession,
   tab: TabDef,
@@ -383,6 +404,37 @@ function getTabSlotRevisions(
   return slots.filter((s) => s.slot === artifactKey && s.selected);
 }
 
+function isJsonArtifactRevision(slot: SlotRevision): boolean {
+  if (slot.content_type === 'json') return true;
+  const raw = slot.artifact_value;
+  if (!raw || typeof raw !== 'object') return false;
+  if (raw.type === 'json') return true;
+  const source = String(raw.filename ?? raw.name ?? raw.path ?? raw.url ?? '');
+  return source.split(/[?#]/, 1)[0].toLowerCase().endsWith('.json');
+}
+
+/** Prefer the structured WriterDocument over its Markdown export when both exist. */
+function resolveWriterFinalSlotDefs(tab: TabDef, session: PluginSession): SlotDef[] {
+  if (session.plugin_id !== 'writer-plugin') return tab.slots;
+  const declaredSlotIds = new Set(tab.slots.map((slot) => slot.id));
+
+  return tab.slots.flatMap((slotDef) => {
+    if (!slotDef.id.endsWith('_md')) return [slotDef];
+    const irSlotId = slotDef.id.slice(0, -3);
+    const hasIRArtifact = getTabSlotRevisions(session, tab, irSlotId)
+      .some(isJsonArtifactRevision);
+    if (!hasIRArtifact) return [slotDef];
+    if (declaredSlotIds.has(irSlotId)) return [];
+
+    return [{
+      ...slotDef,
+      id: irSlotId,
+      label: slotDef.label.replace(/\s*[（(]\s*markdown\s*[）)]/i, '').trim() || irSlotId,
+      type: 'text',
+    }];
+  });
+}
+
 /** Get all distinct sort_orders present across the participating slots. */
 function getCompositeRows(
   tab: TabDef,
@@ -427,6 +479,8 @@ function InnerTabsCell({
   sortOrder,
   onRefresh,
   onReference,
+  hideImageMutationActions,
+  readOnly,
 }: {
   tabsNode: InnerTabsNode;
   tab: TabDef;
@@ -435,6 +489,8 @@ function InnerTabsCell({
   sortOrder: number;
   onRefresh?: () => void;
   onReference?: (slot: SlotRevision) => void;
+  hideImageMutationActions?: boolean;
+  readOnly?: boolean;
 }) {
   const [activeIdx, setActiveIdx] = useState(0);
 
@@ -470,11 +526,14 @@ function InnerTabsCell({
             {rev ? (
               <SlotRenderer
                 slot={rev}
+                expectedType={def?.type}
                 sessionId={session.session_id}
                 slotId={slotId}
                 revisionCount={rev.revision_count}
                 onRefresh={onRefresh}
                 onReference={onReference}
+                hideImageMutationActions={hideImageMutationActions}
+                readOnly={readOnly}
               />
             ) : (
               <div className='composite-cell__empty'>—</div>
@@ -496,12 +555,14 @@ function CompositeSlotGrid({
   onRefresh,
   onReference,
   onFocusSortOrder,
+  readOnly,
 }: {
   tab: TabDef;
   session: PluginSession;
   onRefresh?: () => void;
   onReference?: (slot: SlotRevision) => void;
   onFocusSortOrder?: (sortOrder: number | undefined) => void;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const rows = getCompositeRows(tab, session);
@@ -509,6 +570,7 @@ function CompositeSlotGrid({
     buildColumns(tab),
     resolveVisibleSlotIds(tab, session),
   );
+  const hideImageMutationActions = tab.id === 'result';
 
   // Compute total weight for flex proportions.
   const totalWeight = columns.reduce((s, c) => s + c.weight, 0) || 1;
@@ -549,6 +611,8 @@ function CompositeSlotGrid({
                     sortOrder={sortOrder}
                     onRefresh={onRefresh}
                     onReference={onReference}
+                    hideImageMutationActions={hideImageMutationActions}
+                    readOnly={readOnly}
                   />
                 </div>
               );
@@ -569,11 +633,14 @@ function CompositeSlotGrid({
                 {rev ? (
                   <SlotRenderer
                     slot={rev}
+                    expectedType={def?.type}
                     sessionId={session.session_id}
                     slotId={slotId}
                     revisionCount={rev.revision_count}
                     onRefresh={onRefresh}
                     onReference={onReference}
+                    hideImageMutationActions={hideImageMutationActions}
+                    readOnly={readOnly}
                   />
                 ) : (
                   <div className='composite-grid__cell-empty'>—</div>
@@ -606,6 +673,7 @@ function SortableImageList({
   onReference,
   onFocusSortOrder,
   onAddItem,
+  readOnly,
 }: {
   revisions: SlotRevision[];
   session: PluginSession;
@@ -615,6 +683,7 @@ function SortableImageList({
   onReference?: (slot: SlotRevision) => void;
   onFocusSortOrder?: (sortOrder: number | undefined) => void;
   onAddItem?: () => void;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const reorderSlotItems = usePluginStore((s) => s.reorderSlotItems);
@@ -736,16 +805,18 @@ function SortableImageList({
     if (r.list_index !== undefined) byListIndex[r.list_index] = r;
   }
 
+  const canDrag = isDraggable && !readOnly;
+
   return (
     <div
-      className={`plugin-panel__image-list${isDraggable ? ' plugin-panel__image-list--sortable' : ''}`}
-      onDragLeave={isDraggable ? handleContainerDragLeave : undefined}
-      onDragEnter={isDraggable ? handleDragEnter : undefined}
-      onDragOver={isDraggable ? handleContainerDragOver : undefined}
-      onDrop={isDraggable ? handleContainerDrop : undefined}
+      className={`plugin-panel__image-list${canDrag ? ' plugin-panel__image-list--sortable' : ''}`}
+      onDragLeave={canDrag ? handleContainerDragLeave : undefined}
+      onDragEnter={canDrag ? handleDragEnter : undefined}
+      onDragOver={canDrag ? handleContainerDragOver : undefined}
+      onDrop={canDrag ? handleContainerDrop : undefined}
     >
       {/* Insert indicator before first item */}
-      {isDraggable && (
+      {canDrag && (
         <div className={`plugin-panel__image-insert-gap${insertIdx === 0 ? ' plugin-panel__image-insert-gap--active' : ''}`} aria-hidden='true' />
       )}
       {localOrder.map((listIndex, idx) => {
@@ -754,12 +825,12 @@ function SortableImageList({
         return (
           <React.Fragment key={`${rev.slot_id}-${rev.sort_order ?? rev.list_index ?? 0}`}>
             <div
-              draggable={isDraggable}
-              onDragStart={isDraggable ? (e) => handleDragStart(idx, e) : undefined}
-              onDragEnter={isDraggable ? handleDragEnter : undefined}
-              onDragOver={isDraggable ? (e) => handleDragOver(e, idx) : undefined}
-              onDrop={isDraggable ? (e) => handleDrop(e, idx) : undefined}
-              onDragEnd={isDraggable ? handleDragEnd : undefined}
+              draggable={canDrag}
+              onDragStart={canDrag ? (e) => handleDragStart(idx, e) : undefined}
+              onDragEnter={canDrag ? handleDragEnter : undefined}
+              onDragOver={canDrag ? (e) => handleDragOver(e, idx) : undefined}
+              onDrop={canDrag ? (e) => handleDrop(e, idx) : undefined}
+              onDragEnd={canDrag ? handleDragEnd : undefined}
               onClick={() => onFocusSortOrder?.(rev.sort_order)}
               role='button'
               tabIndex={0}
@@ -773,20 +844,21 @@ function SortableImageList({
                 sessionId={session.session_id}
                 slotId={slotDef.id}
                 revisionCount={rev.revision_count}
-                isDraggable={isDraggable}
+                isDraggable={canDrag}
                 onRefresh={onRefresh}
                 onReference={onReference}
+                readOnly={readOnly}
               />
             </div>
             {/* Insert indicator after each item */}
-            {isDraggable && (
+            {canDrag && (
               <div className={`plugin-panel__image-insert-gap${insertIdx === idx + 1 ? ' plugin-panel__image-insert-gap--active' : ''}`} aria-hidden='true' />
             )}
           </React.Fragment>
         );
       })}
       {/* Add new item card */}
-      {onAddItem && (
+      {onAddItem && !readOnly && (
         <button
           className='plugin-panel__image-add-card'
           onClick={onAddItem}
@@ -802,18 +874,96 @@ function SortableImageList({
   );
 }
 
+function NamedTabSlot({
+  slotDef,
+  revisions,
+  session,
+  onRefresh,
+  onReference,
+  onFocusSortOrder,
+  onAddItem,
+  readOnly,
+}: {
+  slotDef: SlotDef;
+  revisions: SlotRevision[];
+  session: PluginSession;
+  onRefresh?: () => void;
+  onReference?: (slot: SlotRevision) => void;
+  onFocusSortOrder?: (sortOrder: number | undefined) => void;
+  onAddItem: () => void;
+  readOnly?: boolean;
+}) {
+  const { t } = useTranslation();
+  const slotLabel = slotDef.label ?? slotDef.id;
+  const isImageList = slotDef.type === 'image' && slotDef.cardinality === 'list';
+  const isDraggable = Boolean(slotDef.ordered) && !readOnly;
+
+  return (
+    <div className='plugin-panel__named-slot'>
+      <div className='plugin-panel__slot-heading'>
+        {(slotDef.label || slotDef.id) && (
+          <span className='plugin-panel__slot-label'>{slotLabel}</span>
+        )}
+      </div>
+      {revisions.length === 0 ? (
+        <div
+          className='plugin-panel__slot-placeholder'
+          aria-label={`${slotLabel} pending`}
+        >
+          <span>—</span>
+        </div>
+      ) : isImageList ? (
+        <SortableImageList
+          revisions={revisions}
+          session={session}
+          slotDef={slotDef}
+          isDraggable={isDraggable}
+          onRefresh={onRefresh}
+          onReference={onReference}
+          onFocusSortOrder={onFocusSortOrder}
+          onAddItem={readOnly ? undefined : onAddItem}
+          readOnly={readOnly}
+        />
+      ) : (
+        revisions.map((rev) => (
+          <div
+            key={`${rev.slot_id}-${rev.list_index ?? -1}`}
+            onClick={() => onFocusSortOrder?.(rev.sort_order)}
+            role='button'
+            tabIndex={0}
+            aria-label={t('chat.pluginContentItemAria', { index: rev.sort_order ?? '' })}
+          >
+            <SlotRenderer
+              slot={rev}
+              expectedType={slotDef.type}
+              sessionId={session.session_id}
+              slotId={slotDef.id}
+              revisionCount={rev.revision_count}
+              onRefresh={onRefresh}
+              onReference={onReference}
+              readOnly={readOnly}
+            />
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 function TabSlotGrid({
   tab,
   session,
   onRefresh,
   onReference,
   onFocusSortOrder,
+  readOnly,
 }: {
   tab: TabDef;
   session: PluginSession;
   onRefresh?: () => void;
   onReference?: (slot: SlotRevision) => void;
   onFocusSortOrder?: (sortOrder: number | undefined) => void;
+  readOnly?: boolean;
 }) {
   const addFileInputRef = useRef<HTMLInputElement>(null);
   const addingSlotIdRef = useRef<string>('');
@@ -821,15 +971,16 @@ function TabSlotGrid({
   const { createSlotItem } = usePluginStore();
 
   const handleAddItem = useCallback((slotId: string, slotType: string) => {
+    if (readOnly) return;
     addingSlotIdRef.current = slotId;
     addingSlotTypeRef.current = slotType;
     addFileInputRef.current?.click();
-  }, []);
+  }, [readOnly]);
 
   const handleAddFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file) return;
+    if (!file || readOnly) return;
     const slotId = addingSlotIdRef.current;
     if (!slotId) return;
     const slotType = addingSlotTypeRef.current;
@@ -841,7 +992,7 @@ function TabSlotGrid({
     } catch {
       // upload failure — no-op
     }
-  }, [session.session_id, createSlotItem, onRefresh]);
+  }, [session.session_id, createSlotItem, onRefresh, readOnly]);
   if (tab.layout === 'composite') {
     return (
       <CompositeSlotGrid
@@ -850,6 +1001,7 @@ function TabSlotGrid({
         onRefresh={onRefresh}
         onReference={onReference}
         onFocusSortOrder={onFocusSortOrder}
+        readOnly={readOnly}
       />
     );
   }
@@ -859,7 +1011,7 @@ function TabSlotGrid({
     const filtered = slotDefs.filter((s) => visible.has(s.id));
     return filtered.length > 0 ? filtered : slotDefs;
   };
-  const visibleSlots = resolveVisibleSlots(tab.slots);
+  const visibleSlots = resolveVisibleSlots(resolveWriterFinalSlotDefs(tab, session));
   return (
     <div className={`plugin-panel__tab-content plugin-panel__tab-content--${tab.layout ?? 'vertical'}`}>
       {/* Hidden file input for adding new items */}
@@ -878,54 +1030,18 @@ function TabSlotGrid({
         if (hideEmpty && revisions.length === 0) {
           return null;
         }
-        const slotLabel = slotDef.label ?? slotDef.id;
-        const isImageList = slotDef.type === 'image' && slotDef.cardinality === 'list';
-        const isDraggable = Boolean(slotDef.ordered);
         return (
-          <div key={slotDef.id} className='plugin-panel__named-slot'>
-            {(slotDef.label || slotDef.id) && (
-              <span className='plugin-panel__slot-label'>{slotLabel}</span>
-            )}
-            {revisions.length === 0 ? (
-              <div
-                className='plugin-panel__slot-placeholder'
-                aria-label={`${slotLabel} pending`}
-              >
-                <span>—</span>
-              </div>
-            ) : isImageList ? (
-              <SortableImageList
-                revisions={revisions}
-                session={session}
-                slotDef={slotDef}
-                isDraggable={isDraggable}
-                onRefresh={onRefresh}
-                onReference={onReference}
-                onFocusSortOrder={onFocusSortOrder}
-                onAddItem={() => handleAddItem(slotDef.id, slotDef.type)}
-              />
-            ) : (
-              revisions.map((rev) => (
-                <div
-                  key={`${rev.slot_id}-${rev.revision}-${rev.list_index ?? 0}`}
-                  onClick={() => onFocusSortOrder?.(rev.sort_order)}
-                  role='button'
-                  tabIndex={0}
-                  aria-label={t('chat.pluginContentItemAria', { index: rev.sort_order ?? '' })}
-                >
-                  <SlotRenderer
-                    slot={rev}
-                    expectedType={slotDef.type}
-                    sessionId={session.session_id}
-                    slotId={slotDef.id}
-                    revisionCount={rev.revision_count}
-                    onRefresh={onRefresh}
-                    onReference={onReference}
-                  />
-                </div>
-              ))
-            )}
-          </div>
+          <NamedTabSlot
+            key={slotDef.id}
+            slotDef={slotDef}
+            revisions={revisions}
+            session={session}
+            onRefresh={onRefresh}
+            onReference={onReference}
+            onFocusSortOrder={onFocusSortOrder}
+            onAddItem={() => handleAddItem(slotDef.id, slotDef.type)}
+            readOnly={readOnly}
+          />
         );
       })}
     </div>
@@ -936,7 +1052,27 @@ const STATUS_KEY: Record<string, string> = {
   active: 'chat.pluginStatusRunning',
   completed: 'chat.pluginStatusDone',
   waiting: 'chat.pluginStatusWaiting',
+  failed: 'chat.pluginStatusFailed',
 };
+
+function readPersistedExpanded(conversationId: string): boolean {
+  try {
+    return localStorage.getItem(`${PLUGIN_PANEL_EXPANDED_STORAGE_PREFIX}${conversationId}`) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function persistExpanded(conversationId: string, expanded: boolean) {
+  try {
+    localStorage.setItem(
+      `${PLUGIN_PANEL_EXPANDED_STORAGE_PREFIX}${conversationId}`,
+      String(expanded),
+    );
+  } catch {
+    // The live layout state still works when browser storage is unavailable.
+  }
+}
 
 export function PluginPanel({
   conversationId,
@@ -964,9 +1100,37 @@ export function PluginPanel({
   const [ui, setUI] = useState<PluginUI>({});
   const [dismissing, setDismissing] = useState(false);
   const [stateGraphOpen, setStateGraphOpen] = useState(false);
+  const [expanded, setExpanded] = useState(() => readPersistedExpanded(conversationId));
+  const initialExpandedRef = useRef(expanded);
+  // Track which slots are currently being edited; dismiss stays blocked until
+  // each editor saves or cancels. Footer retry/continue flushes pending saves.
+  const editingSlots = useRef<Set<string>>(new Set());
+  const flushFns = useRef<Map<string, () => Promise<boolean>>>(new Map());
+  const [anySlotEditing, setAnySlotEditing] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
+
+  const setExpandedMode = useCallback((nextExpanded: boolean) => {
+    if (nextExpanded) setCollapsed(false);
+    setExpanded(nextExpanded);
+    persistExpanded(conversationId, nextExpanded);
+    window.dispatchEvent(new CustomEvent(PLUGIN_PANEL_EXPANDED_EVENT, {
+      detail: { conversationId, expanded: nextExpanded },
+    }));
+  }, [conversationId]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent(PLUGIN_PANEL_EXPANDED_EVENT, {
+      detail: { conversationId, expanded: initialExpandedRef.current },
+    }));
+    return () => {
+      window.dispatchEvent(new CustomEvent(PLUGIN_PANEL_EXPANDED_EVENT, {
+        detail: { conversationId, expanded: false },
+      }));
+    };
+  }, [conversationId]);
 
   const handleDismiss = useCallback(async () => {
-    if (!session || dismissing) return;
+    if (!session || dismissing || anySlotEditing) return;
     setDismissing(true);
     try {
       await PluginSessionApi().dismissSession(session.session_id);
@@ -976,10 +1140,7 @@ export function PluginPanel({
     } catch {
       setDismissing(false);
     }
-  }, [session, dismissing, refresh, t, onDismissed, bumpDismissedRefresh, conversationId]);
-  // Track which text slots are currently being edited; disable footer buttons while any are.
-  const editingSlots = useRef<Set<string>>(new Set());
-  const [anySlotEditing, setAnySlotEditing] = useState(false);
+  }, [session, dismissing, anySlotEditing, refresh, t, onDismissed, bumpDismissedRefresh, conversationId]);
   const [intentOpen, setIntentOpen] = useState(false);
 
   const handleSlotEditingChange = useCallback((key: string, editing: boolean) => {
@@ -990,6 +1151,27 @@ export function PluginPanel({
     }
     setAnySlotEditing(editingSlots.current.size > 0);
   }, []);
+
+  const registerFlush = useCallback((key: string, flush: () => Promise<boolean>) => {
+    flushFns.current.set(key, flush);
+    return () => {
+      flushFns.current.delete(key);
+    };
+  }, []);
+
+  const flushPendingEdits = useCallback(async (): Promise<boolean> => {
+    const flushers = [...flushFns.current.values()];
+    if (flushers.length === 0) return true;
+    const results = await Promise.all(flushers.map((flush) => flush()));
+    return results.every(Boolean);
+  }, []);
+
+  useEffect(() => {
+    editingSlots.current.clear();
+    flushFns.current.clear();
+    setAnySlotEditing(false);
+    setActionPending(false);
+  }, [session?.session_id]);
 
   useEffect(() => {
     if (!session?.plugin_id) return;
@@ -1042,15 +1224,25 @@ export function PluginPanel({
   const tabs: TabDef[] = ui.tabs ?? [];
   const hasTabs = tabs.length > 0;
   const hasIntent = true;
+  const sessionReadOnly = isPluginSessionReadOnly(session, autoRunning);
 
   const showActions =
     session.status === 'waiting' ||
     session.status === 'active' ||
-    session.status === 'completed';
+    session.status === 'completed' ||
+    session.status === 'failed';
   const displayStatus = autoRunning ? 'active' : session.status;
-  const buttonsDisabled = displayStatus === 'active' || anySlotEditing || autoRunning;
-  // "继续" is only shown in waiting/active; completed shows rollback step picker instead.
+  // Only block footer actions while the plugin is actually running (or flush-in-progress).
+  // Dirty editors no longer disable retry — click flushes saves first, then proceeds.
+  const sessionBusy = displayStatus === 'active' || autoRunning;
+  const buttonsDisabled = sessionBusy || actionPending;
+  const dismissDisabled = dismissing || anySlotEditing || actionPending;
+  const collapseDisabled = (anySlotEditing || actionPending) && !collapsed;
+  // "继续" is only shown in waiting/active; completed/failed show rollback step picker instead.
   const showContinue = displayStatus === 'waiting' || displayStatus === 'active';
+  const showStepRollback =
+    (session.status === 'completed' || session.status === 'failed')
+    && Boolean(session.steps && session.steps.length > 0);
 
   // A failed step cannot be checkpoint-resumed — the SubAgent exited uncleanly and there is
   // no valid checkpoint to restore. Only "重试" (full restart) is meaningful in this case.
@@ -1067,25 +1259,34 @@ export function PluginPanel({
   const effectivePast = new Set(session.projection?.past ?? []);
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
 
+  async function runFooterAction(action: () => void) {
+    if (sessionBusy || actionPending) return;
+    setActionPending(true);
+    try {
+      const saved = await flushPendingEdits();
+      if (!saved) return;
+      action();
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   function handleContinue() {
-    if (buttonsDisabled) return;
-    onSendMessage?.(t('chat.pluginContinue'));
+    void runFooterAction(() => onSendMessage?.(t('chat.pluginContinue')));
   }
 
   function handleRetry() {
-    if (buttonsDisabled) return;
-    onSendMessage?.(t('chat.pluginRetry'));
+    void runFooterAction(() => onSendMessage?.(t('chat.pluginRetry')));
   }
 
   function handleRollback(stepId: string) {
-    if (buttonsDisabled) return;
-    onSendMessage?.(`${t('chat.pluginRollbackPrefix')}${stepId}`);
+    void runFooterAction(() => onSendMessage?.(`${t('chat.pluginRollbackPrefix')}${stepId}`));
   }
 
-  return (
-    <SlotEditingContext.Provider value={{ setEditing: handleSlotEditingChange }}>
+  const panel = (
+    <SlotEditingContext.Provider value={{ setEditing: handleSlotEditingChange, registerFlush }}>
     <div
-      className={`plugin-panel plugin-panel--${displayStatus}${collapsed ? ' plugin-panel--collapsed' : ''}`}
+      className={`plugin-panel plugin-panel--${displayStatus}${collapsed ? ' plugin-panel--collapsed' : ''}${expanded ? ' plugin-panel--expanded' : ''}`}
       data-session-id={session.session_id}
       aria-label={t('chat.pluginPanelTitle')}
     >
@@ -1132,47 +1333,88 @@ export function PluginPanel({
               )}
             </div>
           )}
-          <Popconfirm
-            title={t('chat.pluginDismissConfirmTitle')}
-            description={t('chat.pluginDismissConfirmDesc')}
-            onConfirm={handleDismiss}
-            okText={t('chat.pluginDismissConfirmOk')}
-            cancelText={t('chat.pluginDismissConfirmCancel')}
-            okButtonProps={{ danger: true, size: 'small' }}
-            cancelButtonProps={{ size: 'small' }}
-            disabled={dismissing}
-            placement='bottomRight'
-          >
-            <button
-              type='button'
-              className='plugin-panel__dismiss-btn'
-              disabled={dismissing}
-              aria-label={t('chat.pluginDismissBtn')}
-              title={t('chat.pluginDismissBtn')}
-            >
-              <svg width='12' height='12' viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
-                <path d='M2 2L10 10M10 2L2 10' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' />
-              </svg>
-            </button>
-          </Popconfirm>
           <button
             type='button'
-            className='plugin-panel__collapse-btn'
-            onClick={() => setCollapsed((c) => !c)}
-            aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
-            title={collapsed ? 'Expand' : 'Collapse'}
+            className='plugin-panel__expand-btn'
+            onClick={() => setExpandedMode(!expanded)}
+            aria-label={t(expanded ? 'chat.pluginPanelShrink' : 'chat.pluginPanelExpand')}
+            title={t(expanded ? 'chat.pluginPanelShrink' : 'chat.pluginPanelExpand')}
           >
-            <svg
-              width='12'
-              height='12'
-              viewBox='0 0 12 12'
-              fill='none'
-              xmlns='http://www.w3.org/2000/svg'
-              className={`plugin-panel__collapse-icon${collapsed ? ' plugin-panel__collapse-icon--up' : ''}`}
-            >
-              <path d='M2 4L6 8L10 4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
-            </svg>
+            {expanded ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+            <span>{t(expanded ? 'chat.pluginPanelShrinkShort' : 'chat.pluginPanelExpandShort')}</span>
           </button>
+          {!expanded && (
+            <Tooltip
+              title={anySlotEditing ? t('chat.pluginFinishEditingFirst') : undefined}
+              placement='bottomRight'
+            >
+              <span
+                className='plugin-panel__header-action-wrap'
+                tabIndex={anySlotEditing ? 0 : undefined}
+                aria-label={anySlotEditing ? t('chat.pluginFinishEditingFirst') : undefined}
+              >
+                <Popconfirm
+                  title={t('chat.pluginDismissConfirmTitle')}
+                  description={t('chat.pluginDismissConfirmDesc')}
+                  onConfirm={handleDismiss}
+                  okText={t('chat.pluginDismissConfirmOk')}
+                  cancelText={t('chat.pluginDismissConfirmCancel')}
+                  okButtonProps={{ danger: true, size: 'small' }}
+                  cancelButtonProps={{ size: 'small' }}
+                  disabled={dismissDisabled}
+                  placement='bottomRight'
+                >
+                  <button
+                    type='button'
+                    className='plugin-panel__dismiss-btn'
+                    disabled={dismissDisabled}
+                    aria-label={t('chat.pluginDismissBtn')}
+                    title={anySlotEditing ? undefined : t('chat.pluginDismissBtn')}
+                  >
+                    <svg width='12' height='12' viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
+                      <path d='M2 2L10 10M10 2L2 10' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' />
+                    </svg>
+                  </button>
+                </Popconfirm>
+              </span>
+            </Tooltip>
+          )}
+          {!expanded && (
+            <Tooltip
+              title={collapseDisabled ? t('chat.pluginFinishEditingFirst') : undefined}
+              placement='bottomRight'
+            >
+              <span
+                className='plugin-panel__header-action-wrap'
+                tabIndex={collapseDisabled ? 0 : undefined}
+                aria-label={collapseDisabled ? t('chat.pluginFinishEditingFirst') : undefined}
+              >
+                <button
+                  type='button'
+                  className='plugin-panel__collapse-btn'
+                  onClick={() => setCollapsed((c) => !c)}
+                  disabled={collapseDisabled}
+                  aria-label={collapsed ? t('chat.pluginPanelExpand') : t('chat.pluginPanelCollapse')}
+                  title={collapseDisabled
+                    ? undefined
+                    : collapsed
+                      ? t('chat.pluginPanelExpand')
+                      : t('chat.pluginPanelCollapse')}
+                >
+                  <svg
+                    width='12'
+                    height='12'
+                    viewBox='0 0 12 12'
+                    fill='none'
+                    xmlns='http://www.w3.org/2000/svg'
+                    className={`plugin-panel__collapse-icon${collapsed ? ' plugin-panel__collapse-icon--up' : ''}`}
+                  >
+                    <path d='M2 4L6 8L10 4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
+                  </svg>
+                </button>
+              </span>
+            </Tooltip>
+          )}
         </div>
       </div>
 
@@ -1214,7 +1456,7 @@ export function PluginPanel({
 
       {/* Body */}
       {!collapsed && (
-        <div className='plugin-panel__body'>
+        <div className='plugin-panel__body' key={session.session_id}>
           {hasTabs ? (
             tabs.map((tab, idx) => (
               <div
@@ -1223,13 +1465,16 @@ export function PluginPanel({
                 role='tabpanel'
                 hidden={idx !== activeTabIdx}
               >
-                <TabSlotGrid
-                  tab={tab}
-                  session={session}
-                  onRefresh={refresh}
-                  onReference={onReference}
-                  onFocusSortOrder={handleFocusSortOrder}
-                />
+                <SlotDownloadContext.Provider value={idx === tabs.length - 1}>
+                  <TabSlotGrid
+                    tab={tab}
+                    session={session}
+                    onRefresh={refresh}
+                    onReference={onReference}
+                    onFocusSortOrder={handleFocusSortOrder}
+                    readOnly={sessionReadOnly}
+                  />
+                </SlotDownloadContext.Provider>
               </div>
             ))
           ) : (
@@ -1237,6 +1482,7 @@ export function PluginPanel({
               session={session}
               onRefresh={refresh}
               onReference={onReference}
+              readOnly={sessionReadOnly}
             />
           )}
         </div>
@@ -1262,9 +1508,17 @@ export function PluginPanel({
               disabled={buttonsDisabled}
               aria-disabled={buttonsDisabled}
               onClick={handleRetry}
-              title={buttonsDisabled ? t('chat.pluginBtnDisabledHint') : t('chat.pluginRetry')}
+              title={
+                actionPending
+                  ? t('chat.pluginSavingBeforeAction')
+                  : buttonsDisabled
+                    ? t('chat.pluginBtnDisabledHint')
+                    : anySlotEditing
+                      ? t('chat.pluginRetryFlushHint')
+                      : t('chat.pluginRetry')
+              }
             >
-              {t('chat.pluginRetry')}
+              {actionPending ? t('chat.pluginSavingBeforeAction') : t('chat.pluginRetry')}
             </button>
           )}
           {showContinue && (
@@ -1277,19 +1531,21 @@ export function PluginPanel({
               title={
                 currentStepStatus === 'failed'
                   ? t('chat.pluginContinueDisabledFailed')
-                  : buttonsDisabled
-                    ? t('chat.pluginBtnDisabledHint')
-                    : t('chat.pluginContinue')
+                  : actionPending
+                    ? t('chat.pluginSavingBeforeAction')
+                    : buttonsDisabled
+                      ? t('chat.pluginBtnDisabledHint')
+                      : t('chat.pluginContinue')
               }
             >
-              {t('chat.pluginContinue')}
+              {actionPending ? t('chat.pluginSavingBeforeAction') : t('chat.pluginContinue')}
             </button>
           )}
-          {session.status === 'completed' && session.steps && session.steps.length > 0 && (
+          {showStepRollback && (
             <div style={{ flex: '1 1 100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>{t('chat.pluginRollbackLabel')}</span>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {session.steps
+                {session.steps!
                   .filter((step, index, all) => effectivePast.has(step.step_id)
                     && step.validity !== 'stale'
                     && all.findIndex((candidate) => candidate.step_id === step.step_id && candidate.validity !== 'stale') === index)
@@ -1299,8 +1555,16 @@ export function PluginPanel({
                     type='button'
                     className='plugin-panel__action-btn plugin-panel__action-btn--secondary'
                     style={{ padding: '3px 10px', fontSize: 12 }}
+                    disabled={buttonsDisabled}
+                    aria-disabled={buttonsDisabled}
                     onClick={() => handleRollback(step.step_id)}
-                    title={`${t('chat.pluginRollbackPrefix')}${step.step_id}`}
+                    title={
+                      actionPending
+                        ? t('chat.pluginSavingBeforeAction')
+                        : buttonsDisabled
+                          ? t('chat.pluginBtnDisabledHint')
+                          : `${t('chat.pluginRollbackPrefix')}${step.step_id}`
+                    }
                   >
                     {step.step_id}
                   </button>
@@ -1323,4 +1587,10 @@ export function PluginPanel({
     )}
     </SlotEditingContext.Provider>
   );
+
+  if (expanded) {
+    const host = document.querySelector('.detail-container');
+    if (host) return createPortal(panel, host);
+  }
+  return panel;
 }

@@ -113,6 +113,7 @@ type SkillMarketItem struct {
 	ID            string     `gorm:"column:id;type:varchar(36);primaryKey"`
 	SourceSkillID string     `gorm:"column:source_skill_id;type:varchar(36);not null"`
 	Status        string     `gorm:"column:status;type:varchar(32);not null;default:'draft'"`
+	Tags          []byte     `gorm:"column:tags;type:json;not null;default:'[]'"`
 	Icon          string     `gorm:"column:icon;type:text;not null;default:''"`
 	SortOrder     int        `gorm:"column:sort_order;not null;default:0"`
 	VersionNote   string     `gorm:"column:version_note;type:text;not null;default:''"`
@@ -126,9 +127,9 @@ type SkillMarketItem struct {
 func (SkillMarketItem) TableName() string { return "skill_market_items" }
 
 type SkillMarketInstall struct {
-	MarketItemID string    `gorm:"column:market_item_id;type:varchar(36);primaryKey"`
-	UserID       string    `gorm:"column:user_id;type:varchar(255);primaryKey"`
-	SkillID      string    `gorm:"column:skill_id;type:varchar(36);not null"`
+	MarketItemID string    `gorm:"column:market_item_id;type:varchar(36);primaryKey;index:idx_skill_market_installs_user,priority:2"`
+	UserID       string    `gorm:"column:user_id;type:varchar(255);primaryKey;index:idx_skill_market_installs_user,priority:1"`
+	SkillID      string    `gorm:"column:skill_id;type:varchar(36);not null;index:idx_skill_market_installs_skill"`
 	CreatedAt    time.Time `gorm:"column:created_at;not null"`
 	UpdatedAt    time.Time `gorm:"column:updated_at;not null"`
 }

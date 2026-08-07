@@ -1,12 +1,29 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, dialog, clipboard, Menu, Tray } = require("electron");
 const { spawn, execFile } = require("node:child_process");
-const { randomUUID } = require("node:crypto");
+const { createHmac, randomBytes, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { resolveWindowsDesktopPaths } = require("./desktop-paths");
-const { runtimeExitFailureMessage, statusFailureMessage } = require("./runtime-status");
+const {
+  desktopRuntimeReady,
+  isRuntimeOwnershipConflict,
+  runtimeExitFailureMessage,
+  statusFailureMessage,
+} = require("./runtime-status");
+const {
+  createStartupMetricsRecorder,
+  runtimeCapabilityReady,
+  writeStartupMetrics,
+} = require("./startup-metrics");
+const {
+  macWarmupCompleted,
+  macWarmupMarkerPath,
+  markMacWarmupCompleted,
+  runInstallerWarmupLifecycle,
+} = require("./installer-warmup");
 
 const isWindows = process.platform === "win32";
+const isMac = process.platform === "darwin";
 const isInstallerWarmup = isWindows && process.argv.includes("--installer-warmup");
 const windowsDesktopPaths = isWindows
   ? resolveWindowsDesktopPaths(process.env, app.getPath("home"))
@@ -36,16 +53,48 @@ const repoRoot = process.env.LAZYMIND_DESKTOP_REPO_ROOT ||
   (isPackaged ? path.join(runtimeResourcesRoot, "app") : path.resolve(__dirname, "..", "..", ".."));
 const explicitRuntimeRoot = process.env.LAZYMIND_DESKTOP_RUNTIME_ROOT || "";
 const desktopLogsDir = app.getPath("logs");
+const desktopCredentialIdentityPath = path.join(app.getPath("userData"), "credential-device.json");
 const startupLogPath = path.join(desktopLogsDir, "desktop-startup.log");
 const sidecarPath = process.env.LAZYMIND_DESKTOP_SIDECAR ||
   path.join(runtimeResourcesRoot, "bin", `local-runtime-manager${isWindows ? ".exe" : ""}`);
 const maxStartupLogEntries = 1200;
+const maxSidecarFailureBytes = 32 * 1024;
 const desktopShutdownTimeout = process.env.LAZYMIND_DESKTOP_SHUTDOWN_TIMEOUT || "20s";
 const forceExitDelayMs = 1500;
+const rendererReadyTimeoutMs = 30 * 1000;
+const runtimeOwnershipHandoffTimeoutMs = 30 * 1000;
+const macInstallationWarmupMarker = macWarmupMarkerPath(app.getPath("userData"));
+const startupMetricsHistoryPath = path.join(desktopLogsDir, "startup-metrics.jsonl");
+const startupMetricsRecorder = createStartupMetricsRecorder({
+  metadata: {
+    launchId: randomUUID(),
+    launchKind: isInstallerWarmup
+      ? "installer-warmup"
+      : (
+        isMac && isPackaged && !macWarmupCompleted(macInstallationWarmupMarker, app.getVersion())
+          ? "first-launch"
+          : "normal"
+      ),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    packaged: isPackaged,
+  },
+});
 
 let mainWindow;
+let startupWindow;
+let windowCreationPromise;
+let frontendOpeningAllowed = false;
+let tray;
+let rendererReadyWait;
 let runtimeProcess;
 let runtimeProcessExit = null;
+let sidecarStderrTail = "";
+let sidecarStructuredFailure = "";
+let sidecarEventBuffer = "";
+let homeReadyStatus = null;
+let homeReadyWaiters = [];
 let guardProcess;
 let guardPID = 0;
 let guardWatchTimer;
@@ -53,6 +102,7 @@ let currentStatus = null;
 let ownerReleaseRetries = 0;
 let isQuitting = false;
 let allowWindowClose = false;
+let windowHiddenByUser = false;
 let startupLogEntries = [];
 let startupLogWriteFailed = false;
 let lastStartupError = null;
@@ -63,6 +113,35 @@ let startupState = {
   startedAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
+
+function loadOrCreateDesktopCredentialIdentity() {
+  fs.mkdirSync(path.dirname(desktopCredentialIdentityPath), { recursive: true });
+  try {
+    const parsed = JSON.parse(fs.readFileSync(desktopCredentialIdentityPath, "utf8"));
+    if (parsed?.version === 1 && parsed?.deviceId && parsed?.deviceSecret) {
+      return parsed;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw new Error(`Failed to read desktop credential identity: ${error.message}`);
+    }
+  }
+  const identity = {
+    version: 1,
+    deviceId: randomUUID(),
+    deviceSecret: randomBytes(32).toString("base64url"),
+  };
+  fs.writeFileSync(desktopCredentialIdentityPath, `${JSON.stringify(identity)}\n`, { mode: 0o600, flag: "wx" });
+  return identity;
+}
+
+function deriveDesktopCredentialKey(identity, purpose) {
+  return createHmac("sha256", Buffer.from(identity.deviceSecret, "base64url"))
+    .update(`lazymind/desktop/${identity.deviceId}/${purpose}/v1`)
+    .digest("base64url");
+}
+
+const desktopCredentialIdentity = loadOrCreateDesktopCredentialIdentity();
 
 function sidecarArgs(command, extra = []) {
   const args = [
@@ -83,13 +162,19 @@ function sidecarEnv() {
     ...process.env,
     LAZYMIND_RUNTIME_PROFILE: "desktop",
     LAZYMIND_RUNTIME_OWNER_TOKEN: ownerToken,
+    LAZYMIND_DESKTOP_APP_VERSION: app.getVersion(),
+    LAZYMIND_DESKTOP_OWNER_PID: String(process.pid),
     LAZYMIND_RUNTIME_RESOURCES_ROOT: runtimeResourcesRoot,
     LAZYMIND_LOCAL_NETWORK_PROFILE: "localhost",
     LAZYMIND_LOCAL_PROXY_ADDRESS: "127.0.0.1",
     LAZYMIND_LOCAL_AUTO_LOGIN_ALLOW_LAN: "false",
+    LAZYMIND_OPENAPI_ARTIFACT_EXPORT_ENABLED: "false",
     VITE_LAZYMIND_MODE: "desktop",
     PYTHONDONTWRITEBYTECODE: "1",
   };
+  env.LAZYMIND_MODEL_PROVIDER_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "model-provider");
+  env.LAZYMIND_MCP_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "mcp");
+  env.LAZYMIND_AUTH_CLOUD_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "cloud-oauth");
   if (explicitRuntimeRoot) {
     env.LAZYMIND_RUNTIME_ROOT = explicitRuntimeRoot;
   } else {
@@ -128,6 +213,18 @@ function currentRuntimeLogsDir() {
 
 function ensureDesktopLogDirs() {
   fs.mkdirSync(desktopLogsDir, { recursive: true });
+}
+
+function finishStartupMetrics(outcome, failureCode) {
+  const metrics = startupMetricsRecorder.finish(outcome, failureCode);
+  if (!metrics) {
+    return;
+  }
+  try {
+    writeStartupMetrics(startupMetricsHistoryPath, metrics);
+  } catch (error) {
+    console.error("Failed to write LazyMind startup metrics:", error);
+  }
 }
 
 function resetStartupLogsForRun() {
@@ -190,6 +287,60 @@ function appendStartupChunk(source, chunk) {
   String(chunk).split(/\r?\n/).forEach((line) => appendStartupLog(source, line));
 }
 
+function publishHomeReady(frontendPort) {
+  if (homeReadyStatus || !Number.isInteger(frontendPort) || frontendPort <= 0) {
+    return;
+  }
+  homeReadyStatus = { config: { frontendPort } };
+  startupMetricsRecorder.mark("homeReadySignal");
+  const waiters = homeReadyWaiters;
+  homeReadyWaiters = [];
+  waiters.forEach((resolve) => resolve(homeReadyStatus));
+}
+
+function waitForHomeReadySignal() {
+  if (homeReadyStatus) {
+    return Promise.resolve(homeReadyStatus);
+  }
+  return new Promise((resolve) => homeReadyWaiters.push(resolve));
+}
+
+function captureSidecarChunk(source, chunk) {
+  const text = String(chunk);
+  appendStartupChunk(source, text);
+  if (source === "sidecar.stderr") {
+    sidecarStderrTail = `${sidecarStderrTail}${text}`.slice(-maxSidecarFailureBytes);
+  }
+  if (source !== "sidecar.stdout") {
+    return;
+  }
+  const eventText = `${sidecarEventBuffer}${text}`;
+  const lines = eventText.split(/\r?\n/);
+  sidecarEventBuffer = lines.pop() || "";
+  for (const line of lines) {
+    const marker = "[startup-event] ";
+    const markerIndex = line.indexOf(marker);
+    if (markerIndex < 0) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line.slice(markerIndex + marker.length));
+      if (event?.event === "capability.ready" && event?.capability === "home") {
+        publishHomeReady(Number(event.frontendPort));
+      }
+      if (["phase.failed", "startup.failed"].includes(event?.event) && event?.error) {
+        sidecarStructuredFailure = String(event.error);
+      }
+    } catch {
+      // Keep the raw line in desktop-startup.log; stderr remains the fallback.
+    }
+  }
+}
+
+function sidecarFailureDetail() {
+  return sidecarStructuredFailure.trim() || sidecarStderrTail.trim();
+}
+
 function updateStartupState(patch) {
   startupState = {
     ...startupState,
@@ -209,6 +360,7 @@ function setStartupFailure(error, message = "Desktop runtime failed to start") {
     message,
     error: lastStartupError,
   });
+  finishStartupMetrics("failed", "runtime-startup");
 }
 
 function startupDiagnosticsSnapshot() {
@@ -224,8 +376,10 @@ function startupDiagnosticsSnapshot() {
       logsDir: currentRuntimeLogsDir(),
       desktopLogsDir,
       startupLogPath,
+      startupMetricsHistoryPath,
     },
     status: currentStatus,
+    metrics: startupMetricsRecorder.snapshot(),
     runtimeProcess: runtimeProcess
       ? { pid: runtimeProcess.pid, exited: false }
       : { pid: null, exited: Boolean(runtimeProcessExit), exit: runtimeProcessExit },
@@ -234,10 +388,10 @@ function startupDiagnosticsSnapshot() {
 }
 
 function broadcastStartupDiagnostics(extra = {}) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  if (!startupWindow || startupWindow.isDestroyed()) {
     return;
   }
-  mainWindow.webContents.send("lazymind:startupDiagnosticsUpdate", {
+  startupWindow.webContents.send("lazymind:startupDiagnosticsUpdate", {
     ...startupDiagnosticsSnapshot(),
     ...extra,
   });
@@ -268,60 +422,57 @@ async function runInstallerWarmup() {
     fs.mkdirSync(desktopLogsDir, { recursive: true });
     fs.appendFileSync(warmupLogPath, `[${new Date().toISOString()}] ${message}\n`);
   };
-  let warmupWindow;
-  let activeError = null;
   log(`starting offline installer warmup with timeout ${timeoutSeconds}s`);
-  try {
-    await runSidecar("up", maintenanceArgs, {
+  await runInstallerWarmupLifecycle({
+    startRuntime: () => runSidecar("up", maintenanceArgs, {
       timeout: timeoutSeconds * 1000,
-    });
-    const status = await readStatus();
-    if (status.overallStatus !== "ready" || !status.config?.frontendPort) {
-      throw new Error(`maintenance runtime did not become ready (status=${status.overallStatus || "unknown"})`);
-    }
-
-    warmupWindow = new BrowserWindow({
+    }),
+    readStatus,
+    createRenderer: () => new BrowserWindow({
       show: false,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
       },
-    });
-    warmupWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
-      try {
-        const url = new URL(details.url);
-        const allowed = url.protocol === "data:" ||
-          ((url.protocol === "http:" || url.protocol === "ws:") &&
-            (url.hostname === "127.0.0.1" || url.hostname === "localhost"));
-        callback({ cancel: !allowed });
-      } catch {
-        callback({ cancel: true });
-      }
-    });
-    await warmupWindow.loadURL(`http://127.0.0.1:${status.config.frontendPort}`);
-    log("runtime and renderer warmup completed");
-  } catch (error) {
-    log(`warmup failed: ${serializeError(error)}`);
-    activeError = error;
-    throw error;
-  } finally {
-    if (warmupWindow && !warmupWindow.isDestroyed()) {
-      warmupWindow.destroy();
-    }
-    try {
-      await runSidecar("down", maintenanceArgs, {
-        env: { ...sidecarEnv(), LAZYMIND_LOCAL_DOWN_TIMEOUT: "120s" },
-        timeout: 130000,
+    }),
+    loadRenderer: async (warmupWindow, status) => {
+      warmupWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+        try {
+          const url = new URL(details.url);
+          const allowed = url.protocol === "data:" ||
+            ((url.protocol === "http:" || url.protocol === "ws:") &&
+              (url.hostname === "127.0.0.1" || url.hostname === "localhost"));
+          callback({ cancel: !allowed });
+        } catch {
+          callback({ cancel: true });
+        }
       });
-      log("maintenance runtime stopped");
-    } catch (error) {
-      log(`maintenance runtime shutdown failed: ${serializeError(error)}`);
-      if (!activeError) {
-        throw error;
+      await warmupWindow.loadURL(`http://127.0.0.1:${status.config.frontendPort}`);
+    },
+    stopRuntime: () => runSidecar("down", maintenanceArgs, {
+      env: { ...sidecarEnv(), LAZYMIND_LOCAL_DOWN_TIMEOUT: "120s" },
+      timeout: 130000,
+    }),
+    disposeRenderer: (warmupWindow) => {
+      if (!warmupWindow.isDestroyed()) {
+        warmupWindow.destroy();
       }
-    }
+    },
+    log,
+    formatError: serializeError,
+  });
+}
+
+async function runMacInstallationWarmupIfNeeded() {
+  const version = app.getVersion();
+  if (!isMac || !isPackaged || macWarmupCompleted(macInstallationWarmupMarker, version)) {
+    return;
   }
+  startupMetricsRecorder.mark("macWarmupStarted");
+  await runInstallerWarmup();
+  markMacWarmupCompleted(macInstallationWarmupMarker, version);
+  startupMetricsRecorder.mark("macWarmupCompleted");
 }
 
 function startGuard() {
@@ -500,6 +651,7 @@ function spawnDetachedShutdownHelper(reason) {
 async function readStatus() {
   const stdout = await runSidecar("status", ["--json"]);
   currentStatus = JSON.parse(stdout);
+  startupMetricsRecorder.observeStatus(currentStatus);
   return currentStatus;
 }
 
@@ -517,9 +669,13 @@ function startRuntime() {
   if (runtimeProcess) {
     return;
   }
+  startupMetricsRecorder.mark("runtimeStartRequested");
   resetStartupLogsForRun();
   ensureDesktopLogDirs();
   runtimeProcessExit = null;
+  sidecarStderrTail = "";
+  sidecarStructuredFailure = "";
+  sidecarEventBuffer = "";
   updateStartupState({
     status: "starting",
     phase: "Starting sidecar",
@@ -534,15 +690,18 @@ function startRuntime() {
     detached: false,
     windowsHide: isWindows,
   });
-  runtimeProcess.stdout?.on("data", (chunk) => appendStartupChunk("sidecar", chunk));
-  runtimeProcess.stderr?.on("data", (chunk) => appendStartupChunk("sidecar", chunk));
+  runtimeProcess.stdout?.on("data", (chunk) => captureSidecarChunk("sidecar.stdout", chunk));
+  runtimeProcess.stderr?.on("data", (chunk) => captureSidecarChunk("sidecar.stderr", chunk));
   runtimeProcess.once("error", (error) => {
-    runtimeProcessExit = { error: serializeError(error) };
+    runtimeProcessExit = { error: serializeError(error), detail: serializeError(error) };
     runtimeProcess = null;
     setStartupFailure(error, "Could not start desktop runtime sidecar");
   });
-  runtimeProcess.once("exit", (code, signal) => {
-    runtimeProcessExit = { code, signal, at: new Date().toISOString() };
+  // `close` fires after stdout/stderr are drained, so the final Go error cannot
+  // race with ownership/status handling below.
+  runtimeProcess.once("close", (code, signal) => {
+    const detail = sidecarFailureDetail() || runtimeProcessExit?.detail || "";
+    runtimeProcessExit = { code, signal, at: new Date().toISOString(), detail };
     appendStartupLog("sidecar", `local-runtime-manager exited with code ${code ?? "null"} signal ${signal ?? "null"}`);
     runtimeProcess = null;
     if (startupState.status !== "ready" && startupState.status !== "failed") {
@@ -561,19 +720,58 @@ function beginFastQuit(reason = "quit") {
   }
   isQuitting = true;
   allowWindowClose = true;
+  finishStartupMetrics("cancelled", "app-quit-during-startup");
   appendStartupLog("desktop", `quitting LazyMind Desktop (${reason}); runtime cleanup continues in background`);
   const guardWillCleanUp = Boolean(guardPID || (!isWindows && guardProcess));
   if (!guardWillCleanUp) {
     spawnDetachedShutdownHelper(reason);
   }
   detachRuntimeMonitor();
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.destroy();
+  rendererReadyWait?.cancel();
+  rendererReadyWait = undefined;
+  for (const window of [mainWindow, startupWindow]) {
+    if (window && !window.isDestroyed()) {
+      window.destroy();
+    }
   }
   setTimeout(() => {
     app.exit(0);
   }, forceExitDelayMs).unref();
   app.quit();
+}
+
+function enterBackgroundMode(reason, { discoverable }) {
+  if (isInstallerWarmup || isQuitting) {
+    return;
+  }
+  windowHiddenByUser = true;
+  finishStartupMetrics("cancelled", "frontend-closed-to-background");
+  rendererReadyWait?.cancel();
+  rendererReadyWait = undefined;
+  const windows = [mainWindow, startupWindow];
+  mainWindow = undefined;
+  startupWindow = undefined;
+  for (const window of windows) {
+    if (window && !window.isDestroyed()) {
+      window.removeAllListeners("close");
+      window.destroy();
+    }
+  }
+  if (discoverable) {
+    ensureWindowsTray();
+  } else {
+    if (isMac) {
+      app.hide();
+      if (app.dock) {
+        app.dock.hide();
+      }
+    }
+    destroyWindowsTray();
+  }
+  appendStartupLog(
+    "desktop",
+    `frontend closed (${reason}); Electron and runtime continue in ${discoverable ? "discoverable" : "hidden"} background mode`,
+  );
 }
 
 function sameRuntimePath(left, right) {
@@ -587,10 +785,12 @@ function sameRuntimePath(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
-async function waitForRuntimeReady() {
+async function waitForRuntimeReady(options = {}) {
+  const targetCapability = options.capability || "";
   startRuntime();
   const deadline = Date.now() + 30 * 60 * 1000;
   let nextStatusErrorLogAt = 0;
+  let ownershipConflictStartedAt = 0;
   while (Date.now() < deadline) {
     try {
       const status = await readStatus();
@@ -599,13 +799,28 @@ async function waitForRuntimeReady() {
       if (status.overallStatus === "ready" && !belongsToDesktop) {
         throw new Error(`A ${status.profile || "different"} LazyMind runtime is already running. Stop it before opening Desktop.`);
       }
-      const ownedReady = status.overallStatus === "ready" && belongsToDesktop && status.ownerMatched;
-      const phase = ownedReady ? "Ready" : `Waiting (${status.overallStatus || "unknown"})`;
+      const ownedReady = targetCapability
+        ? (
+          belongsToDesktop &&
+          status.ownerMatched &&
+          status.config?.frontendPort &&
+          runtimeCapabilityReady(status, targetCapability)
+        )
+        : desktopRuntimeReady(status, belongsToDesktop);
+      const phase = ownedReady
+        ? (targetCapability ? "Interface ready" : "Ready")
+        : `Waiting (${status.overallStatus || "unknown"})`;
       updateStartupState({
-        status: ownedReady ? "ready" : (status.overallStatus || "starting"),
+        status: ownedReady && !targetCapability
+          ? "ready"
+          : (status.overallStatus || "starting"),
         phase,
         message: ownedReady
-          ? "Desktop runtime is ready."
+          ? (
+            targetCapability
+              ? "Opening LazyMind while AI services continue to initialize..."
+              : "Desktop runtime is ready."
+          )
           : "Starting local desktop runtime...",
       });
       if (status.config?.portResolutions?.length) {
@@ -617,19 +832,38 @@ async function waitForRuntimeReady() {
         }
       }
       if (ownedReady && status.config?.frontendPort) {
-        startGuard();
-        updateStartupState({ status: "ready", phase: "Ready", message: "Opening LazyMind..." });
+        if (!targetCapability) {
+          startupMetricsRecorder.mark("runtimeReady");
+          startGuard();
+          updateStartupState({ status: "ready", phase: "Ready", message: "LazyMind is ready." });
+        }
         return status;
       }
       if (runtimeProcessExit && belongsToDesktop && !status.ownerMatched && status.overallStatus === "stopped" && ownerReleaseRetries < 1) {
         ownerReleaseRetries += 1;
         runtimeProcessExit = null;
+        ownershipConflictStartedAt = 0;
         appendStartupLog("desktop", "previous Desktop instance finished cleanup; retrying runtime startup");
         startRuntime();
         continue;
       }
+      const ownershipConflict = isRuntimeOwnershipConflict(runtimeProcessExit);
+      if (ownershipConflict && ownershipConflictStartedAt === 0) {
+        ownershipConflictStartedAt = Date.now();
+        appendStartupLog("desktop", "previous Desktop instance is still cleaning up; waiting for runtime ownership release");
+      }
+      const waitingForOwnershipRelease =
+        ownershipConflict &&
+        Date.now() - ownershipConflictStartedAt < runtimeOwnershipHandoffTimeoutMs;
+      if (waitingForOwnershipRelease) {
+        updateStartupState({
+          status: "starting",
+          phase: "Waiting for previous instance",
+          message: "Finishing cleanup from the previous LazyMind window...",
+        });
+      }
       const exitFailure = runtimeExitFailureMessage(status, belongsToDesktop, runtimeProcessExit);
-      if (exitFailure) {
+      if (exitFailure && !waitingForOwnershipRelease) {
         throw new Error(exitFailure);
       }
     } catch (error) {
@@ -644,6 +878,13 @@ async function waitForRuntimeReady() {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error("LazyMind desktop runtime did not become ready in time");
+}
+
+function waitForDesktopHomeReady() {
+  return Promise.race([
+    waitForHomeReadySignal(),
+    waitForRuntimeReady({ capability: "home" }),
+  ]);
 }
 
 function loadingHTML() {
@@ -818,6 +1059,7 @@ function loadingHTML() {
       ["process-supervisor", "Process supervisor"],
       ["local-proxy", "Local gateway"],
       ["auth-service", "Auth service"],
+      ["channel-gateway", "Channel gateway"],
       ["core", "Core"],
       ["scan-control-plane", "Scan control"],
       ["file-watcher", "File watcher"],
@@ -882,39 +1124,274 @@ function loadingHTML() {
 </html>`;
 }
 
-async function createWindow() {
-  mainWindow = new BrowserWindow({
+function browserWindowOptions(show = true) {
+  return {
     width: 1440,
     height: 960,
     minWidth: 1120,
     minHeight: 760,
+    show,
+    backgroundColor: "#f7f8fa",
     title: "LazyMind",
-    icon: isWindows
-      ? (isPackaged ? path.join(process.resourcesPath, "LazyMind.ico") : process.env.LAZYMIND_DESKTOP_WINDOWS_ICON)
-      : undefined,
+    icon: windowsDesktopIconPath(),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
     },
-  });
-  mainWindow.on("close", (event) => {
+  };
+}
+
+function windowsDesktopIconPath() {
+  if (!isWindows) {
+    return undefined;
+  }
+  return isPackaged
+    ? path.join(process.resourcesPath, "LazyMind.ico")
+    : process.env.LAZYMIND_DESKTOP_WINDOWS_ICON;
+}
+
+function destroyWindowsTray() {
+  if (!tray) {
+    return;
+  }
+  tray.destroy();
+  tray = undefined;
+}
+
+function ensureWindowsTray() {
+  if (!isWindows || tray) {
+    return;
+  }
+  const iconPath = windowsDesktopIconPath();
+  if (!iconPath) {
+    appendStartupLog("desktop", "Windows tray icon is unavailable");
+    return;
+  }
+  try {
+    tray = new Tray(iconPath);
+    tray.setToolTip("LazyMind");
+    tray.on("click", () => {
+      void showActiveWindow();
+    });
+    tray.setContextMenu(Menu.buildFromTemplate([
+      {
+        label: "Open LazyMind",
+        click: () => {
+          void showActiveWindow();
+        },
+      },
+      { type: "separator" },
+      {
+        label: "Exit",
+        click: () => {
+          enterBackgroundMode("tray exit", { discoverable: false });
+        },
+      },
+    ]));
+  } catch (error) {
+    tray = undefined;
+    appendStartupLog("desktop", `could not create Windows tray icon: ${serializeError(error)}`);
+  }
+}
+
+function attachManagedClose(window) {
+  window.on("close", (event) => {
     if (allowWindowClose) {
       return;
     }
     event.preventDefault();
-    beginFastQuit("window close");
+    enterBackgroundMode("window close", { discoverable: true });
   });
-  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHTML())}`);
+}
+
+function activeWindow() {
+  if (startupWindow && !startupWindow.isDestroyed()) {
+    return startupWindow;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow;
+  }
+  return undefined;
+}
+
+function showActiveWindow() {
+  windowHiddenByUser = false;
+  if (isMac) {
+    app.show();
+    if (app.dock) {
+      void app.dock.show();
+    }
+  }
+  if (!frontendOpeningAllowed) {
+    return Promise.resolve();
+  }
+  const window = activeWindow();
+  if (window && !window.isDestroyed()) {
+    if (window.isMinimized()) {
+      window.restore();
+    }
+    window.show();
+    window.focus();
+    if (window === mainWindow) {
+      startupMetricsRecorder.mark("mainWindowVisible");
+    }
+    return Promise.resolve();
+  }
+
+  if (windowCreationPromise) {
+    return windowCreationPromise;
+  }
+  appendStartupLog(
+    "desktop",
+    runtimeProcess
+      ? "opening frontend window from resident runtime"
+      : "opening frontend window and starting runtime",
+  );
+  const creation = createWindow();
+  windowCreationPromise = creation;
+  void creation
+    .catch((error) => {
+      if (!windowHiddenByUser && !isQuitting) {
+        setStartupFailure(error);
+      }
+    })
+    .finally(() => {
+      if (windowCreationPromise === creation) {
+        windowCreationPromise = undefined;
+      }
+      if (!windowHiddenByUser && !isQuitting && !activeWindow()) {
+        void showActiveWindow();
+      }
+    });
+  return creation;
+}
+
+function createRendererReadyWait(window) {
+  let settled = false;
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    rejectPromise(new Error("LazyMind Chat did not render within 30 seconds"));
+  }, rendererReadyTimeoutMs);
+  return {
+    window,
+    promise,
+    notify() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise();
+    },
+    cancel() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise();
+    },
+  };
+}
+
+async function createWindow() {
+  const nextStartupWindow = new BrowserWindow(browserWindowOptions(true));
+  let nextMainWindow;
+  let nextRendererReadyWait;
+  startupWindow = nextStartupWindow;
+  nextStartupWindow.once("closed", () => {
+    if (startupWindow === nextStartupWindow) {
+      startupWindow = undefined;
+    }
+  });
+  startupMetricsRecorder.mark("startupWindowCreated");
+  if (nextStartupWindow.isVisible()) {
+    startupMetricsRecorder.mark("windowVisible");
+  } else {
+    nextStartupWindow.once("show", () => startupMetricsRecorder.mark("windowVisible"));
+  }
+  attachManagedClose(nextStartupWindow);
+  startRuntime();
+  await nextStartupWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHTML())}`);
+  startupMetricsRecorder.mark("startupPageLoaded");
   broadcastStartupDiagnostics();
   try {
-    const status = await waitForRuntimeReady();
-    await mainWindow.loadURL(`http://127.0.0.1:${status.config.frontendPort}`);
+    const status = await waitForDesktopHomeReady();
+    if (isQuitting || windowHiddenByUser || nextStartupWindow.isDestroyed()) {
+      return;
+    }
+    nextMainWindow = new BrowserWindow(browserWindowOptions(false));
+    mainWindow = nextMainWindow;
+    nextMainWindow.once("closed", () => {
+      if (mainWindow === nextMainWindow) {
+        mainWindow = undefined;
+      }
+    });
+    startupMetricsRecorder.mark("mainWindowCreated");
+    attachManagedClose(nextMainWindow);
+    nextRendererReadyWait = createRendererReadyWait(nextMainWindow);
+    rendererReadyWait = nextRendererReadyWait;
+    startupMetricsRecorder.mark("frontendLoadStarted");
+    await Promise.all([
+      nextMainWindow.loadURL(`http://127.0.0.1:${status.config.frontendPort}/agent/chat/home`),
+      nextRendererReadyWait.promise,
+    ]);
+    nextRendererReadyWait.cancel();
+    if (rendererReadyWait === nextRendererReadyWait) {
+      rendererReadyWait = undefined;
+    }
+    if (isQuitting || windowHiddenByUser || nextMainWindow.isDestroyed()) {
+      return;
+    }
+    nextStartupWindow.removeAllListeners("close");
+    nextStartupWindow.hide();
+    nextMainWindow.show();
+    startupMetricsRecorder.mark("mainWindowVisible");
+    nextMainWindow.focus();
+    appendStartupLog("desktop", "frontend window ready");
+    nextStartupWindow.destroy();
+    void waitForRuntimeReady().then(
+      () => finishStartupMetrics("success"),
+      (error) => {
+        if (!isQuitting) {
+          setStartupFailure(error);
+        }
+      },
+    );
   } catch (error) {
+    nextRendererReadyWait?.cancel();
+    if (rendererReadyWait === nextRendererReadyWait) {
+      rendererReadyWait = undefined;
+    }
+    if (nextMainWindow && !nextMainWindow.isDestroyed()) {
+      nextMainWindow.removeAllListeners("close");
+      nextMainWindow.destroy();
+    }
+    if (mainWindow === nextMainWindow) {
+      mainWindow = undefined;
+    }
+    if (windowHiddenByUser && !isQuitting) {
+      return;
+    }
     setStartupFailure(error);
   }
 }
+
+ipcMain.on("lazymind:renderer-ready", (event) => {
+  if (!rendererReadyWait || rendererReadyWait.window.isDestroyed()) {
+    return;
+  }
+  if (event.sender !== rendererReadyWait.window.webContents) {
+    return;
+  }
+  startupMetricsRecorder.mark("rendererReady");
+  rendererReadyWait.notify();
+});
 
 ipcMain.handle("lazymind:runtimeStatus", () => readStatus());
 ipcMain.handle("lazymind:restartRuntime", async () => {
@@ -946,7 +1423,16 @@ ipcMain.handle("lazymind:openDataDir", async () => {
   await shell.openPath(target);
 });
 ipcMain.handle("lazymind:selectFolder", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] });
+  const result = await dialog.showOpenDialog(activeWindow(), { properties: ["openDirectory"] });
+  return result.canceled ? null : result.filePaths[0];
+});
+ipcMain.handle("lazymind:selectExecutable", async () => {
+  const result = await dialog.showOpenDialog(activeWindow(), {
+    properties: ["openFile"],
+    filters: process.platform === "win32"
+      ? [{ name: "FFmpeg", extensions: ["exe"] }]
+      : [{ name: "Executable", extensions: ["*"] }],
+  });
   return result.canceled ? null : result.filePaths[0];
 });
 ipcMain.handle("lazymind:startupDiagnostics", () => startupDiagnosticsSnapshot());
@@ -970,6 +1456,8 @@ ipcMain.handle("lazymind:exportDiagnostics", async () => {
     logsDir: currentRuntimeLogsDir(),
     desktopLogsDir,
     desktopStartupLog: startupLogPath,
+    desktopStartupMetrics: startupMetricsHistoryPath,
+    startupMetrics: startupMetricsRecorder.snapshot(),
     lastStartupError,
   }, null, 2));
   return out;
@@ -984,32 +1472,53 @@ if (!hasSingleInstanceLock) {
   }
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      return;
-    }
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    mainWindow.show();
-    mainWindow.focus();
+    void showActiveWindow();
+  });
+  app.on("activate", () => {
+    void showActiveWindow();
   });
   app.whenReady().then(() => {
+    startupMetricsRecorder.mark("electronReady");
     if (isWindows) {
       app.setAppUserModelId("ai.lazymind.desktop");
     }
     if (isInstallerWarmup) {
+      startupMetricsRecorder.mark("installerWarmupStarted");
       return runInstallerWarmup().then(
-        () => app.exit(0),
+        () => {
+          startupMetricsRecorder.mark("installerWarmupCompleted");
+          finishStartupMetrics("success");
+          app.exit(0);
+        },
         (error) => {
+          finishStartupMetrics("failed", "installer-warmup");
           console.error("LazyMind installer warmup failed:", error);
           app.exit(1);
         },
       );
     }
-    return createWindow();
+    return runMacInstallationWarmupIfNeeded().then(
+      () => {
+        frontendOpeningAllowed = true;
+        if (windowHiddenByUser) {
+          return undefined;
+        }
+        return showActiveWindow();
+      },
+      (error) => {
+        finishStartupMetrics("failed", "mac-installation-warmup");
+        console.error("LazyMind macOS installation warmup failed:", error);
+        dialog.showErrorBox(
+          "LazyMind installation warmup failed",
+          `LazyMind could not prepare its local runtime. Reopen the app to retry.\n\n${serializeError(error)}`,
+        );
+        app.exit(1);
+      },
+    );
   });
   app.on("window-all-closed", () => {
-    app.quit();
+    // Normal Desktop sessions stay resident without renderer processes.
+    // Installer warmup owns its explicit app.exit lifecycle.
   });
   app.on("before-quit", (event) => {
     if (isInstallerWarmup) {
@@ -1017,7 +1526,7 @@ if (!hasSingleInstanceLock) {
     }
     if (!isQuitting) {
       event.preventDefault();
-      beginFastQuit("app quit");
+      enterBackgroundMode("app quit", { discoverable: false });
     }
   });
 }
