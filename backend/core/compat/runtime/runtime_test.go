@@ -34,7 +34,7 @@ func (stubCloudDocumentPort) GetSource(context.Context, contract.CallContext, st
 	return clouddocument.SourceDetail{}, nil
 }
 
-func (stubCloudDocumentPort) ListDocuments(context.Context, contract.CallContext, clouddocument.GetInput) (clouddocument.DocumentListResult, error) {
+func (stubCloudDocumentPort) ListDocuments(context.Context, contract.CallContext, clouddocument.SourceDetail, clouddocument.GetInput) (clouddocument.DocumentListResult, error) {
 	return clouddocument.DocumentListResult{}, nil
 }
 

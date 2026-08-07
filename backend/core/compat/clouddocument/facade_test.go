@@ -12,7 +12,7 @@ import (
 type fakePort struct {
 	listCalls []listCall
 	getCalls  []getCall
-	docCalls  []GetInput
+	docCalls  []docCall
 	searches  []searchCall
 	listErr   error
 	getErr    error
@@ -37,6 +37,12 @@ type searchCall struct {
 	input   SearchInput
 }
 
+type docCall struct {
+	callCtx contract.CallContext
+	source  SourceDetail
+	input   GetInput
+}
+
 func (p *fakePort) ListSources(ctx context.Context, callCtx contract.CallContext, input ListInput) (ListResult, error) {
 	p.listCalls = append(p.listCalls, listCall{callCtx: callCtx, input: input})
 	if p.listErr != nil {
@@ -57,8 +63,8 @@ func (p *fakePort) GetSource(ctx context.Context, callCtx contract.CallContext, 
 	return SourceDetail{ID: sourceID, Name: "Docs"}, nil
 }
 
-func (p *fakePort) ListDocuments(ctx context.Context, callCtx contract.CallContext, input GetInput) (DocumentListResult, error) {
-	p.docCalls = append(p.docCalls, input)
+func (p *fakePort) ListDocuments(ctx context.Context, callCtx contract.CallContext, source SourceDetail, input GetInput) (DocumentListResult, error) {
+	p.docCalls = append(p.docCalls, docCall{callCtx: callCtx, source: source, input: input})
 	if p.docErr != nil {
 		return DocumentListResult{}, p.docErr
 	}
@@ -119,8 +125,15 @@ func TestFacadeGetWithoutDocuments(t *testing.T) {
 
 func TestFacadeGetWithDocuments(t *testing.T) {
 	port := &fakePort{
-		source:    SourceDetail{ID: "source-1", Name: "Docs", DatasetID: "dataset-1"},
-		documents: []DocumentSummary{{ID: "doc-1", ObjectKey: "obj-1", CoreDocumentID: "core-doc-1"}},
+		source: SourceDetail{ID: "source-1", Name: "Docs", DatasetID: "dataset-1"},
+		documents: []DocumentSummary{{
+			ID:        "doc-1",
+			ObjectKey: "obj-1",
+			KnowledgeDocument: &KnowledgeDocumentRef{
+				KnowledgeID: "dataset-1",
+				DocumentID:  "core-doc-1",
+			},
+		}},
 	}
 	facade := mustFacade(t, port)
 	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{
@@ -136,7 +149,7 @@ func TestFacadeGetWithDocuments(t *testing.T) {
 	if result.DocumentsPage == nil {
 		t.Fatalf("DocumentsPage is nil, want page when IncludeDocuments=true")
 	}
-	if len(port.docCalls) != 1 || port.docCalls[0].SourceID != "source-1" {
+	if len(port.docCalls) != 1 || port.docCalls[0].input.SourceID != "source-1" || port.docCalls[0].source.DatasetID != "dataset-1" {
 		t.Fatalf("doc calls = %#v, want one source-scoped document page call", port.docCalls)
 	}
 	ref := result.Documents[0].KnowledgeDocument
@@ -230,33 +243,16 @@ func TestFacadePassesPortErrorsThrough(t *testing.T) {
 	}
 }
 
-func TestFacadeKnowledgeDocumentRefRequiresKnowledgeID(t *testing.T) {
-	port := &fakePort{
-		source:    SourceDetail{ID: "source-1"},
-		documents: []DocumentSummary{{ID: "doc-1", CoreDocumentID: "core-doc-1"}},
-	}
+func TestFacadeGetWithDocumentsFailsWithoutPartialResult(t *testing.T) {
+	docErr := contract.NewError(contract.BackendUnavailable, "cloud_document.get", "scan backend unavailable", true, errors.New("down"))
+	port := &fakePort{source: SourceDetail{ID: "source-1", DatasetID: "dataset-1"}, docErr: docErr}
 	facade := mustFacade(t, port)
 	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{SourceID: "source-1", IncludeDocuments: true})
-	if err != nil {
-		t.Fatalf("Get returned error: %v", err)
+	if !errors.Is(err, docErr) {
+		t.Fatalf("Get err = %v, want document list failure", err)
 	}
-	if result.Documents[0].KnowledgeDocument != nil {
-		t.Fatalf("KnowledgeDocument = %#v, want nil without source DatasetID", result.Documents[0].KnowledgeDocument)
-	}
-}
-
-func TestFacadeKnowledgeDocumentRefRequiresDocumentID(t *testing.T) {
-	port := &fakePort{
-		source:    SourceDetail{ID: "source-1", DatasetID: "dataset-1"},
-		documents: []DocumentSummary{{ID: "doc-1", CoreDocumentID: ""}},
-	}
-	facade := mustFacade(t, port)
-	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{SourceID: "source-1", IncludeDocuments: true})
-	if err != nil {
-		t.Fatalf("Get returned error: %v", err)
-	}
-	if result.Documents[0].KnowledgeDocument != nil {
-		t.Fatalf("KnowledgeDocument = %#v, want nil without CoreDocumentID", result.Documents[0].KnowledgeDocument)
+	if result.Source.ID != "" || result.Documents != nil || result.DocumentsPage != nil {
+		t.Fatalf("result = %#v, want no partial source result", result)
 	}
 }
 
@@ -269,9 +265,28 @@ func TestCloudDocumentContractDoesNotExposeBodySearchFields(t *testing.T) {
 		reflect.TypeOf(SearchResult{}),
 		reflect.TypeOf(SearchHit{}),
 	} {
-		for _, forbidden := range []string{"IncludeContent", "IncludeBody", "Content", "Body", "Text", "Snippet", "Score", "SemanticScore", "Path", "Directory", "FileSystemPath", "LazyLLMDocID"} {
+		for _, forbidden := range []string{"IncludeContent", "IncludeBody", "Content", "Body", "Text", "Snippet", "Score", "SemanticScore", "Path", "Directory", "FileSystemPath", "LazyLLMDocID", "ObjectType"} {
 			if _, ok := typ.FieldByName(forbidden); ok {
 				t.Fatalf("%s exposes forbidden field %s", typ.Name(), forbidden)
+			}
+		}
+	}
+}
+
+func TestCloudDocumentOutputContractsDoNotExposeScanInternalFields(t *testing.T) {
+	tests := []struct {
+		typ       reflect.Type
+		forbidden []string
+	}{
+		{typ: reflect.TypeOf(SourceSummary{}), forbidden: []string{"Summary", "ConfigVersion"}},
+		{typ: reflect.TypeOf(SourceDetail{}), forbidden: []string{"Summary", "ConfigVersion"}},
+		{typ: reflect.TypeOf(DocumentSummary{}), forbidden: []string{"BindingID", "SourceVersion", "BaselineVersion", "CoreDocumentID", "ParseStatus", "ParseState", "EffectiveParseStatus", "SourceState", "SyncState", "PendingAction", "ParseQueueState", "HasUpdate", "UpdateType"}},
+		{typ: reflect.TypeOf(SearchHit{}), forbidden: []string{"ObjectType", "BindingID", "SourceState", "SyncState", "PendingAction", "ParseQueueState", "HasUpdate", "UpdateType"}},
+	}
+	for _, tc := range tests {
+		for _, forbidden := range tc.forbidden {
+			if _, ok := tc.typ.FieldByName(forbidden); ok {
+				t.Fatalf("%s exposes removed/internal field %s", tc.typ.Name(), forbidden)
 			}
 		}
 	}

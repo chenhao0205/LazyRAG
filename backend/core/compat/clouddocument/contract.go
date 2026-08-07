@@ -17,9 +17,7 @@ type SourceSummary struct {
 	Name                 string
 	Status               string
 	DatasetID            string
-	ConfigVersion        int64
 	BindingCount         int
-	Summary              map[string]any
 	AuthConnectionStatus string
 	DocumentCount        *int64
 	CreatedAt            time.Time
@@ -45,8 +43,6 @@ type SourceDetail struct {
 	Name          string
 	Status        string
 	DatasetID     string
-	ConfigVersion int64
-	Summary       map[string]any
 	DocumentCount *int64
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -60,29 +56,16 @@ type KnowledgeDocumentRef struct {
 }
 
 type DocumentSummary struct {
-	ID                   string
-	SourceID             string
-	BindingID            string
-	ObjectKey            string
-	DisplayName          string
-	Name                 string
-	FileType             string
-	SizeBytes            int64
-	SourceVersion        string
-	BaselineVersion      string
-	CoreDocumentID       string
-	ParseStatus          string
-	ParseState           string
-	EffectiveParseStatus string
-	SourceState          string
-	SyncState            string
-	PendingAction        string
-	ParseQueueState      string
-	HasUpdate            bool
-	UpdateType           string
-	SourceModifiedAt     *time.Time
-	LastSyncedAt         *time.Time
-	KnowledgeDocument    *KnowledgeDocumentRef
+	ID                string
+	SourceID          string
+	ObjectKey         string
+	DisplayName       string
+	Name              string
+	FileType          string
+	SizeBytes         *int64
+	SourceModifiedAt  *time.Time
+	LastSyncedAt      *time.Time
+	KnowledgeDocument *KnowledgeDocumentRef
 }
 
 type DocumentListResult struct {
@@ -118,23 +101,15 @@ type SearchResult struct {
 }
 
 type SearchHit struct {
-	Key             string
-	DisplayName     string
-	SearchName      string
-	SourceID        string
-	BindingID       string
-	TreeKey         string
-	ObjectKey       string
-	ParentKey       string
-	ObjectType      string
-	IsDocument      bool
-	IsContainer     bool
-	HasChildren     bool
-	Selectable      bool
-	SourceState     string
-	SyncState       string
-	PendingAction   string
-	ParseQueueState string
-	HasUpdate       bool
-	UpdateType      string
+	Key         string
+	DisplayName string
+	SearchName  string
+	SourceID    string
+	TreeKey     string
+	ObjectKey   string
+	ParentKey   string
+	IsDocument  bool
+	IsContainer bool
+	HasChildren bool
+	Selectable  bool
 }

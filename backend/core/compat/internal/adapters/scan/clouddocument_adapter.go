@@ -100,7 +100,7 @@ func (a *CloudDocumentAdapter) GetSource(ctx context.Context, callCtx contract.C
 	return mapSourceDetail(resp), nil
 }
 
-func (a *CloudDocumentAdapter) ListDocuments(ctx context.Context, callCtx contract.CallContext, input clouddocument.GetInput) (clouddocument.DocumentListResult, error) {
+func (a *CloudDocumentAdapter) ListDocuments(ctx context.Context, callCtx contract.CallContext, source clouddocument.SourceDetail, input clouddocument.GetInput) (clouddocument.DocumentListResult, error) {
 	const operation = "cloud_document.get"
 	page := input.DocumentsPage.Normalize()
 	offset, err := contract.DecodeOffsetPageToken(page.PageToken)
@@ -120,7 +120,7 @@ func (a *CloudDocumentAdapter) ListDocuments(ctx context.Context, callCtx contra
 	}
 	docs := make([]clouddocument.DocumentSummary, 0, len(resp.Items))
 	for _, item := range resp.Items {
-		docs = append(docs, mapDocumentSummary(item))
+		docs = append(docs, mapDocumentSummary(source.DatasetID, item))
 	}
 	total := int64(resp.Total)
 	result := clouddocument.DocumentListResult{
@@ -222,25 +222,56 @@ func mapTransportError(operation string, err error) error {
 func mapHTTPError(operation string, resp *http.Response) error {
 	payload := scanErrorResponse{}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload)
-	message := strings.TrimSpace(payload.Message)
-	if message == "" {
-		message = http.StatusText(resp.StatusCode)
-	}
+	cause := scanHTTPError{StatusCode: resp.StatusCode, Code: payload.Code, Message: payload.Message}
+	message := safeHTTPErrorMessage(resp.StatusCode, payload.Code)
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
-		return contract.NewError(contract.InvalidArgument, operation, message, false, nil)
+		return contract.NewError(contract.InvalidArgument, operation, message, false, cause)
 	case http.StatusNotFound:
-		return contract.NewError(contract.NotFound, operation, message, false, nil)
+		return contract.NewError(contract.NotFound, operation, message, false, cause)
 	case http.StatusConflict:
-		return contract.NewError(contract.Conflict, operation, message, false, nil)
+		return contract.NewError(contract.Conflict, operation, message, false, cause)
 	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return contract.NewError(contract.BackendUnavailable, operation, message, true, nil)
+		return contract.NewError(contract.BackendUnavailable, operation, message, true, cause)
 	default:
 		if resp.StatusCode >= http.StatusInternalServerError {
-			return contract.NewError(contract.BackendUnavailable, operation, message, true, nil)
+			return contract.NewError(contract.BackendUnavailable, operation, message, true, cause)
 		}
-		return contract.NewError(contract.Internal, operation, fmt.Sprintf("scan request failed with status %d", resp.StatusCode), false, nil)
+		return contract.NewError(contract.Internal, operation, message, false, cause)
 	}
+}
+
+type scanHTTPError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e scanHTTPError) Error() string {
+	return fmt.Sprintf("scan request failed: status=%d code=%s message=%s", e.StatusCode, e.Code, e.Message)
+}
+
+func safeHTTPErrorMessage(statusCode int, backendCode string) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "scan request is invalid"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "scan access denied"
+	case http.StatusNotFound:
+		return "scan resource not found"
+	case http.StatusConflict:
+		return "scan resource conflict"
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return "scan backend unavailable"
+	default:
+		if statusCode >= http.StatusInternalServerError {
+			return "scan backend unavailable"
+		}
+	}
+	if strings.TrimSpace(backendCode) != "" {
+		return "scan request failed"
+	}
+	return "scan request failed"
 }
 
 func mapSourceSummary(item scanSourceListItem) clouddocument.SourceSummary {
@@ -249,9 +280,7 @@ func mapSourceSummary(item scanSourceListItem) clouddocument.SourceSummary {
 		Name:                 item.Name,
 		Status:               item.Status,
 		DatasetID:            item.DatasetID,
-		ConfigVersion:        item.ConfigVersion,
 		BindingCount:         item.BindingCount,
-		Summary:              cloneMap(item.Summary),
 		AuthConnectionStatus: authConnectionStatus(item.AuthConnectionStatus),
 		DocumentCount:        documentCount(item.Summary),
 		CreatedAt:            item.CreatedAt,
@@ -265,63 +294,61 @@ func mapSourceDetail(resp scanGetSourceResponse) clouddocument.SourceDetail {
 		Name:          resp.Source.Name,
 		Status:        resp.Source.Status,
 		DatasetID:     resp.Source.DatasetID,
-		ConfigVersion: resp.Source.ConfigVersion,
-		Summary:       cloneMap(resp.Summary),
 		DocumentCount: documentCount(resp.Summary),
 		CreatedAt:     resp.Source.CreatedAt,
 		UpdatedAt:     resp.Source.UpdatedAt,
 	}
 }
 
-func mapDocumentSummary(item scanDocumentItem) clouddocument.DocumentSummary {
+func mapDocumentSummary(knowledgeID string, item scanDocumentItem) clouddocument.DocumentSummary {
 	return clouddocument.DocumentSummary{
-		ID:                   item.DocumentID,
-		SourceID:             item.SourceID,
-		BindingID:            item.BindingID,
-		ObjectKey:            item.ObjectKey,
-		DisplayName:          item.DisplayName,
-		Name:                 item.Name,
-		FileType:             item.FileType,
-		SizeBytes:            item.SizeBytes,
-		SourceVersion:        item.SourceVersion,
-		BaselineVersion:      item.BaselineVersion,
-		CoreDocumentID:       item.CoreDocumentID,
-		ParseStatus:          item.ParseStatus,
-		ParseState:           item.ParseState,
-		EffectiveParseStatus: firstNonEmpty(item.EffectiveParseStatus, item.ParseStatus, item.ParseState),
-		SourceState:          item.SourceState,
-		SyncState:            item.SyncState,
-		PendingAction:        item.PendingAction,
-		ParseQueueState:      item.ParseQueueState,
-		HasUpdate:            item.HasUpdate,
-		UpdateType:           item.UpdateType,
-		SourceModifiedAt:     item.SourceModifiedAt,
-		LastSyncedAt:         item.LastSyncedAt,
+		ID:                item.DocumentID,
+		SourceID:          item.SourceID,
+		ObjectKey:         item.ObjectKey,
+		DisplayName:       item.DisplayName,
+		Name:              item.Name,
+		FileType:          item.FileType,
+		SizeBytes:         item.SizeBytes,
+		SourceModifiedAt:  item.SourceModifiedAt,
+		LastSyncedAt:      item.LastSyncedAt,
+		KnowledgeDocument: knowledgeDocumentRef(knowledgeID, item),
 	}
 }
 
 func mapSearchHit(item scanTreeNode) clouddocument.SearchHit {
 	return clouddocument.SearchHit{
-		Key:             item.Key,
-		DisplayName:     item.DisplayName,
-		SearchName:      item.SearchName,
-		SourceID:        item.SourceID,
-		BindingID:       item.BindingID,
-		TreeKey:         item.TreeKey,
-		ObjectKey:       item.ObjectKey,
-		ParentKey:       item.ParentKey,
-		ObjectType:      item.ObjectType,
-		IsDocument:      item.IsDocument,
-		IsContainer:     item.IsContainer,
-		HasChildren:     item.HasChildren,
-		Selectable:      item.Selectable,
-		SourceState:     item.SourceState,
-		SyncState:       item.SyncState,
-		PendingAction:   item.PendingAction,
-		ParseQueueState: item.ParseQueueState,
-		HasUpdate:       item.HasUpdate,
-		UpdateType:      item.UpdateType,
+		Key:         item.Key,
+		DisplayName: item.DisplayName,
+		SearchName:  item.SearchName,
+		SourceID:    item.SourceID,
+		TreeKey:     item.TreeKey,
+		ObjectKey:   item.ObjectKey,
+		ParentKey:   item.ParentKey,
+		IsDocument:  item.IsDocument,
+		IsContainer: item.IsContainer,
+		HasChildren: item.HasChildren,
+		Selectable:  item.Selectable,
 	}
+}
+
+func knowledgeDocumentRef(knowledgeID string, item scanDocumentItem) *clouddocument.KnowledgeDocumentRef {
+	knowledgeID = strings.TrimSpace(knowledgeID)
+	documentID := strings.TrimSpace(item.CoreDocumentID)
+	if knowledgeID == "" || documentID == "" {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(item.PendingAction), "DELETE") {
+		return nil
+	}
+	switch strings.ToUpper(strings.TrimSpace(item.SourceState)) {
+	case "DELETED", "OUT_OF_SCOPE":
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(item.ParseStatus), "SUCCEEDED") &&
+		!strings.EqualFold(strings.TrimSpace(item.EffectiveParseStatus), "PARSED") {
+		return nil
+	}
+	return &clouddocument.KnowledgeDocumentRef{KnowledgeID: knowledgeID, DocumentID: documentID}
 }
 
 func authConnectionStatus(status *scanAuthConnectionStatus) string {
@@ -358,26 +385,6 @@ func int64Value(value any) (int64, bool) {
 	}
 }
 
-func cloneMap(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 type scanErrorResponse struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
@@ -394,7 +401,6 @@ type scanSourceListItem struct {
 	Name                 string                    `json:"name"`
 	DatasetID            string                    `json:"dataset_id"`
 	Status               string                    `json:"status"`
-	ConfigVersion        int64                     `json:"config_version"`
 	BindingCount         int                       `json:"binding_count"`
 	AuthConnectionStatus *scanAuthConnectionStatus `json:"auth_connection_status,omitempty"`
 	Summary              map[string]any            `json:"summary,omitempty"`
@@ -413,13 +419,12 @@ type scanGetSourceResponse struct {
 }
 
 type scanSource struct {
-	SourceID      string    `json:"source_id"`
-	Name          string    `json:"name"`
-	DatasetID     string    `json:"dataset_id"`
-	Status        string    `json:"status"`
-	ConfigVersion int64     `json:"config_version"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	SourceID  string    `json:"source_id"`
+	Name      string    `json:"name"`
+	DatasetID string    `json:"dataset_id"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type scanListDocumentsResponse struct {
@@ -437,19 +442,12 @@ type scanDocumentItem struct {
 	DisplayName          string     `json:"display_name"`
 	Name                 string     `json:"name,omitempty"`
 	FileType             string     `json:"file_type,omitempty"`
-	SizeBytes            int64      `json:"size_bytes"`
-	SourceVersion        string     `json:"source_version,omitempty"`
-	BaselineVersion      string     `json:"baseline_version,omitempty"`
+	SizeBytes            *int64     `json:"size_bytes,omitempty"`
 	CoreDocumentID       string     `json:"core_document_id,omitempty"`
 	ParseStatus          string     `json:"parse_status,omitempty"`
-	ParseState           string     `json:"parse_state,omitempty"`
 	EffectiveParseStatus string     `json:"effective_parse_status,omitempty"`
 	SourceState          string     `json:"source_state,omitempty"`
-	SyncState            string     `json:"sync_state,omitempty"`
 	PendingAction        string     `json:"pending_action,omitempty"`
-	ParseQueueState      string     `json:"parse_queue_state,omitempty"`
-	HasUpdate            bool       `json:"has_update,omitempty"`
-	UpdateType           string     `json:"update_type,omitempty"`
 	SourceModifiedAt     *time.Time `json:"source_modified_at,omitempty"`
 	LastSyncedAt         *time.Time `json:"last_synced_at,omitempty"`
 }
@@ -475,23 +473,16 @@ type scanTreeNodePage struct {
 }
 
 type scanTreeNode struct {
-	Key             string `json:"key"`
-	DisplayName     string `json:"display_name"`
-	SearchName      string `json:"search_name,omitempty"`
-	SourceID        string `json:"source_id,omitempty"`
-	BindingID       string `json:"binding_id,omitempty"`
-	TreeKey         string `json:"tree_key,omitempty"`
-	ObjectKey       string `json:"object_key,omitempty"`
-	ParentKey       string `json:"parent_key,omitempty"`
-	ObjectType      string `json:"object_type,omitempty"`
-	IsDocument      bool   `json:"is_document"`
-	IsContainer     bool   `json:"is_container"`
-	HasChildren     bool   `json:"has_children"`
-	Selectable      bool   `json:"selectable"`
-	SourceState     string `json:"source_state,omitempty"`
-	SyncState       string `json:"sync_state,omitempty"`
-	PendingAction   string `json:"pending_action,omitempty"`
-	ParseQueueState string `json:"parse_queue_state,omitempty"`
-	HasUpdate       bool   `json:"has_update,omitempty"`
-	UpdateType      string `json:"update_type,omitempty"`
+	Key         string `json:"key"`
+	DisplayName string `json:"display_name"`
+	SearchName  string `json:"search_name,omitempty"`
+	SourceID    string `json:"source_id,omitempty"`
+	BindingID   string `json:"binding_id,omitempty"`
+	TreeKey     string `json:"tree_key,omitempty"`
+	ObjectKey   string `json:"object_key,omitempty"`
+	ParentKey   string `json:"parent_key,omitempty"`
+	IsDocument  bool   `json:"is_document"`
+	IsContainer bool   `json:"is_container"`
+	HasChildren bool   `json:"has_children"`
+	Selectable  bool   `json:"selectable"`
 }

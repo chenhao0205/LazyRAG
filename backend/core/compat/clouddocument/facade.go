@@ -51,12 +51,11 @@ func (f *Facade) Get(ctx context.Context, callCtx contract.CallContext, input Ge
 	if !input.IncludeDocuments {
 		return result, nil
 	}
-	docs, err := f.port.ListDocuments(ctx, callCtx, input)
+	docs, err := f.port.ListDocuments(ctx, callCtx, source, input)
 	if err != nil {
 		return GetResult{}, err
 	}
 	result.Documents = docs.Documents
-	attachKnowledgeDocumentRefs(result.Documents, source.DatasetID)
 	result.DocumentsPage = &docs.Page
 	return result, nil
 }
@@ -82,23 +81,6 @@ func (f *Facade) Search(ctx context.Context, callCtx contract.CallContext, input
 	input.StateFilter = trimStrings(input.StateFilter)
 	input.Page = input.Page.Normalize()
 	return f.port.Search(ctx, callCtx, input)
-}
-
-func attachKnowledgeDocumentRefs(documents []DocumentSummary, knowledgeID string) {
-	knowledgeID = strings.TrimSpace(knowledgeID)
-	if knowledgeID == "" {
-		return
-	}
-	for i := range documents {
-		documentID := strings.TrimSpace(documents[i].CoreDocumentID)
-		if documentID == "" {
-			continue
-		}
-		documents[i].KnowledgeDocument = &KnowledgeDocumentRef{
-			KnowledgeID: knowledgeID,
-			DocumentID:  documentID,
-		}
-	}
 }
 
 func trimStrings(values []string) []string {

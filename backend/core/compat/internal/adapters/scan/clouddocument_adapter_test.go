@@ -3,8 +3,10 @@ package scan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,6 +21,8 @@ func TestCloudDocumentAdapterListSourcesRequestAndMapping(t *testing.T) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
 		gotUserID = r.Header.Get("X-User-ID")
+		// Shape transcribed from Scan list source response DTO. Summary is raw
+		// backend data; Compat only whitelists document count from it.
 		writeTestJSON(t, w, map[string]any{
 			"items": []map[string]any{{
 				"source_id":              "source-1",
@@ -27,8 +31,8 @@ func TestCloudDocumentAdapterListSourcesRequestAndMapping(t *testing.T) {
 				"status":                 "ACTIVE",
 				"config_version":         3,
 				"binding_count":          2,
-				"source_options":         map[string]any{"token": "secret"},
-				"summary":                map[string]any{"total_document_count": 7},
+				"source_options":         map[string]any{"token": "source-secret"},
+				"summary":                map[string]any{"total_document_count": 7, "document_objects": 99, "last_error": "/home/internal/secret", "bindings": []any{map[string]any{"auth_connection_id": "conn-secret"}}},
 				"auth_connection_status": map[string]any{"status": "ACTIVE", "connection_ids": []string{"conn-secret"}},
 			}},
 			"total": 41,
@@ -55,16 +59,18 @@ func TestCloudDocumentAdapterListSourcesRequestAndMapping(t *testing.T) {
 			t.Fatalf("query = %q, want contains %s", gotQuery, want)
 		}
 	}
-	if len(result.Sources) != 1 || result.Sources[0].ID != "source-1" || result.Sources[0].ConfigVersion != 3 || result.Sources[0].DocumentCount == nil || *result.Sources[0].DocumentCount != 7 {
-		t.Fatalf("result = %#v, want mapped source", result)
+	source := result.Sources[0]
+	if len(result.Sources) != 1 || source.ID != "source-1" || source.DatasetID != "dataset-1" || source.DocumentCount == nil || *source.DocumentCount != 7 {
+		t.Fatalf("result = %#v, want mapped source with whitelisted document count", result)
 	}
-	if result.Sources[0].AuthConnectionStatus != "ACTIVE" {
-		t.Fatalf("auth status = %q, want ACTIVE", result.Sources[0].AuthConnectionStatus)
+	if source.AuthConnectionStatus != "ACTIVE" {
+		t.Fatalf("auth status = %q, want ACTIVE", source.AuthConnectionStatus)
 	}
 	if result.Page.NextPageToken != "" {
 		t.Fatalf("next token = %q, want empty on final page", result.Page.NextPageToken)
 	}
 	assertNoSensitiveOutput(t, result)
+	assertNoFields(t, reflect.TypeOf(source), "Summary", "ConfigVersion")
 }
 
 func TestCloudDocumentAdapterGetSourceRequestAndMapping(t *testing.T) {
@@ -81,14 +87,14 @@ func TestCloudDocumentAdapterGetSourceRequestAndMapping(t *testing.T) {
 				"dataset_id":     "dataset-1",
 				"status":         "ACTIVE",
 				"config_version": 9,
-				"source_options": map[string]any{"app_secret": "secret"},
+				"source_options": map[string]any{"app_secret": "source-secret"},
 			},
 			"bindings": []map[string]any{{
 				"binding_id":         "binding-1",
 				"auth_connection_id": "conn-secret",
-				"provider_options":   map[string]any{"refresh_token": "secret"},
+				"provider_options":   map[string]any{"refresh_token": "source-secret"},
 			}},
-			"summary": map[string]any{"document_objects": 5},
+			"summary": map[string]any{"document_objects": 5, "last_error": "/home/internal/secret"},
 		})
 	}))
 	defer server.Close()
@@ -105,10 +111,11 @@ func TestCloudDocumentAdapterGetSourceRequestAndMapping(t *testing.T) {
 			t.Fatalf("query = %q, want contains %s", gotQuery, want)
 		}
 	}
-	if gotUserID != "user-1" || result.ID != "source-1" || result.ConfigVersion != 9 || result.DocumentCount == nil || *result.DocumentCount != 5 {
+	if gotUserID != "user-1" || result.ID != "source-1" || result.DocumentCount == nil || *result.DocumentCount != 5 {
 		t.Fatalf("user=%q result=%#v, want mapped source", gotUserID, result)
 	}
 	assertNoSensitiveOutput(t, result)
+	assertNoFields(t, reflect.TypeOf(result), "Summary", "ConfigVersion")
 }
 
 func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
@@ -117,6 +124,8 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
 		gotUserID = r.Header.Get("X-User-ID")
+		// Shape transcribed from Scan SourceDocumentItem. Compat deliberately
+		// ignores path, directory, binding, version, and state-machine fields.
 		writeTestJSON(t, w, map[string]any{
 			"items": []map[string]any{{
 				"document_id":            "doc-1",
@@ -152,7 +161,7 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := mustAdapter(t, server.URL)
-	result, err := adapter.ListDocuments(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.GetInput{
+	result, err := adapter.ListDocuments(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.SourceDetail{ID: "source-1", DatasetID: "dataset-1"}, clouddocument.GetInput{
 		SourceID:      "source-1",
 		DocumentsPage: contract.PageRequest{PageSize: 20, PageToken: contract.EncodeOffsetPageToken(20)},
 	})
@@ -172,20 +181,64 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 			t.Fatalf("query = %q, want no unsupported Get document filter %s", gotQuery, absent)
 		}
 	}
-	if len(result.Documents) != 1 || result.Documents[0].ID != "doc-1" || result.Documents[0].EffectiveParseStatus != "PARSED" {
-		t.Fatalf("documents = %#v, want mapped doc", result.Documents)
-	}
 	doc := result.Documents[0]
-	if doc.SourceID != "source-1" || doc.BindingID != "binding-1" || doc.Name != "Spec.md" || doc.SizeBytes != 1024 || doc.SourceVersion != "source-v2" || doc.BaselineVersion != "source-v1" {
-		t.Fatalf("document identity/version fields = %#v, want mapped scan fields", doc)
+	if len(result.Documents) != 1 || doc.ID != "doc-1" || doc.SourceID != "source-1" || doc.Name != "Spec.md" || doc.SizeBytes == nil || *doc.SizeBytes != 1024 {
+		t.Fatalf("documents = %#v, want mapped stable document fields", result.Documents)
 	}
-	if doc.SyncState != "READY" || doc.PendingAction != "UPSERT" || doc.ParseQueueState != "PENDING" || !doc.HasUpdate || doc.UpdateType != "new" || doc.SourceModifiedAt == nil || doc.LastSyncedAt == nil {
-		t.Fatalf("document state fields = %#v, want mapped state fields", doc)
+	if doc.SourceModifiedAt == nil || doc.LastSyncedAt == nil {
+		t.Fatalf("document timestamps = %#v, want mapped optional times", doc)
+	}
+	if doc.KnowledgeDocument == nil || doc.KnowledgeDocument.KnowledgeID != "dataset-1" || doc.KnowledgeDocument.DocumentID != "core-doc-1" {
+		t.Fatalf("KnowledgeDocument = %#v, want dataset/core doc ref", doc.KnowledgeDocument)
 	}
 	if result.Page.NextPageToken == "" {
 		t.Fatalf("next token is empty, want next page")
 	}
 	assertNoSensitiveOutput(t, result)
+	assertNoFields(t, reflect.TypeOf(doc), "BindingID", "SourceVersion", "BaselineVersion", "CoreDocumentID", "ParseStatus", "ParseState", "EffectiveParseStatus", "SourceState", "SyncState", "PendingAction", "ParseQueueState", "HasUpdate", "UpdateType")
+}
+
+func TestCloudDocumentAdapterListDocumentsAllowsNullAndMissingOptionalFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestJSON(t, w, map[string]any{
+			"items": []map[string]any{
+				{
+					"document_id":      "doc-missing",
+					"source_id":        "source-1",
+					"object_key":       "obj-missing",
+					"display_name":     "Missing",
+					"core_document_id": "core-doc-missing",
+					"parse_status":     "SUCCEEDED",
+				},
+				{
+					"document_id":        "doc-null",
+					"source_id":          "source-1",
+					"object_key":         "obj-null",
+					"display_name":       "Null",
+					"size_bytes":         nil,
+					"source_modified_at": nil,
+					"last_synced_at":     nil,
+					"core_document_id":   "core-doc-null",
+					"parse_status":       "SUCCEEDED",
+				},
+			},
+			"total": 2,
+		})
+	}))
+	defer server.Close()
+	adapter := mustAdapter(t, server.URL)
+	result, err := adapter.ListDocuments(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.SourceDetail{ID: "source-1", DatasetID: "dataset-1"}, clouddocument.GetInput{SourceID: "source-1"})
+	if err != nil {
+		t.Fatalf("ListDocuments returned error: %v", err)
+	}
+	if len(result.Documents) != 2 {
+		t.Fatalf("documents = %#v, want two docs", result.Documents)
+	}
+	for _, doc := range result.Documents {
+		if doc.SizeBytes != nil || doc.SourceModifiedAt != nil || doc.LastSyncedAt != nil {
+			t.Fatalf("doc = %#v, want nil optional numeric/timestamps for missing/null values", doc)
+		}
+	}
 }
 
 func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
@@ -198,17 +251,21 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode search body: %v", err)
 		}
+		// Shape transcribed from Scan TreeNode. There is no object_type field.
 		writeTestJSON(t, w, map[string]any{
 			"items": []map[string]any{{
 				"key":               "binding-1:obj-1",
+				"node_ref":          "node-1",
 				"display_name":      "Spec",
 				"search_name":       "spec",
+				"connector_type":    "feishu",
+				"target_type":       "file",
+				"target_ref":        "target-1",
 				"source_id":         "source-1",
 				"binding_id":        "binding-1",
 				"tree_key":          "tree-1",
 				"object_key":        "obj-1",
 				"parent_key":        "parent-1",
-				"object_type":       "docx",
 				"is_document":       true,
 				"is_container":      false,
 				"has_children":      true,
@@ -223,7 +280,7 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 				"text":              "body text should not map",
 				"score":             0.99,
 				"provider_meta": map[string]any{
-					"token": "secret",
+					"token": "tree-secret",
 				},
 			}},
 			"next_cursor": "obj-2",
@@ -256,37 +313,48 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 	if !gotBody.IncludeDocuments || !gotBody.IncludeContainers {
 		t.Fatalf("includes = docs:%v containers:%v, want both", gotBody.IncludeDocuments, gotBody.IncludeContainers)
 	}
-	if len(result.Hits) != 1 || result.Hits[0].ObjectKey != "obj-1" || result.Page.NextPageToken != "obj-2" {
+	hit := result.Hits[0]
+	if len(result.Hits) != 1 || hit.ObjectKey != "obj-1" || result.Page.NextPageToken != "obj-2" {
 		t.Fatalf("result = %#v, want mapped hit/cursor", result)
 	}
-	hit := result.Hits[0]
-	if !hit.HasChildren || !hit.Selectable || hit.SyncState != "READY" || hit.PendingAction != "UPSERT" || hit.ParseQueueState != "PENDING" || !hit.HasUpdate || hit.UpdateType != "modified" {
-		t.Fatalf("hit state fields = %#v, want mapped scan tree state", hit)
+	if !hit.IsDocument || hit.IsContainer || !hit.HasChildren || !hit.Selectable {
+		t.Fatalf("hit document/container flags = %#v, want mapped scan tree flags", hit)
 	}
+	assertNoFields(t, reflect.TypeOf(hit), "ObjectType", "BindingID", "SourceState", "SyncState", "PendingAction", "ParseQueueState", "HasUpdate", "UpdateType")
 	assertNoSensitiveOutput(t, result)
 	assertNoBodySearchOutput(t, result)
 }
 
-func TestCloudDocumentAdapterMapsHTTPAndJSONErrors(t *testing.T) {
+func TestCloudDocumentAdapterMapsHTTPJSONAndPermissionErrorsSafely(t *testing.T) {
 	tests := []struct {
-		name     string
-		status   int
-		body     string
-		run      func(*CloudDocumentAdapter) error
-		wantCode contract.ErrorCode
+		name        string
+		status      int
+		body        string
+		run         func(*CloudDocumentAdapter) error
+		wantCode    contract.ErrorCode
+		wantMessage string
+		retryable   bool
 	}{
 		{name: "not found", status: http.StatusNotFound, body: `{"code":"SOURCE_NOT_FOUND","message":"source not found"}`, run: func(a *CloudDocumentAdapter) error {
 			_, err := a.GetSource(context.Background(), contract.CallContext{UserID: "user-1"}, "missing")
 			return err
-		}, wantCode: contract.NotFound},
-		{name: "server error", status: http.StatusInternalServerError, body: `{"code":"INTERNAL_ERROR","message":"scan failed"}`, run: func(a *CloudDocumentAdapter) error {
+		}, wantCode: contract.NotFound, wantMessage: "scan resource not found"},
+		{name: "server error", status: http.StatusInternalServerError, body: `{"code":"INTERNAL_ERROR","message":"/home/internal/feishu/token-secret failed"}`, run: func(a *CloudDocumentAdapter) error {
 			_, err := a.ListSources(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.ListInput{})
 			return err
-		}, wantCode: contract.BackendUnavailable},
+		}, wantCode: contract.BackendUnavailable, wantMessage: "scan backend unavailable", retryable: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"code":"UNAUTHORIZED","message":"/home/internal/feishu/token-secret failed"}`, run: func(a *CloudDocumentAdapter) error {
+			_, err := a.ListSources(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.ListInput{})
+			return err
+		}, wantCode: contract.Internal, wantMessage: "scan access denied"},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"code":"FORBIDDEN","message":"/home/internal/feishu/token-secret failed"}`, run: func(a *CloudDocumentAdapter) error {
+			_, err := a.ListSources(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.ListInput{})
+			return err
+		}, wantCode: contract.Internal, wantMessage: "scan access denied"},
 		{name: "invalid json", status: http.StatusOK, body: `{`, run: func(a *CloudDocumentAdapter) error {
 			_, err := a.Search(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.SearchInput{SourceID: "source-1", Query: "doc"})
 			return err
-		}, wantCode: contract.BackendUnavailable},
+		}, wantCode: contract.BackendUnavailable, wantMessage: "scan response is invalid", retryable: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,9 +364,63 @@ func TestCloudDocumentAdapterMapsHTTPAndJSONErrors(t *testing.T) {
 			}))
 			defer server.Close()
 			adapter := mustAdapter(t, server.URL)
-			code, ok := contract.CodeOf(tc.run(adapter))
-			if !ok || code != tc.wantCode {
-				t.Fatalf("code = %s, %v; want %s", code, ok, tc.wantCode)
+			err := tc.run(adapter)
+			var compatErr *contract.Error
+			if !errors.As(err, &compatErr) {
+				t.Fatalf("err = %v, want compat error", err)
+			}
+			if compatErr.Code != tc.wantCode || compatErr.Message != tc.wantMessage || compatErr.Retryable != tc.retryable {
+				t.Fatalf("compat error = %#v, want code=%s message=%q retryable=%v", compatErr, tc.wantCode, tc.wantMessage, tc.retryable)
+			}
+			public := strings.ToLower(err.Error())
+			for _, forbidden := range []string{"/home/", "token-secret"} {
+				if strings.Contains(public, forbidden) {
+					t.Fatalf("public error leaks backend text %q: %s", forbidden, public)
+				}
+			}
+		})
+	}
+}
+
+func TestKnowledgeDocumentRefEligibility(t *testing.T) {
+	size := int64(1)
+	base := scanDocumentItem{
+		DocumentID:           "doc-1",
+		SourceID:             "source-1",
+		ObjectKey:            "obj-1",
+		DisplayName:          "Spec",
+		SizeBytes:            &size,
+		CoreDocumentID:       "core-doc-1",
+		ParseStatus:          "SUCCEEDED",
+		EffectiveParseStatus: "PARSED",
+		SourceState:          "NEW",
+		PendingAction:        "UPSERT",
+	}
+	tests := []struct {
+		name        string
+		knowledgeID string
+		item        scanDocumentItem
+		wantRef     bool
+	}{
+		{name: "complete ids and parsed", knowledgeID: "dataset-1", item: base, wantRef: true},
+		{name: "missing knowledge id", knowledgeID: "", item: base},
+		{name: "missing core document id", knowledgeID: "dataset-1", item: withDoc(base, func(item *scanDocumentItem) { item.CoreDocumentID = "" })},
+		{name: "pending delete", knowledgeID: "dataset-1", item: withDoc(base, func(item *scanDocumentItem) { item.PendingAction = "DELETE" })},
+		{name: "deleted source state", knowledgeID: "dataset-1", item: withDoc(base, func(item *scanDocumentItem) { item.SourceState = "DELETED" })},
+		{name: "out of scope source state", knowledgeID: "dataset-1", item: withDoc(base, func(item *scanDocumentItem) { item.SourceState = "OUT_OF_SCOPE" })},
+		{name: "parse failed", knowledgeID: "dataset-1", item: withDoc(base, func(item *scanDocumentItem) {
+			item.ParseStatus = "FAILED"
+			item.EffectiveParseStatus = "FAILED"
+		})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := mapDocumentSummary(tc.knowledgeID, tc.item)
+			if (doc.KnowledgeDocument != nil) != tc.wantRef {
+				t.Fatalf("KnowledgeDocument = %#v, want ref=%v", doc.KnowledgeDocument, tc.wantRef)
+			}
+			if doc.KnowledgeDocument != nil && doc.KnowledgeDocument.DocumentID != "core-doc-1" {
+				t.Fatalf("DocumentID = %q, want core_document_id", doc.KnowledgeDocument.DocumentID)
 			}
 		})
 	}
@@ -312,6 +434,11 @@ func TestCloudDocumentAdapterInvalidPageToken(t *testing.T) {
 	if code, ok := contract.CodeOf(err); !ok || code != contract.InvalidArgument {
 		t.Fatalf("code = %s, %v; want INVALID_ARGUMENT", code, ok)
 	}
+}
+
+func withDoc(item scanDocumentItem, edit func(*scanDocumentItem)) scanDocumentItem {
+	edit(&item)
+	return item
 }
 
 func mustAdapter(t *testing.T, baseURL string) *CloudDocumentAdapter {
@@ -331,6 +458,15 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, body any) {
 	}
 }
 
+func assertNoFields(t *testing.T, typ reflect.Type, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Fatalf("%s exposes removed/internal field %s", typ.Name(), name)
+		}
+	}
+}
+
 func assertNoSensitiveOutput(t *testing.T, value any) {
 	t.Helper()
 	raw, err := json.Marshal(value)
@@ -338,7 +474,7 @@ func assertNoSensitiveOutput(t *testing.T, value any) {
 		t.Fatalf("marshal output: %v", err)
 	}
 	lower := strings.ToLower(string(raw))
-	for _, forbidden := range []string{"secret", "provider_options", "provider_meta", "authorization", "refresh_token", "auth_connection_id", "lazyllm", "/local/secret"} {
+	for _, forbidden := range []string{"source-secret", "tree-secret", "provider_options", "provider_meta", "authorization", "refresh_token", "auth_connection_id", "lazyllm", "/local/secret", "/home/internal", "directory"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("output contains sensitive marker %q: %s", forbidden, raw)
 		}
