@@ -16,7 +16,11 @@ from evo.artifact_runtime import (
     PartitionSet,
     RecordedOperationEvent,
 )
-from evo.operations.eval.summary import build_eval_detail_summary, build_eval_frontend_view
+from evo.operations.eval.summary import (
+    build_eval_detail_summary,
+    build_eval_frontend_view,
+    is_scored_badcase,
+)
 
 from .contracts import ServiceError
 from .public import public_thread_state, public_value
@@ -202,7 +206,11 @@ class ProjectionService:
     ) -> dict[str, Any]:
         record = await self._gate_record(thread_id, 'eval', version)
         summary = await _eval_detail_summary_from_record(self.flow, thread_id, record)
-        rows = [_bad_case_item(row) for row in _rows(summary.get('bad_cases'))]
+        rows = [
+            _bad_case_item(row)
+            for row in _rows(summary.get('bad_cases'))
+            if is_scored_badcase(row)
+        ]
         rows = _filter(rows, keyword, ('case_id', 'question', 'defect', 'reason', 'failure_type'))
         if failure_type:
             rows = [row for row in rows if row.get('failure_type') == failure_type]

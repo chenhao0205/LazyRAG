@@ -477,10 +477,19 @@ async def enhance_case_operation(
     draft: object,
     run_config: object,
 ) -> OperationResult:
-    enhancement = generate_enhance(ctx, {
-        'case': _mapping(draft, 'draft'),
-        'run_config': _mapping(run_config, 'run_config'),
-    }, llm_complete=_llm_complete(run_config))['case_enhance']
+    draft_map = _mapping(draft, 'draft')
+    existing_points = draft_map.get('key_points')
+    if isinstance(existing_points, list) and existing_points:
+        forbidden = draft_map.get('forbidden_claims')
+        enhancement = {
+            'key_points': [dict(item) if isinstance(item, Mapping) else item for item in existing_points],
+            'forbidden_claims': list(forbidden) if isinstance(forbidden, list) else [],
+        }
+    else:
+        enhancement = generate_enhance(ctx, {
+            'case': draft_map,
+            'run_config': _mapping(run_config, 'run_config'),
+        }, llm_complete=_llm_complete(run_config))['case_enhance']
     return await _result(ctx, 'dataset.case_enhanced', {'enhancement': enhancement}, case_id=ctx.partition_key)
 
 

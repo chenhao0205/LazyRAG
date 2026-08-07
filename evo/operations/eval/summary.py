@@ -381,7 +381,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
         'quality_counts': dict(Counter(row['quality_label'] for row in rows)),
         'failure_type_counts': dict(Counter(row['failure_type'] for row in rows)),
         'retrieval_failure_type_counts': dict(Counter(row['retrieval_failure_type'] for row in rows)),
-        'bad_cases': [row for row in rows if row['quality_label'] != 'good'],
+        'bad_cases': [row for row in rows if is_scored_badcase(row)],
         'routing_failures': routing_failures,
         'execution_failures': execution_failures,
         'checks': {'ready': not routing_failures and not execution_failures,
@@ -390,6 +390,11 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
     }
     summary.update(build_eval_frontend_view(summary))
     return summary
+
+
+def is_scored_badcase(row: Mapping[str, Any]) -> bool:
+    """Return True for scored bad/partial cases; exclude good and infra/contract exceptions."""
+    return _frontend_is_badcase(row)
 
 
 def build_eval_frontend_view(
@@ -963,7 +968,7 @@ def _row_answer_process(answer: Mapping[str, Any], judge: Mapping[str, Any]) -> 
         'retrieve_doc_ids': answer.get('doc_ids') or [],
         'answer_process': stored or {},
     }
-    return build_answer_process_panel(row, load_trace=True, attempts=3, retry_seconds=0.5)
+    return build_answer_process_panel(row, load_trace=True, attempts=1, retry_seconds=0.0)
 
 
 def _frontend_text_items(value: object) -> list[str]:

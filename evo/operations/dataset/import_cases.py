@@ -11,7 +11,7 @@ from .kb_client import KnowledgeBaseClient
 
 
 REQUIRED_COLUMNS = {'question', 'answer', 'question_type', 'difficulty', 'grading_guidance', 'reference_context'}
-OPTIONAL_COLUMNS = {'id'}
+OPTIONAL_COLUMNS = {'id', 'key_points', 'forbidden_claims'}
 REFERENCE_COUNTS = {'easy': 1, 'medium': 2, 'hard': 3}
 
 
@@ -173,7 +173,7 @@ def _case(row: Mapping[str, str], index: Mapping[str, dict[str, str]], questions
             raise ValueError('reference_text_mismatch: csv text differs from knowledge base')
         result.append({'chunk_id': chunk_id, 'text': text, **found})
     questions.add(normalized_question)
-    return {
+    case: dict[str, object] = {
         'id': '',
         'question': question,
         'answer': answer,
@@ -190,6 +190,54 @@ def _case(row: Mapping[str, str], index: Mapping[str, dict[str, str]], questions
             'kb_ids': list(dict.fromkeys(item['kb_id'] for item in result)),
         },
     }
+    if 'key_points' in row:
+        case['key_points'] = _optional_key_points(row.get('key_points'))
+    if 'forbidden_claims' in row:
+        case['forbidden_claims'] = _optional_forbidden_claims(row.get('forbidden_claims'))
+    return case
+
+
+def _optional_key_points(value: object) -> list[dict[str, object]]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError as exc:
+        raise ValueError('invalid_key_points: key_points must be JSON') from exc
+    if not isinstance(parsed, list):
+        raise ValueError('invalid_key_points: key_points must be a JSON list')
+    points = []
+    for index, item in enumerate(parsed, 1):
+        if isinstance(item, Mapping):
+            statement = str(item.get('statement') or item.get('text') or item.get('point') or '').strip()
+            if not statement:
+                continue
+            evidence = item.get('evidence_chunk_ids')
+            points.append({
+                'id': str(item.get('id') or f'kp_{index}').strip() or f'kp_{index}',
+                'statement': statement,
+                'evidence_chunk_ids': (
+                    [str(chunk_id).strip() for chunk_id in evidence if str(chunk_id or '').strip()]
+                    if isinstance(evidence, list | tuple) else []
+                ),
+            })
+            continue
+        statement = str(item or '').strip()
+        if statement:
+            points.append({'id': f'kp_{index}', 'statement': statement, 'evidence_chunk_ids': []})
+    return points
+
+
+def _optional_forbidden_claims(value: object) -> list[str]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError as exc:
+        raise ValueError('invalid_forbidden_claims: forbidden_claims must be JSON') from exc
+    if not isinstance(parsed, list):
+        raise ValueError('invalid_forbidden_claims: forbidden_claims must be a JSON list')
+    return [str(item).strip() for item in parsed if str(item or '').strip()]
 
 
 def _chunk_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> dict[str, dict[str, str]]:
