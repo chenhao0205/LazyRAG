@@ -126,11 +126,13 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 				"display_name":           "Spec",
 				"name":                   "Spec.md",
 				"path":                   "/local/secret/spec.md",
+				"directory":              "/local/secret",
 				"file_type":              "md",
 				"size_bytes":             1024,
 				"source_version":         "source-v2",
 				"baseline_version":       "source-v1",
 				"core_document_id":       "core-doc-1",
+				"lazyllm_doc_id":         "lazyllm-doc-should-not-map",
 				"parse_status":           "SUCCEEDED",
 				"parse_state":            "SUCCEEDED",
 				"effective_parse_status": "PARSED",
@@ -151,12 +153,8 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 	defer server.Close()
 	adapter := mustAdapter(t, server.URL)
 	result, err := adapter.ListDocuments(context.Background(), contract.CallContext{UserID: "user-1"}, clouddocument.GetInput{
-		SourceID:        "source-1",
-		BindingID:       "binding-1",
-		DocumentKeyword: "spec",
-		StateFilter:     []string{"NEW", "MODIFIED"},
-		ParseStatuses:   []string{"SUCCEEDED"},
-		DocumentsPage:   contract.PageRequest{PageSize: 20, PageToken: contract.EncodeOffsetPageToken(20)},
+		SourceID:      "source-1",
+		DocumentsPage: contract.PageRequest{PageSize: 20, PageToken: contract.EncodeOffsetPageToken(20)},
 	})
 	if err != nil {
 		t.Fatalf("ListDocuments returned error: %v", err)
@@ -164,9 +162,14 @@ func TestCloudDocumentAdapterListDocumentsRequestAndMapping(t *testing.T) {
 	if gotPath != "/api/scan/sources/source-1/documents" || gotUserID != "user-1" {
 		t.Fatalf("path=%q user=%q, want documents path/user", gotPath, gotUserID)
 	}
-	for _, want := range []string{"binding_id=binding-1", "keyword=spec", "page=2", "page_size=20", "refresh_state=false", "state_filter=NEW", "state_filter=MODIFIED", "parse_status=SUCCEEDED"} {
+	for _, want := range []string{"page=2", "page_size=20", "refresh_state=false"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("query = %q, want contains %s", gotQuery, want)
+		}
+	}
+	for _, absent := range []string{"binding_id=", "keyword=", "state_filter=", "parse_status="} {
+		if strings.Contains(gotQuery, absent) {
+			t.Fatalf("query = %q, want no unsupported Get document filter %s", gotQuery, absent)
 		}
 	}
 	if len(result.Documents) != 1 || result.Documents[0].ID != "doc-1" || result.Documents[0].EffectiveParseStatus != "PARSED" {
@@ -216,6 +219,9 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 				"parse_queue_state": "PENDING",
 				"has_update":        true,
 				"update_type":       "modified",
+				"snippet":           "body text should not map",
+				"text":              "body text should not map",
+				"score":             0.99,
 				"provider_meta": map[string]any{
 					"token": "secret",
 				},
@@ -258,6 +264,7 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 		t.Fatalf("hit state fields = %#v, want mapped scan tree state", hit)
 	}
 	assertNoSensitiveOutput(t, result)
+	assertNoBodySearchOutput(t, result)
 }
 
 func TestCloudDocumentAdapterMapsHTTPAndJSONErrors(t *testing.T) {
@@ -331,9 +338,23 @@ func assertNoSensitiveOutput(t *testing.T, value any) {
 		t.Fatalf("marshal output: %v", err)
 	}
 	lower := strings.ToLower(string(raw))
-	for _, forbidden := range []string{"secret", "provider_options", "authorization", "refresh_token", "auth_connection_id", "/local/secret"} {
+	for _, forbidden := range []string{"secret", "provider_options", "provider_meta", "authorization", "refresh_token", "auth_connection_id", "lazyllm", "/local/secret"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("output contains sensitive marker %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func assertNoBodySearchOutput(t *testing.T, value any) {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"snippet", "body text", "semantic", "score"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("output contains unsupported search marker %q: %s", forbidden, raw)
 		}
 	}
 }

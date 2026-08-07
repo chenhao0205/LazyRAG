@@ -31,14 +31,13 @@ type ListResult struct {
 	Page    contract.PageResult
 }
 
+// GetInput identifies a Cloud Source. When IncludeDocuments is true, Get
+// returns one page of document metadata for that source; it never reads
+// document body content.
 type GetInput struct {
 	SourceID         string
 	IncludeDocuments bool
 	DocumentsPage    contract.PageRequest
-	BindingID        string
-	DocumentKeyword  string
-	StateFilter      []string
-	ParseStatuses    []string
 }
 
 type SourceDetail struct {
@@ -51,6 +50,13 @@ type SourceDetail struct {
 	DocumentCount *int64
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+// KnowledgeDocumentRef is the complete reference needed by Knowledge Document
+// APIs to read document details or content later.
+type KnowledgeDocumentRef struct {
+	KnowledgeID string
+	DocumentID  string
 }
 
 type DocumentSummary struct {
@@ -76,6 +82,7 @@ type DocumentSummary struct {
 	UpdateType           string
 	SourceModifiedAt     *time.Time
 	LastSyncedAt         *time.Time
+	KnowledgeDocument    *KnowledgeDocumentRef
 }
 
 type DocumentListResult struct {
@@ -86,9 +93,11 @@ type DocumentListResult struct {
 type GetResult struct {
 	Source        SourceDetail
 	Documents     []DocumentSummary
-	DocumentsPage contract.PageResult
+	DocumentsPage *contract.PageResult
 }
 
+// SearchInput searches metadata indexed by Scan for a Cloud Source. It covers
+// document titles, display_name/search_name, and tree node names only.
 type SearchInput struct {
 	SourceID          string
 	Query             string
@@ -100,8 +109,9 @@ type SearchInput struct {
 	IncludeContainers bool
 }
 
-// SearchResult contains metadata/name/tree-object matches only. It does not
-// represent content full-text search, semantic search, RAG retrieval, or QA.
+// SearchResult contains title/name/tree-object matches only. It does not
+// represent document body full-text search, semantic vector retrieval, RAG
+// chunk retrieval, or model QA.
 type SearchResult struct {
 	Hits []SearchHit
 	Page contract.PageResult

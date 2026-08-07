@@ -112,18 +112,6 @@ func (a *CloudDocumentAdapter) ListDocuments(ctx context.Context, callCtx contra
 	query.Set("page", strconv.Itoa(offset/page.PageSize+1))
 	query.Set("page_size", strconv.Itoa(page.PageSize))
 	query.Set("refresh_state", "false")
-	if input.BindingID != "" {
-		query.Set("binding_id", input.BindingID)
-	}
-	if input.DocumentKeyword != "" {
-		query.Set("keyword", input.DocumentKeyword)
-	}
-	for _, value := range input.StateFilter {
-		query.Add("state_filter", value)
-	}
-	for _, value := range input.ParseStatuses {
-		query.Add("parse_status", value)
-	}
 	endpoint.RawQuery = query.Encode()
 
 	var resp scanListDocumentsResponse

@@ -3,6 +3,7 @@ package clouddocument
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"lazymind/core/compat/contract"
@@ -17,6 +18,8 @@ type fakePort struct {
 	getErr    error
 	docErr    error
 	searchErr error
+	source    SourceDetail
+	documents []DocumentSummary
 }
 
 type listCall struct {
@@ -48,6 +51,9 @@ func (p *fakePort) GetSource(ctx context.Context, callCtx contract.CallContext, 
 	if p.getErr != nil {
 		return SourceDetail{}, p.getErr
 	}
+	if p.source.ID != "" || p.source.DatasetID != "" {
+		return p.source, nil
+	}
 	return SourceDetail{ID: sourceID, Name: "Docs"}, nil
 }
 
@@ -56,9 +62,13 @@ func (p *fakePort) ListDocuments(ctx context.Context, callCtx contract.CallConte
 	if p.docErr != nil {
 		return DocumentListResult{}, p.docErr
 	}
+	documents := p.documents
+	if documents == nil {
+		documents = []DocumentSummary{{ID: "doc-1", ObjectKey: "obj-1"}}
+	}
 	total := int64(1)
 	return DocumentListResult{
-		Documents: []DocumentSummary{{ID: "doc-1", ObjectKey: "obj-1"}},
+		Documents: documents,
 		Page:      contract.PageResult{Total: &total},
 	}, nil
 }
@@ -102,17 +112,20 @@ func TestFacadeGetWithoutDocuments(t *testing.T) {
 	if result.Source.ID != "source-1" || len(result.Documents) != 0 || len(port.docCalls) != 0 {
 		t.Fatalf("result=%#v docCalls=%d, want source only", result, len(port.docCalls))
 	}
+	if result.DocumentsPage != nil {
+		t.Fatalf("DocumentsPage = %#v, want nil when IncludeDocuments=false", result.DocumentsPage)
+	}
 }
 
 func TestFacadeGetWithDocuments(t *testing.T) {
-	port := &fakePort{}
+	port := &fakePort{
+		source:    SourceDetail{ID: "source-1", Name: "Docs", DatasetID: "dataset-1"},
+		documents: []DocumentSummary{{ID: "doc-1", ObjectKey: "obj-1", CoreDocumentID: "core-doc-1"}},
+	}
 	facade := mustFacade(t, port)
 	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{
 		SourceID:         "source-1",
 		IncludeDocuments: true,
-		DocumentKeyword:  " spec ",
-		StateFilter:      []string{" NEW ", ""},
-		ParseStatuses:    []string{" SUCCEEDED "},
 	})
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
@@ -120,11 +133,15 @@ func TestFacadeGetWithDocuments(t *testing.T) {
 	if len(result.Documents) != 1 || result.Documents[0].ID != "doc-1" {
 		t.Fatalf("documents = %#v, want doc-1", result.Documents)
 	}
-	if len(port.docCalls) != 1 || port.docCalls[0].DocumentKeyword != "spec" {
-		t.Fatalf("doc calls = %#v, want trimmed input", port.docCalls)
+	if result.DocumentsPage == nil {
+		t.Fatalf("DocumentsPage is nil, want page when IncludeDocuments=true")
 	}
-	if got := port.docCalls[0].StateFilter; len(got) != 1 || got[0] != "NEW" {
-		t.Fatalf("state filter = %#v, want NEW", got)
+	if len(port.docCalls) != 1 || port.docCalls[0].SourceID != "source-1" {
+		t.Fatalf("doc calls = %#v, want one source-scoped document page call", port.docCalls)
+	}
+	ref := result.Documents[0].KnowledgeDocument
+	if ref == nil || ref.KnowledgeID != "dataset-1" || ref.DocumentID != "core-doc-1" {
+		t.Fatalf("KnowledgeDocument = %#v, want dataset/core doc ref", ref)
 	}
 }
 
@@ -210,6 +227,60 @@ func TestFacadePassesPortErrorsThrough(t *testing.T) {
 	facade = mustFacade(t, &fakePort{searchErr: unavailable})
 	if _, err := facade.Search(context.Background(), contract.CallContext{UserID: "user-1"}, SearchInput{SourceID: "source-1", Query: "doc"}); !errors.Is(err, unavailable) {
 		t.Fatalf("Search err = %v, want passthrough unavailable", err)
+	}
+}
+
+func TestFacadeKnowledgeDocumentRefRequiresKnowledgeID(t *testing.T) {
+	port := &fakePort{
+		source:    SourceDetail{ID: "source-1"},
+		documents: []DocumentSummary{{ID: "doc-1", CoreDocumentID: "core-doc-1"}},
+	}
+	facade := mustFacade(t, port)
+	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{SourceID: "source-1", IncludeDocuments: true})
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if result.Documents[0].KnowledgeDocument != nil {
+		t.Fatalf("KnowledgeDocument = %#v, want nil without source DatasetID", result.Documents[0].KnowledgeDocument)
+	}
+}
+
+func TestFacadeKnowledgeDocumentRefRequiresDocumentID(t *testing.T) {
+	port := &fakePort{
+		source:    SourceDetail{ID: "source-1", DatasetID: "dataset-1"},
+		documents: []DocumentSummary{{ID: "doc-1", CoreDocumentID: ""}},
+	}
+	facade := mustFacade(t, port)
+	result, err := facade.Get(context.Background(), contract.CallContext{UserID: "user-1"}, GetInput{SourceID: "source-1", IncludeDocuments: true})
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if result.Documents[0].KnowledgeDocument != nil {
+		t.Fatalf("KnowledgeDocument = %#v, want nil without CoreDocumentID", result.Documents[0].KnowledgeDocument)
+	}
+}
+
+func TestCloudDocumentContractDoesNotExposeBodySearchFields(t *testing.T) {
+	for _, typ := range []reflect.Type{
+		reflect.TypeOf(GetInput{}),
+		reflect.TypeOf(GetResult{}),
+		reflect.TypeOf(DocumentSummary{}),
+		reflect.TypeOf(SearchInput{}),
+		reflect.TypeOf(SearchResult{}),
+		reflect.TypeOf(SearchHit{}),
+	} {
+		for _, forbidden := range []string{"IncludeContent", "IncludeBody", "Content", "Body", "Text", "Snippet", "Score", "SemanticScore", "Path", "Directory", "FileSystemPath", "LazyLLMDocID"} {
+			if _, ok := typ.FieldByName(forbidden); ok {
+				t.Fatalf("%s exposes forbidden field %s", typ.Name(), forbidden)
+			}
+		}
+	}
+}
+
+func TestSearchHitDoesNotExposeKnowledgeDocumentRef(t *testing.T) {
+	typ := reflect.TypeOf(SearchHit{})
+	if _, ok := typ.FieldByName("KnowledgeDocument"); ok {
+		t.Fatalf("SearchHit exposes KnowledgeDocument; tree search lacks dataset/core document ids")
 	}
 }
 
