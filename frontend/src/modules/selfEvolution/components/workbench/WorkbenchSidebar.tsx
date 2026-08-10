@@ -51,6 +51,15 @@ export function WorkbenchSidebar({
   const userMessageAnchors = displayedMessages
     .map((item, index) => ({ ...item, index }))
     .filter((item) => item.role === "user");
+  const activeNavigationTab = activeWorkbenchTab === "messages" || activeWorkbenchTab === "processes"
+    ? activeWorkbenchTab
+    : undefined;
+  const activeNavigationTitle = activeNavigationTab === "messages"
+    ? t("selfEvolutionRun.navInteractionTitle")
+    : t("selfEvolutionRun.navStageOverviewTitle");
+  const activeNavigationDesc = activeNavigationTab === "messages"
+    ? t("selfEvolutionRun.navInteractionDesc")
+    : activeStageLabel;
   const getMessageNavTitle = (content: string) => content.replace(/\s+/g, " ").trim() || t("selfEvolutionRun.emptyMessage");
 
   const renderStageNavigationPanel = () => (
@@ -58,8 +67,8 @@ export function WorkbenchSidebar({
       {artifactNavigationPanel}
     </div>
   );
-  const renderSidebarSection = (key: SelfEvolutionWorkbenchTab, title: string, desc: string, body: ReactNode) => {
-    const isExpanded = activeWorkbenchTab === key;
+  const renderSidebarToggle = (key: SelfEvolutionWorkbenchTab, title: string, desc: string) => {
+    const isExpanded = activeNavigationTab === key;
     return (
       <section className={`self-evolution-workbench-accordion-section${isExpanded ? " is-active" : ""}`}>
         <button
@@ -75,11 +84,6 @@ export function WorkbenchSidebar({
             <small>{desc}</small>
           </span>
         </button>
-        {isExpanded && (
-          <div id={`self-evolution-workbench-sidebar-${key}`} className="self-evolution-workbench-accordion-body">
-            {body}
-          </div>
-        )}
       </section>
     );
   };
@@ -108,7 +112,7 @@ export function WorkbenchSidebar({
 
   return (
     <aside
-      className="self-evolution-workbench-nav"
+      className={`self-evolution-workbench-nav${activeNavigationTab ? " has-open-panel" : ""}`}
       aria-label={t("selfEvolutionRun.workbenchNavAria")}
       onClick={isArtifactPanelOpen ? onCloseArtifactPanel : undefined}
     >
@@ -130,8 +134,34 @@ export function WorkbenchSidebar({
         )}
       </div>
       <div className="self-evolution-workbench-accordion">
-        {renderSidebarSection("messages", t("selfEvolutionRun.navInteractionTitle"), t("selfEvolutionRun.navInteractionDesc"), renderMessagesNavigationPanel())}
-        {renderSidebarSection("processes", t("selfEvolutionRun.navStageOverviewTitle"), activeStageLabel, renderStageNavigationPanel())}
+        <div className="self-evolution-workbench-accordion-toggles">
+          {renderSidebarToggle("messages", t("selfEvolutionRun.navInteractionTitle"), t("selfEvolutionRun.navInteractionDesc"))}
+          {renderSidebarToggle("processes", t("selfEvolutionRun.navStageOverviewTitle"), activeStageLabel)}
+        </div>
+        {activeNavigationTab && (
+          <section
+            id={`self-evolution-workbench-sidebar-${activeNavigationTab}`}
+            className={`self-evolution-workbench-navigation-panel is-${activeNavigationTab}`}
+          >
+            <header className="self-evolution-workbench-navigation-panel-head">
+              <div>
+                <strong>{activeNavigationTitle}</strong>
+                <span>{activeNavigationDesc}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => onWorkbenchTabChange(undefined)}
+                title={t("selfEvolutionRun.collapse")}
+                aria-label={t("selfEvolutionRun.collapse")}
+              >
+                <CloseOutlined />
+              </button>
+            </header>
+            <div className="self-evolution-workbench-navigation-panel-content">
+              {activeNavigationTab === "messages" ? renderMessagesNavigationPanel() : renderStageNavigationPanel()}
+            </div>
+          </section>
+        )}
       </div>
       <div className="self-evolution-workbench-sidebar-actions">
         {chatSessionsCount > 1 && (

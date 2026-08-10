@@ -103,7 +103,6 @@ export function SelfEvolutionWorkbenchView({
   const { t } = useTranslation();
   const [isEndedChatOpen, setIsEndedChatOpen] = useState(false);
   const [isInteractionChatOpen, setIsInteractionChatOpen] = useState(false);
-
   const activeStageTitles: Record<string, string> = {
     dataset: t("selfEvolutionRun.stageTitle.dataset"),
     eval: t("selfEvolutionRun.stageTitle.eval"),

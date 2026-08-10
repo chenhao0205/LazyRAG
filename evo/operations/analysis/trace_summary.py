@@ -12,7 +12,6 @@ from evo.operations.public_contracts import clean_text as _text, number_or_defau
 
 TRACE_READ_ATTEMPTS = 3
 TRACE_RETRY_SECONDS = 3.0
-
 STAGE_RULES = (
     ('query_rewrite', ('rewrite', 'rephrase', 'query_transform', '改写')),
     ('retrieve', ('retriever', 'retrieve', 'retriev', 'search', 'kb', 'knowledge', 'vector', 'bm25', '检索')),
@@ -24,51 +23,73 @@ STAGE_RULES = (
     ('postprocess', ('post', 'parse', 'format', 'normalize', 'clean', 'serialization', '后处理')),
     ('stream', ('stream', 'sse', 'chunk', '流式')),
 )
+DIAGNOSTIC_STAGES = {stage for stage, _ in STAGE_RULES}
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r'(?i)(authorization|api[_-]?key|access[_-]?token|password|secret)'
+    r'(\s*[=:]\s*|\s+)([^\s,;]+)'
+)
 DOC_KEYS = {
-    'candidate_doc_ids', 'doc_id', 'doc_ids', 'doc_ref', 'doc_refs', 'docid',
-    'document_id', 'document_ids', 'file_id', 'file_ids', 'ranked_doc_ids',
-    'source_id', 'source_ids',
+    'candidate_doc_ids',
+    'doc_id',
+    'doc_ids',
+    'doc_ref',
+    'doc_refs',
+    'docid',
+    'document_id',
+    'document_ids',
+    'file_id',
+    'file_ids',
+    'ranked_doc_ids',
+    'source_id',
+    'source_ids',
 }
 CHUNK_KEYS = {
-    'chunk_id', 'chunk_ids', 'node_id', 'node_ids', 'returned_node_ids',
-    'segment_id', 'segment_ids', 'segement_id', 'source_unit_ref',
-    'source_unit_refs', 'uid', 'uids',
+    'chunk_id',
+    'chunk_ids',
+    'node_id',
+    'node_ids',
+    'returned_node_ids',
+    'segment_id',
+    'segment_ids',
+    'segement_id',
+    'source_unit_ref',
+    'source_unit_refs',
+    'uid',
+    'uids',
 }
 ID_KEYS = DOC_KEYS | CHUNK_KEYS
-DIAGNOSTIC_STAGES = {stage for stage, _ in STAGE_RULES}
 
 
-def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
+def build_trace_summary(
+    case: Mapping[str, Any],
+    answer: Mapping[str, Any],
+    *,
+    attempts: int | None = None,
+    retry_seconds: float | None = None,
+) -> dict[str, Any]:
     case_id = _text(case.get('id') or answer.get('case_id'))
     trace_id = _text(answer.get('trace_id'))
     if not trace_id:
-        return _trace_unavailable(case_id, trace_id, 'eval.rag_answer trace_id missing')
-    from lazyllm.tracing.consume import get_single_trace
-
-    last_error: Exception | None = None
-    for attempt in range(TRACE_READ_ATTEMPTS):
-        try:
-            trace = get_single_trace(trace_id)
-            break
-        except Exception as exc:
-            last_error = exc
-            if attempt + 1 < TRACE_READ_ATTEMPTS:
-                time.sleep(TRACE_RETRY_SECONDS)
-    else:
-        return _trace_unavailable(
-            case_id,
+        if answer.get('status') == 'failed' or answer.get('chat_error'):
+            return _failed_answer_trace_summary(case_id, answer)
+        raise ValueError(f'analysis trace_id is required for case {case_id}')
+    try:
+        trace = read_lazyllm_trace(
             trace_id,
-            f'lazyllm.get_single_trace failed after {TRACE_READ_ATTEMPTS} attempts: {last_error}',
+            attempts=attempts,
+            retry_seconds=retry_seconds,
         )
+    except Exception as exc:
+        return _unavailable_trace_summary(case_id, trace_id, exc)
     root = getattr(trace, 'execution_tree', None)
     if root is None:
-        return _trace_unavailable(case_id, trace_id, 'lazyllm trace has no execution_tree')
+        raise ValueError(f'trace {trace_id} has no execution_tree')
     graph = nx.DiGraph()
     nodes: list[dict[str, Any]] = []
     edges: list[tuple[str, str]] = []
     _walk(root, '', graph, nodes, edges)
     if not nodes:
-        return _trace_unavailable(case_id, trace_id, 'lazyllm trace produced no nodes')
+        raise ValueError(f'trace {trace_id} produced no nodes')
     _set_exclusive_latency(graph, nodes)
     diagnostic = [node for node in nodes if node['stage'] in DIAGNOSTIC_STAGES]
     stage_sequence = [node['stage'] for node in nodes]
@@ -80,7 +101,7 @@ def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> d
         node for node in nodes
         if node['error'] or node['status'] not in ok_status
     ]
-    unknown_error_count = sum(1 for node in error_nodes if node['stage'] == 'unknown')
+    unknown_stage_count = sum(1 for node in nodes if node['stage'] == 'unknown')
     retrieval = _retrieval_artifacts(nodes)
     final_doc_ids, final_chunk_ids = _final_context_ids(nodes)
     features = _features(graph, nodes, diagnostic, stage_counts, latency_by_stage, error_nodes, retrieval)
@@ -93,7 +114,7 @@ def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> d
         'execution_tree': _step_payload(root),
         'stage_sequence': stage_sequence,
         'diagnostic_stage_sequence': diagnostic_sequence,
-        'unknown_stage_count': unknown_error_count,
+        'unknown_stage_count': unknown_stage_count,
         'edges': [{'source': source, 'target': target} for source, target in edges],
         'critical_path': _critical_path(graph, nodes[0]['id']),
         'bottleneck_stage': max(latency_by_stage, key=latency_by_stage.get) if latency_by_stage else '',
@@ -112,32 +133,60 @@ def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> d
     }
 
 
-def _trace_unavailable(case_id: str, trace_id: str, reason: str) -> dict[str, Any]:
-    error = {
-        'id': 'trace',
-        'stage': 'trace',
-        'name': 'lazyllm.get_single_trace',
-        'status': 'unavailable',
-        'error': _preview(reason),
+def _failed_answer_trace_summary(case_id: str, answer: Mapping[str, Any]) -> dict[str, Any]:
+    error = answer.get('chat_error') if isinstance(answer.get('chat_error'), Mapping) else {}
+    error_type = _text(error.get('type') or error.get('code') or 'rag_answer_failed')
+    error_message = _text(error.get('message') or error_type)
+    trace_id = _text(answer.get('trace_id')) or f'missing_trace:{case_id}'
+    stage = 'tool_call' if error_type in {'chat_config_error', 'router_error'} else 'unknown'
+    node = {
+        'id': f'{trace_id}:failed_answer',
+        'span_id': f'{trace_id}:failed_answer',
+        'parent_id': '',
+        'name': error_type[:160],
+        'stage': stage,
+        'node_type': 'synthetic_failed_answer',
+        'semantic_type': 'analysis_synthetic',
+        'status': 'failed',
+        'start_time': 0.0,
+        'end_time': 0.0,
+        'latency_ms': 0.0,
+        'exclusive_latency_ms': 0.0,
+        'depth': 0,
+        'error': error_message[:300],
+        'semantic_metrics': {},
+        'raw_data': {'input': '', 'output': ''},
     }
     return {
         'case_id': case_id,
         'trace_id': trace_id,
-        'trace_source': 'lazyllm.get_single_trace',
-        'trace_status': 'unavailable',
-        'route_signature': 'trace_unavailable',
-        'tree_text': '',
-        'execution_tree': {},
-        'stage_sequence': [],
-        'diagnostic_stage_sequence': [],
-        'unknown_stage_count': 0,
+        'trace_source': 'analysis.synthetic_failed_answer',
+        'route_signature': stage,
+        'tree_text': '{' + stage + '}',
+        'execution_tree': {
+            **{key: node[key] for key in (
+                'id', 'span_id', 'name', 'stage', 'node_type', 'semantic_type',
+                'status', 'start_time', 'end_time', 'latency_ms', 'raw_data',
+            )},
+            'semantic_data_keys': [],
+            'children': [],
+        },
+        'stage_sequence': [stage],
+        'diagnostic_stage_sequence': [stage] if stage in DIAGNOSTIC_STAGES else [],
+        'unknown_stage_count': 1 if stage == 'unknown' else 0,
         'edges': [],
-        'critical_path': [],
-        'bottleneck_stage': '',
-        'stages': [],
-        'stage_counts': {},
-        'latency_by_stage': {},
-        'error_stages': [error],
+        'critical_path': [stage],
+        'bottleneck_stage': stage,
+        'stages': [node],
+        'stage_counts': {stage: 1},
+        'latency_by_stage': {stage: 0.0} if stage in DIAGNOSTIC_STAGES else {},
+        'error_stages': [{
+            'id': node['id'],
+            'stage': node['stage'],
+            'name': node['name'],
+            'status': node['status'],
+            'error': node['error'],
+        }],
         'retrieval_steps': [],
         'retrieved_doc_ids': [],
         'retrieved_chunk_ids': [],
@@ -145,7 +194,7 @@ def _trace_unavailable(case_id: str, trace_id: str, reason: str) -> dict[str, An
         'final_context_chunk_ids': [],
         'semantic_metric_keys': [],
         'features': {
-            'node_count': 0.0,
+            'node_count': 1.0 if stage in DIAGNOSTIC_STAGES else 0.0,
             'edge_count': 0.0,
             'max_depth': 0.0,
             'branching_factor_avg': 0.0,
@@ -154,15 +203,34 @@ def _trace_unavailable(case_id: str, trace_id: str, reason: str) -> dict[str, An
             'exclusive_latency_ms': 0.0,
             'retrieved_doc_count': 0.0,
             'retrieved_chunk_count': 0.0,
-            'trace_unavailable': 1.0,
+            f'stage_count.{stage}': 1.0,
+            f'latency.{stage}': 0.0,
         },
     }
 
 
-def _walk(step: Any, parent_id: str, graph: nx.DiGraph, nodes: list[dict[str, Any]], edges: list[tuple[str, str]],
-          depth: int = 0) -> None:
+def _unavailable_trace_summary(
+    case_id: str,
+    trace_id: str,
+    error: Exception,
+) -> dict[str, Any]:
+    summary = _failed_answer_trace_summary(case_id, {
+        'trace_id': trace_id,
+        'status': 'ok',
+        'chat_error': {
+            'type': 'trace_unavailable',
+            'message': _preview(error),
+        },
+    })
+    summary['trace_source'] = 'analysis.trace_unavailable'
+    summary['trace_unavailable'] = True
+    return summary
+
+
+def _walk(step: Any, parent_id: str, graph: nx.DiGraph, nodes: list[dict[str, Any]],
+          edges: list[tuple[str, str]], depth: int = 0) -> None:
     node_id = _required_text(getattr(step, 'step_id', ''), 'trace step_id')
-    stage = _stage(step)
+    stage = stage_for_step(step)
     semantic = _semantic_data(step)
     node = {
         'id': node_id,
@@ -192,57 +260,6 @@ def _walk(step: Any, parent_id: str, graph: nx.DiGraph, nodes: list[dict[str, An
         edges.append((parent_id, node_id))
     for child in getattr(step, 'children', None) or []:
         _walk(child, node_id, graph, nodes, edges, depth + 1)
-
-
-def _stage(step: Any) -> str:
-    name = _text(getattr(step, 'name', '')).lower()
-    if name.startswith('get_') and 'toolgroup_methods' in name:
-        return 'tool_call'
-    fields = ' '.join(_text(value).lower() for value in (
-        getattr(step, 'semantic_type', ''), getattr(step, 'node_type', ''), getattr(step, 'name', ''),
-    ))
-    return next((stage for stage, needles in STAGE_RULES if any(needle in fields for needle in needles)), 'unknown')
-
-
-def _semantic_data(step: Any) -> dict[str, Any]:
-    value = getattr(step, 'semantic_data', None)
-    if not isinstance(value, Mapping):
-        return {}
-    doc_ids, chunk_ids = _extract_ids(value)
-    scores = [
-        float(item)
-        for item in (value.get('scores') or [])
-        if isinstance(item, (int, float))
-    ]
-    return {
-        'doc_ids': _unique(doc_ids + _list(value.get('ranked_doc_ids')) + _list(value.get('candidate_doc_ids'))),
-        'chunk_ids': _unique(chunk_ids + _list(value.get('returned_node_ids'))),
-        'scores': scores[:20],
-        'node_count': _number(value.get('node_count') or value.get('candidate_node_count')),
-        'keys': sorted(str(key) for key in value),
-    }
-
-
-def _extract_ids(value: Any) -> tuple[list[str], list[str]]:
-    docs: list[str] = []
-    chunks: list[str] = []
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, Mapping):
-            for key, raw in item.items():
-                lowered = str(key).lower()
-                if lowered in DOC_KEYS:
-                    docs.extend(_list(raw))
-                elif lowered in CHUNK_KEYS:
-                    chunks.extend(_list(raw))
-                elif lowered in ID_KEYS or isinstance(raw, (Mapping, list, tuple, set)):
-                    stack.append(raw)
-        elif isinstance(item, (list, tuple, set)):
-            stack.extend(item)
-        elif hasattr(item, '__dict__'):
-            stack.append(vars(item))
-    return _unique(docs), _unique(chunks)
 
 
 def _set_exclusive_latency(graph: nx.DiGraph, nodes: list[dict[str, Any]]) -> None:
@@ -276,14 +293,36 @@ def _retrieval_artifacts(nodes: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = node.get('semantic_metrics') if isinstance(node.get('semantic_metrics'), Mapping) else {}
         if node['stage'] not in {'retrieve', 'rerank', 'context_assembly'}:
             continue
-        step_docs = _unique(metrics.get('doc_ids'))
-        step_chunks = _unique(metrics.get('chunk_ids'))
+        step_docs, step_chunks = _unique(metrics.get('doc_ids')), _unique(metrics.get('chunk_ids'))
         doc_ids.extend(step_docs)
         chunk_ids.extend(step_chunks)
         keys.update(metrics.get('keys') or [])
-        steps.append({'id': node['id'], 'stage': node['stage'], 'name': node['name'],
-                      'doc_ids': step_docs, 'chunk_ids': step_chunks,
-                      'node_count': metrics.get('node_count', 0.0), 'scores': metrics.get('scores', [])})
+        steps.append({
+            'id': node['id'],
+            'stage': node['stage'],
+            'name': node['name'],
+            'doc_ids': step_docs,
+            'chunk_ids': step_chunks,
+            'node_count': metrics.get('node_count', 0.0),
+            'candidate_node_count': metrics.get('candidate_node_count', 0.0),
+            'scores': metrics.get('scores', []),
+            'query': metrics.get('query', ''),
+            'filters': metrics.get('filters'),
+            'topk': metrics.get('topk'),
+            'group_name': metrics.get('group_name'),
+            'similarity': metrics.get('similarity'),
+            'similarity_cut_off': metrics.get('similarity_cut_off'),
+            'index': metrics.get('index'),
+            'mode': metrics.get('mode'),
+            'target': metrics.get('target'),
+            'rerank_model': metrics.get('rerank_model'),
+            'returned_node_ids': metrics.get('returned_node_ids', []),
+            'candidate_doc_ids': metrics.get('candidate_doc_ids', []),
+            'ranked_doc_ids': metrics.get('ranked_doc_ids', []),
+            'returned_nodes': metrics.get('returned_nodes', []),
+            'candidate_nodes': metrics.get('candidate_nodes', []),
+            'ranked_nodes': metrics.get('ranked_nodes', []),
+        })
     return {'steps': steps, 'doc_ids': _unique(doc_ids), 'chunk_ids': _unique(chunk_ids),
             'semantic_metric_keys': keys}
 
@@ -299,9 +338,9 @@ def _final_context_ids(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str
     return _unique(docs), _unique(chunks)
 
 
-def _features(graph: nx.DiGraph, nodes: list[dict[str, Any]], diagnostic: list[dict[str, Any]], stage_counts: Counter,
-              latency_by_stage: Mapping[str, float], errors: list[dict[str, Any]], retrieval: Mapping[str, Any]
-              ) -> dict[str, float]:
+def _features(graph: nx.DiGraph, nodes: list[dict[str, Any]], diagnostic: list[dict[str, Any]],
+              stage_counts: Counter, latency_by_stage: Mapping[str, float], errors: list[dict[str, Any]],
+              retrieval: Mapping[str, Any]) -> dict[str, float]:
     degrees = [graph.out_degree(node) for node in graph.nodes]
     features = {
         'node_count': float(len(diagnostic)),
@@ -320,7 +359,7 @@ def _features(graph: nx.DiGraph, nodes: list[dict[str, Any]], diagnostic: list[d
 
 
 def _tree_text(step: Any) -> str:
-    label = re.sub(r'[^A-Za-z0-9_.-]+', '_', _stage(step)) or 'unknown'
+    label = re.sub(r'[^A-Za-z0-9_.-]+', '_', stage_for_step(step)) or 'unknown'
     return '{' + label + ''.join(_tree_text(child) for child in getattr(step, 'children', None) or []) + '}'
 
 
@@ -330,7 +369,7 @@ def _step_payload(step: Any) -> dict[str, Any]:
         'id': node_id,
         'span_id': node_id,
         'name': _text(getattr(step, 'name', ''))[:160],
-        'stage': _stage(step),
+        'stage': stage_for_step(step),
         'node_type': _text(getattr(step, 'node_type', ''))[:80],
         'semantic_type': _text(getattr(step, 'semantic_type', ''))[:80],
         'status': _required_text(getattr(step, 'status', ''), f'trace status for {node_id}').lower(),
@@ -352,20 +391,6 @@ def _raw_data(step: Any) -> dict[str, str]:
         'input': _preview(getattr(raw, 'input', None)),
         'output': _preview(getattr(raw, 'output', None)),
     }
-
-
-def _list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(item).strip() for item in value if str(item or '').strip()]
-    return [str(value).strip()] if str(value or '').strip() else []
-
-
-def _unique(value: Any) -> list[str]:
-    return list(dict.fromkeys(_list(value)))
 
 
 def _optional_number(value: Any) -> float | None:
@@ -407,4 +432,146 @@ def _latency(step: Any, node_id: str) -> float:
 
 
 def _preview(value: Any) -> str:
-    return _text(value)[:2000]
+    return SENSITIVE_VALUE_PATTERN.sub(
+        r'\1=[REDACTED]',
+        _text(value),
+    )[:500]
+
+
+def read_lazyllm_trace(
+    trace_id: str,
+    *,
+    attempts: int | None = None,
+    retry_seconds: float | None = None,
+) -> Any:
+    from lazyllm.tracing.consume import get_single_trace
+
+    read_attempts = TRACE_READ_ATTEMPTS if attempts is None else max(1, int(attempts))
+    wait_seconds = TRACE_RETRY_SECONDS if retry_seconds is None else max(0.0, float(retry_seconds))
+    last_error: Exception | None = None
+    for attempt in range(read_attempts):
+        try:
+            return get_single_trace(trace_id)
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < read_attempts and wait_seconds > 0:
+                time.sleep(wait_seconds)
+    raise ValueError(
+        f'trace {trace_id} not available after {read_attempts} attempts: {last_error}'
+    ) from last_error
+
+
+def stage_for_step(step: Any) -> str:
+    fields = ' '.join(
+        _text(value).lower()
+        for value in (
+            getattr(step, 'semantic_type', ''),
+            getattr(step, 'node_type', ''),
+            getattr(step, 'name', ''),
+        )
+    )
+    return next(
+        (stage for stage, needles in STAGE_RULES if any(needle in fields for needle in needles)),
+        'unknown',
+    )
+
+
+def _semantic_data(step: Any) -> dict[str, Any]:
+    value = getattr(step, 'semantic_data', None)
+    if not isinstance(value, Mapping):
+        return {}
+    doc_ids, chunk_ids = _extract_ids(value)
+    scores = [
+        float(item)
+        for item in (value.get('scores') or [])
+        if isinstance(item, (int, float))
+    ]
+    snapshot_fields = (
+        'query',
+        'filters',
+        'topk',
+        'group_name',
+        'similarity',
+        'similarity_cut_off',
+        'index',
+        'mode',
+        'target',
+        'rerank_model',
+        'returned_node_ids',
+        'candidate_doc_ids',
+        'ranked_doc_ids',
+        'returned_nodes',
+        'candidate_nodes',
+        'ranked_nodes',
+    )
+    result = {
+        'doc_ids': _unique(
+            doc_ids
+            + _list_value(value.get('ranked_doc_ids'))
+            + _list_value(value.get('candidate_doc_ids'))
+        ),
+        'chunk_ids': _unique(chunk_ids + _list_value(value.get('returned_node_ids'))),
+        'scores': scores[:20],
+        'node_count': _number(value.get('node_count') or value.get('candidate_node_count')),
+        'candidate_node_count': _number(value.get('candidate_node_count')),
+        'keys': sorted(str(key) for key in value),
+    }
+    result.update({
+        field: _bounded_semantic_value(value.get(field))
+        for field in snapshot_fields
+        if value.get(field) is not None
+    })
+    return result
+
+
+def _bounded_semantic_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 3:
+        return _preview(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _bounded_semantic_value(raw, depth=depth + 1)
+            for key, raw in list(value.items())[:20]
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_bounded_semantic_value(item, depth=depth + 1) for item in list(value)[:20]]
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _preview(value)
+
+
+def _extract_ids(value: Any) -> tuple[list[str], list[str]]:
+    docs: list[str] = []
+    chunks: list[str] = []
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, Mapping):
+            for key, raw in item.items():
+                lowered = str(key).lower()
+                if lowered in DOC_KEYS:
+                    docs.extend(_list_value(raw))
+                elif lowered in CHUNK_KEYS:
+                    chunks.extend(_list_value(raw))
+                elif lowered in ID_KEYS or isinstance(raw, (Mapping, list, tuple, set)):
+                    stack.append(raw)
+        elif isinstance(item, (list, tuple, set)):
+            stack.extend(item)
+        elif hasattr(item, '__dict__'):
+            stack.append(vars(item))
+    return _unique(docs), _unique(chunks)
+
+
+def _list_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item or '').strip()]
+    return [str(value).strip()] if str(value or '').strip() else []
+
+
+def _unique(value: Any) -> list[str]:
+    return list(dict.fromkeys(_list_value(value)))

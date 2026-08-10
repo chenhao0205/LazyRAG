@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from importlib import metadata
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from apted import APTED
-from apted.helpers import Tree
 from rapidfuzz.distance import Levenshtein
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction import DictVectorizer
@@ -21,6 +19,13 @@ from evo.operations.public_contracts import (
     number_or_default as _number,
 )
 
+try:
+    from apted import APTED
+    from apted.helpers import Tree
+except ModuleNotFoundError:
+    APTED = None
+    Tree = None
+
 TRACE_FEATURES = (
     'node_count', 'edge_count', 'max_depth', 'branching_factor_avg', 'error_span_count', 'trace_latency_ms',
     'exclusive_latency_ms', 'retrieved_doc_count', 'retrieved_chunk_count',
@@ -29,18 +34,17 @@ STAGES = ('query_rewrite', 'retrieve', 'rerank', 'context_assembly', 'prompt_bui
           'postprocess', 'stream')
 
 
-def _version(name: str) -> str:
-    try:
-        return metadata.version(name).split('.', 1)[0]
-    except metadata.PackageNotFoundError:
-        return 'missing'
+@dataclass(frozen=True)
+class ClusterConfig:
+    categorical_weight: float = 0.35
+    route_weight: float = 0.25
+    tree_weight: float = 0.25
+    numeric_weight: float = 0.15
+    distance_threshold: float = 0.45
 
 
-ALGORITHM_VERSION = (
-    'analysis_trace_cluster.v1:agglomerative+lof;'
-    'weights=categorical:0.35,route:0.25,tree:0.25,numeric:0.15;threshold=0.45;'
-    f'deps=sklearn:{_version("scikit-learn")},apted:{_version("apted")},rapidfuzz:{_version("rapidfuzz")}'
-)
+DEFAULT_CLUSTER_CONFIG = ClusterConfig()
+MAX_EXACT_CLUSTER_CASES = 500
 
 
 def cluster_traces(classifications: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
@@ -52,15 +56,19 @@ def cluster_traces(classifications: tuple[Mapping[str, Any], ...]) -> dict[str, 
         raise ValueError('analysis.trace_clusters classifications must all be mappings')
     if not rows:
         return _result(rows, [], [])
-    if len(rows) < 5:
+    scalable = len(rows) > MAX_EXACT_CLUSTER_CASES
+    if len(rows) < 5 or scalable:
         labels = _small_labels(rows)
         matrix = np.zeros((len(rows), 1))
     else:
         matrix = _feature_matrix(rows)
-        distances = _distances(rows, matrix)
-        labels = _cluster_labels(distances)
+        distances = _distances(rows, matrix, DEFAULT_CLUSTER_CONFIG)
+        labels = _cluster_labels(distances, DEFAULT_CLUSTER_CONFIG)
     _assign_stable_ids(rows, labels)
-    _assign_outliers(rows, distances if len(rows) >= 20 else None)
+    if scalable:
+        _assign_bucket_outliers(rows, labels)
+    else:
+        _assign_outliers(rows, distances if len(rows) >= 20 else None)
     groups = _groups(rows)
     for members in groups.values():
         for row in members:
@@ -82,12 +90,19 @@ def cluster_traces(classifications: tuple[Mapping[str, Any], ...]) -> dict[str, 
     return _result(rows, sorted(clusters, key=lambda c: c['cluster_id']), outliers)
 
 
-def _result(rows: list[dict[str, Any]], clusters: list[dict[str, Any]], outliers: list[dict[str, Any]]
-            ) -> dict[str, Any]:
+def _result(
+    rows: list[dict[str, Any]],
+    clusters: list[dict[str, Any]],
+    outliers: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         'id': 'analysis.trace_clusters',
         'total': len(rows),
-        'algorithm_version': ALGORITHM_VERSION,
+        'strategy': (
+            'fingerprint_bucket'
+            if len(rows) > MAX_EXACT_CLUSTER_CASES
+            else 'agglomerative_distance'
+        ),
         'clusters': clusters,
         'outliers': outliers,
         'rows': [
@@ -150,19 +165,20 @@ def _feature_row(row: Mapping[str, Any]) -> dict[str, float | str]:
     return features
 
 
-def _distances(rows: list[dict[str, Any]], matrix: np.ndarray) -> np.ndarray:
+def _distances(rows: list[dict[str, Any]], matrix: np.ndarray,
+               config: ClusterConfig = DEFAULT_CLUSTER_CONFIG) -> np.ndarray:
     return np.nan_to_num(
-        0.35 * _categorical_distances(rows)
-        + 0.25 * _route_distances(rows)
-        + 0.25 * _tree_distances(rows)
-        + 0.15 * pairwise_distances(matrix, metric='cosine')
+        config.categorical_weight * _categorical_distances(rows)
+        + config.route_weight * _route_distances(rows)
+        + config.tree_weight * _tree_distances(rows)
+        + config.numeric_weight * pairwise_distances(matrix, metric='cosine')
     )
 
 
-def _cluster_labels(distances: np.ndarray) -> np.ndarray:
+def _cluster_labels(distances: np.ndarray, config: ClusterConfig = DEFAULT_CLUSTER_CONFIG) -> np.ndarray:
     model = AgglomerativeClustering(
         n_clusters=None,
-        distance_threshold=0.45,
+        distance_threshold=config.distance_threshold,
         metric='precomputed',
         linkage='average',
     )
@@ -197,9 +213,18 @@ def _route_distances(rows: list[dict[str, Any]]) -> np.ndarray:
 
 
 def _tree_distances(rows: list[dict[str, Any]]) -> np.ndarray:
-    trees = [_tree(_text(_trace(row).get('tree_text')) or '{unknown}') for row in rows]
-    sizes = [max(1, (_text(_trace(row).get('tree_text')) or '{unknown}').count('{')) for row in rows]
     distances = np.zeros((len(rows), len(rows)))
+    tree_texts = [_text(_trace(row).get('tree_text')) or '{unknown}' for row in rows]
+    if APTED is None or Tree is None:
+        for i, left in enumerate(tree_texts):
+            for j in range(i + 1, len(tree_texts)):
+                distances[i, j] = distances[j, i] = float(
+                    Levenshtein.normalized_distance(left, tree_texts[j])
+                )
+        return distances
+
+    trees = [_tree(text) for text in tree_texts]
+    sizes = [max(1, text.count('{')) for text in tree_texts]
     for i, left in enumerate(trees):
         for j in range(i + 1, len(trees)):
             distances[i, j] = distances[j, i] = APTED(left, trees[j]).compute_edit_distance() / max(sizes[i], sizes[j])
@@ -230,12 +255,30 @@ def _assign_outliers(rows: list[dict[str, Any]], distances: np.ndarray | None) -
         row['outlier_score'] = round(score, 4)
 
 
-def _cluster_summary(cluster_id: str, members: list[dict[str, Any]], matrix: np.ndarray, rows: list[dict[str, Any]]
-                     ) -> dict[str, Any]:
-    indices = [rows.index(row) for row in members]
-    rep = members[0] if len(members) == 1 else rows[indices[int(np.argmin(
-        pairwise_distances(matrix[indices], np.mean(matrix[indices], axis=0).reshape(1, -1)).ravel()
-    ))]]
+def _assign_bucket_outliers(
+    rows: list[dict[str, Any]],
+    labels: list[int] | np.ndarray,
+) -> None:
+    counts = Counter(int(label) for label in labels)
+    largest = max(counts.values(), default=1)
+    for row, label in zip(rows, labels, strict=True):
+        size = counts[int(label)]
+        row['outlier_score'] = round(1.0 - min(1.0, size / max(2, largest)), 4)
+
+
+def _cluster_summary(cluster_id: str, members: list[dict[str, Any]], matrix: np.ndarray,
+                     rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(members) == 1 or (matrix.shape[1] == 1 and not np.any(matrix)):
+        rep = members[0]
+    else:
+        positions = {id(row): index for index, row in enumerate(rows)}
+        indices = [positions[id(row)] for row in members]
+        rep = rows[indices[int(np.argmin(
+            pairwise_distances(
+                matrix[indices],
+                np.mean(matrix[indices], axis=0).reshape(1, -1),
+            ).ravel()
+        ))]]
     issues = Counter(_text(row.get('issue_type')) for row in members)
     blocks = Counter(_text(row.get('affected_block')) for row in members)
     modes = Counter(_text(row.get('failure_mode')) for row in members)
@@ -274,7 +317,7 @@ def _fingerprint(rows: list[Mapping[str, Any]]) -> tuple[str, str, str, str]:
             _text(_trace(first).get('route_signature')))
 
 
-def _tree(value: str) -> Tree:
+def _tree(value: str) -> Any:
     try:
         return Tree.from_text(value)
     except Exception:

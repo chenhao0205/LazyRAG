@@ -29,6 +29,14 @@ from .abtest.candidate import async_candidate_rag_answer, candidate_service, fin
 from .abtest.comparison import compare_abtest
 from .analysis.classify import classify_case
 from .analysis.cluster import cluster_traces
+from .analysis.confirmation import (
+    DEFAULT_MAX_PROBE_CALLS,
+    registered_probe_handlers,
+    run_confirmation_probe_batch,
+)
+from .analysis.diagnostic_sidecar import build_diagnostic_plan, finalize_diagnostic_sidecar
+from .analysis.diagnosis import build_target_results
+from .analysis.review import build_evidence_packet, run_semantic_review_batch
 from .analysis.summary import build_analysis_summary
 from .analysis.trace_summary import build_trace_summary
 from .dataset.operations import dataset_operations
@@ -151,6 +159,173 @@ async def classify_case_operation(ctx: OperationContext, case: object, answer: o
 
 
 @operation(
+    op_id='analysis.diagnostic_plan',
+    inputs={
+        'case': each(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
+        'answer': keyed(A.EVAL_RAG_ANSWER),
+        'judge': keyed(A.EVAL_JUDGE_RESULT),
+        'trace': keyed(A.ANALYSIS_TRACE_SUMMARY),
+        'config': one(A.RUN_CONFIG),
+    },
+    outputs={'diagnostic_plan': partitioned(A.ANALYSIS_DIAGNOSTIC_PLAN)},
+    max_concurrency=4,
+)
+async def diagnostic_plan_operation(ctx: OperationContext, case: object, answer: object, judge: object,
+                                    trace: object, config: object) -> OperationResult:
+    plan = build_diagnostic_plan(
+        _mapping(case, 'case'),
+        _mapping(answer, 'answer'),
+        _mapping(judge, 'judge'),
+        _mapping(trace, 'trace'),
+        max_review_calls=_analysis_budget(_mapping(config, 'config'), 'analysis_review_budget', 2),
+    )
+    return await _recorded_result(
+        ctx, 'analysis.diagnostic_plan_built', {'diagnostic_plan': plan}, case_id=ctx.partition_key,
+        target_count=len(plan.get('diagnosis_targets') or ()),
+    )
+
+
+@operation(
+    op_id='analysis.evidence_packet',
+    inputs={
+        'case': each(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
+        'answer': keyed(A.EVAL_RAG_ANSWER),
+        'judge': keyed(A.EVAL_JUDGE_RESULT),
+        'trace': keyed(A.ANALYSIS_TRACE_SUMMARY),
+        'diagnostic_plan': keyed(A.ANALYSIS_DIAGNOSTIC_PLAN),
+    },
+    outputs={'evidence_packet': partitioned(A.ANALYSIS_EVIDENCE_PACKET)},
+    max_concurrency=4,
+)
+async def evidence_packet_operation(ctx: OperationContext, case: object, answer: object, judge: object,
+                                    trace: object, diagnostic_plan: object) -> OperationResult:
+    plan = _mapping(diagnostic_plan, 'diagnostic_plan')
+    review_plan = _mapping(plan.get('review_plan'), 'diagnostic_plan.review_plan')
+    packet = build_evidence_packet(
+        _mapping(case, 'case'),
+        _mapping(answer, 'answer'),
+        _mapping(judge, 'judge'),
+        _mapping(trace, 'trace'),
+        review_packages=review_plan.get('review_packages'),
+        diagnostic_plan=plan,
+    )
+    return await _recorded_result(
+        ctx, 'analysis.evidence_packet_built', {'evidence_packet': packet}, case_id=ctx.partition_key,
+    )
+
+
+@operation(
+    op_id='analysis.semantic_review_batch',
+    inputs={
+        'evidence_packet': each(A.ANALYSIS_EVIDENCE_PACKET, over=A.EVAL_CASE_REQUESTS),
+        'diagnostic_plan': keyed(A.ANALYSIS_DIAGNOSTIC_PLAN),
+        'config': one(A.RUN_CONFIG),
+    },
+    outputs={'semantic_reviews': partitioned(A.ANALYSIS_SEMANTIC_REVIEWS)},
+    max_concurrency=2,
+)
+async def semantic_review_batch_operation(ctx: OperationContext, evidence_packet: object,
+                                          diagnostic_plan: object, config: object) -> OperationResult:
+    plan = _mapping(diagnostic_plan, 'diagnostic_plan')
+    run_config = _mapping(config, 'config')
+    llm_config = run_config.get('llm_config') if isinstance(run_config.get('llm_config'), Mapping) else {}
+    reviews = await asyncio.to_thread(
+        run_semantic_review_batch,
+        _mapping(evidence_packet, 'evidence_packet'),
+        _mapping(plan.get('review_plan'), 'diagnostic_plan.review_plan'),
+        llm_config=llm_config,
+        timeout_seconds=_analysis_number(run_config, 'analysis_review_timeout_seconds', 60.0),
+    )
+    return await _recorded_result(
+        ctx, 'analysis.semantic_review_completed', {'semantic_reviews': reviews}, case_id=ctx.partition_key,
+        status=reviews.get('status'), review_count=len(reviews.get('reviews') or ()),
+    )
+
+
+@operation(
+    op_id='analysis.probe_batch',
+    inputs={
+        'case': each(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
+        'answer': keyed(A.EVAL_RAG_ANSWER),
+        'judge': keyed(A.EVAL_JUDGE_RESULT),
+        'trace': keyed(A.ANALYSIS_TRACE_SUMMARY),
+        'classification': keyed(A.ANALYSIS_CASE_CLASSIFICATION),
+        'diagnostic_plan': keyed(A.ANALYSIS_DIAGNOSTIC_PLAN),
+        'evidence_packet': keyed(A.ANALYSIS_EVIDENCE_PACKET),
+        'semantic_reviews': keyed(A.ANALYSIS_SEMANTIC_REVIEWS),
+        'config': one(A.RUN_CONFIG),
+    },
+    outputs={'probe_observations': partitioned(A.ANALYSIS_PROBE_OBSERVATIONS)},
+    max_concurrency=4,
+)
+async def probe_batch_operation(ctx: OperationContext, case: object, answer: object, judge: object,
+                                trace: object, classification: object, diagnostic_plan: object,
+                                evidence_packet: object, semantic_reviews: object, config: object) -> OperationResult:
+    plan = _mapping(diagnostic_plan, 'diagnostic_plan')
+    review_batch = _mapping(semantic_reviews, 'semantic_reviews')
+    pre_probe_results = build_target_results(
+        _sequence(plan.get('diagnosis_targets'), 'diagnostic_plan.diagnosis_targets'),
+        _sequence(plan.get('target_paths'), 'diagnostic_plan.target_paths'),
+        _sequence(plan.get('agenda'), 'diagnostic_plan.agenda'),
+        semantic_reviews=_sequence(review_batch.get('reviews'), 'semantic_reviews.reviews'),
+    )
+    eligible_targets = [
+        str(item.get('target_id') or '')
+        for item in pre_probe_results
+        if isinstance(item, Mapping) and not item.get('repair_ready')
+    ]
+    run_config = _mapping(config, 'config')
+    probes = await asyncio.to_thread(
+        run_confirmation_probe_batch,
+        _mapping(plan.get('confirmation_plan'), 'diagnostic_plan.confirmation_plan'),
+        handlers=registered_probe_handlers(),
+        context={
+            'case': _mapping(case, 'case'),
+            'answer': _mapping(answer, 'answer'),
+            'judge': _mapping(judge, 'judge'),
+            'trace': _mapping(trace, 'trace'),
+            'classification': _mapping(classification, 'classification'),
+            'evidence_packet': _mapping(evidence_packet, 'evidence_packet'),
+        },
+        eligible_target_ids=eligible_targets,
+        max_probe_calls=_analysis_budget(run_config, 'analysis_probe_budget', DEFAULT_MAX_PROBE_CALLS),
+        timeout_seconds=_analysis_number(run_config, 'analysis_probe_timeout_seconds', 30.0),
+    )
+    return await _recorded_result(
+        ctx, 'analysis.probe_batch_completed', {'probe_observations': probes}, case_id=ctx.partition_key,
+        status=probes.get('status'), executed_count=probes.get('checks', {}).get('executed_count'),
+    )
+
+
+@operation(
+    op_id='analysis.diagnostic_sidecar',
+    inputs={
+        'diagnostic_plan': each(A.ANALYSIS_DIAGNOSTIC_PLAN, over=A.EVAL_CASE_REQUESTS),
+        'semantic_reviews': keyed(A.ANALYSIS_SEMANTIC_REVIEWS),
+        'probe_observations': keyed(A.ANALYSIS_PROBE_OBSERVATIONS),
+    },
+    outputs={'diagnostic_sidecar': partitioned(A.ANALYSIS_DIAGNOSTIC_SIDECAR)},
+    max_concurrency=4,
+)
+async def diagnostic_sidecar_operation(ctx: OperationContext, diagnostic_plan: object,
+                                       semantic_reviews: object, probe_observations: object) -> OperationResult:
+    review_batch = _mapping(semantic_reviews, 'semantic_reviews')
+    probe_batch = _mapping(probe_observations, 'probe_observations')
+    sidecar = finalize_diagnostic_sidecar(
+        _mapping(diagnostic_plan, 'diagnostic_plan'),
+        semantic_reviews=_sequence(review_batch.get('reviews'), 'semantic_reviews.reviews'),
+        probe_observations=_sequence(probe_batch.get('observations'), 'probe_observations.observations'),
+    )
+    sidecar['investigation_execution'] = {
+        'semantic_review_batch': _batch_status(review_batch),
+        'probe_batch': _batch_status(probe_batch),
+    }
+    return await _recorded_result(
+        ctx, 'analysis.diagnostic_sidecar_built', {'diagnostic_sidecar': sidecar}, case_id=ctx.partition_key,
+    )
+
+
+@operation(
     op_id='analysis.trace_clusters',
     inputs={
         'classifications': all_items(
@@ -177,13 +352,19 @@ async def trace_clusters_operation(ctx: OperationContext, classifications: objec
             over=A.EVAL_CASE_REQUESTS,
         ),
         'clusters': one(A.ANALYSIS_TRACE_CLUSTERS),
+        'sidecars': all_items(A.ANALYSIS_DIAGNOSTIC_SIDECAR, over=A.EVAL_CASE_REQUESTS),
     },
     outputs={'summary': scalar(A.ANALYSIS_SUMMARY)},
 )
-async def analysis_summary_operation(ctx: OperationContext, classifications: object, clusters: object
-                                     ) -> OperationResult:
+async def analysis_summary_operation(ctx: OperationContext, classifications: object, clusters: object,
+                                     sidecars: object) -> OperationResult:
     values = _partition_values(classifications, 'classifications')
-    summary = build_analysis_summary(ctx.run_id, values, _mapping(clusters, 'clusters')) | _failure_summary(
+    summary = build_analysis_summary(
+        ctx.run_id,
+        values,
+        _mapping(clusters, 'clusters'),
+        sidecars=_partition_values(sidecars, 'sidecars'),
+    ) | _failure_summary(
         classifications,
     )
     return await _recorded_result(
@@ -346,6 +527,11 @@ _EVO_OPERATIONS: tuple[Operation, ...] = (
     eval_summary_operation,
     trace_summary_operation,
     classify_case_operation,
+    diagnostic_plan_operation,
+    evidence_packet_operation,
+    semantic_review_batch_operation,
+    probe_batch_operation,
+    diagnostic_sidecar_operation,
     trace_clusters_operation,
     analysis_summary_operation,
     repair_session_operation,
@@ -374,6 +560,43 @@ def _partition_values(value: object, name: str) -> tuple[Mapping[str, Any], ...]
     if not all(isinstance(item, Mapping) for item in values):
         raise ValueError(f'{name} must contain mappings')
     return values
+
+
+def _sequence(value: object, name: str) -> tuple[Mapping[str, Any], ...]:
+    if value in (None, ''):
+        return ()
+    if isinstance(value, Mapping):
+        return (value,)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f'{name} must be a mapping, list, or tuple')
+    rows = tuple(item for item in value if isinstance(item, Mapping))
+    if len(rows) != len(value):
+        raise ValueError(f'{name} items must be mappings')
+    return rows
+
+
+def _analysis_budget(config: Mapping[str, Any], key: str, default: int) -> int:
+    inputs = config.get('inputs') if isinstance(config.get('inputs'), Mapping) else {}
+    value = inputs.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f'run.config.inputs.{key} must be a non-negative integer')
+    return value
+
+
+def _analysis_number(config: Mapping[str, Any], key: str, default: float) -> float:
+    inputs = config.get('inputs') if isinstance(config.get('inputs'), Mapping) else {}
+    value = inputs.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f'run.config.inputs.{key} must be a positive number')
+    return float(value)
+
+
+def _batch_status(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        str(key): raw
+        for key, raw in value.items()
+        if key not in {'reviews', 'observations'}
+    }
 
 
 def _failure_summary(value: object) -> dict[str, object]:
@@ -451,7 +674,9 @@ def _verified_patch(run_id: str, patch_ref: str) -> dict[str, Any]:
 __all__ = [
     'analysis_summary_operation', 'candidate_answer_operation', 'candidate_judge_operation',
     'candidate_service_operation', 'candidate_summary_operation',
-    'classify_case_operation', 'compare_abtest_operation', 'eval_answer_operation',
-    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'repair_session_operation',
-    'trace_clusters_operation', 'trace_summary_operation',
+    'classify_case_operation', 'compare_abtest_operation', 'diagnostic_plan_operation',
+    'diagnostic_sidecar_operation', 'evidence_packet_operation', 'eval_answer_operation',
+    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'probe_batch_operation',
+    'repair_session_operation', 'semantic_review_batch_operation', 'trace_clusters_operation',
+    'trace_summary_operation',
 ]

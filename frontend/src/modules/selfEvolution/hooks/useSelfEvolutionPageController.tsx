@@ -47,6 +47,7 @@ import {
   TraceObservationView,
 } from "../components/TraceObservationView";
 import { AnalysisCategoryPieChart } from "../components/AnalysisCategoryPieChart";
+import { AnalysisDiagnosisPanel } from "../components/analysis/AnalysisDiagnosisPanel";
 import { AbtestComparisonPanel } from "../components/workbench/AbtestComparisonPanel";
 import {
   type SelfEvolutionFinalResultSummary,
@@ -1100,6 +1101,9 @@ export function SelfEvolutionPageController({
     useState<string | null>(null);
   const hasNewAnalysisSummary =
     analysisActionableCaseRows.length > 0 || affectedBlockCountRows.length > 0;
+  const hasDiagnosticAnalysisSummary =
+    Array.isArray(analysisSummaryContent?.root_cause_groups) ||
+    Array.isArray(analysisSummaryContent?.case_diagnostics);
   const hasLegacyAnalysisStructuredReport =
     analysisCategoryRows.length > 0 || analysisCaseRows.length > 0;
   const hasAnalysisStructuredReport =
@@ -1823,7 +1827,7 @@ export function SelfEvolutionPageController({
         return;
       }
       setCaseArtifact(undefined);
-      setActiveWorkbenchTab("processes");
+      setActiveWorkbenchTab("artifacts");
       setActiveArtifactKind(kind);
       setIsArtifactPanelOpen(true);
       setPreviewHistoryKey(undefined);
@@ -1869,7 +1873,7 @@ export function SelfEvolutionPageController({
         return;
       }
       const resolvedArtifactId = resolveCaseArtifactId(artifactId, caseId);
-      setActiveWorkbenchTab("processes");
+      setActiveWorkbenchTab("artifacts");
       setActiveArtifactKind(kind);
       setIsArtifactPanelOpen(true);
       setPreviewHistoryKey(undefined);
@@ -5258,6 +5262,10 @@ export function SelfEvolutionPageController({
           <>
             {hasNewAnalysisSummary ? (
               <>
+                {hasDiagnosticAnalysisSummary ? (
+                  <AnalysisDiagnosisPanel content={analysisSummaryContent} />
+                ) : (
+                  <>
                 {affectedBlockCountRows.length > 0 && (
                   <div className="self-evolution-analysis-category-section">
                     <div className="self-evolution-analysis-section-head">
@@ -5344,6 +5352,8 @@ export function SelfEvolutionPageController({
                     </Paragraph>
                   )}
                 </div>
+                  </>
+                )}
               </>
             ) : (
               <>

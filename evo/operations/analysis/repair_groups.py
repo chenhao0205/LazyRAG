@@ -4,11 +4,13 @@ import json
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from hashlib import sha1
 from importlib.resources import files
 from typing import Any
 
 from evo.operations.public_contracts import clean_text as _text
+
+from . import _as_list as _list, _clip_text as _clip, _stable_id
+from .judge import eval_policy, layer_values, score_breakdown
 
 SCORE_KEYS = (
     'answer_correctness',
@@ -57,16 +59,18 @@ def _group_key(row: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
     )
 
 
-def _group(block: str, mode: str, issue: str, cluster: str, route: str, rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _group(block: str, mode: str, issue: str, cluster: str, route: str,
+           rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     registry = FUNCTION_BLOCKS.get(block, {})
-    case_ids = [_text(row.get('case_id')) for row in rows if _text(row.get('case_id'))]
+    case_ids = list(dict.fromkeys(
+        _text(row.get('case_id')) for row in rows if _text(row.get('case_id'))
+    ))
     gid = _stable_id({
         'block': block,
         'mode': mode,
         'issue': issue,
         'cluster': cluster,
         'route': route,
-        'case_ids': sorted(case_ids),
     })[:12]
     return {
         'group_id': f'grp_{gid}',
@@ -77,7 +81,7 @@ def _group(block: str, mode: str, issue: str, cluster: str, route: str, rows: li
         'issue_category': _text(rows[0].get('issue_category')) if rows else '',
         'trace_cluster_id': cluster,
         'trace_signature': route,
-        'badcase_count': len(rows),
+        'badcase_count': len(case_ids),
         'case_ids': case_ids,
         'representative_case_id': case_ids[0] if case_ids else '',
         'answer_impact_score': round(max((_answer_gap(row) for row in rows), default=0.0), 4),
@@ -88,7 +92,8 @@ def _group(block: str, mode: str, issue: str, cluster: str, route: str, rows: li
         'primary_metrics': list(registry.get('primary_metrics') or _metric_focus(rows)),
         'guard_metrics': list(registry.get('guard_metrics') or ('answer_correctness',)),
         'invariants': list(registry.get('invariants') or ()),
-        'evidence': [_case_evidence(row) for row in rows],
+        'evidence': [_case_evidence(rows[0])] if rows else [],
+        'evidence_case_count': len(rows),
     }
 
 
@@ -116,6 +121,13 @@ def _case_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
         'actual_answer': _clip(answer.get('answer'), 420),
         'judge_reason': _clip(judge.get('reason'), 320),
         'metrics': {key: judge.get(key) for key in SCORE_KEYS if key in judge},
+        'primary_scores': _compact(layer_values(judge, 'primary_scores')),
+        'core_explainers': _compact(layer_values(judge, 'core_explainers')),
+        'diagnostic_evidence': _compact(layer_values(judge, 'diagnostic_evidence')),
+        'specialized_metrics': _compact(layer_values(judge, 'specialized_metrics')),
+        'compatibility_metrics': _compact(layer_values(judge, 'compatibility_metrics')),
+        'score_breakdown': _compact(score_breakdown(judge)),
+        'eval_policy': _policy_snapshot(judge),
         'reference_doc_ids': _list(case.get('reference_doc_ids'))[:8],
         'reference_chunk_ids': _list(case.get('reference_chunk_ids'))[:8],
         'actual_doc_ids': _list(answer.get('doc_ids'))[:8],
@@ -137,8 +149,13 @@ def _metric_focus(rows: list[Mapping[str, Any]]) -> list[str]:
     totals = Counter()
     for row in rows:
         judge = row.get('judge') if isinstance(row.get('judge'), Mapping) else {}
-        for key in SCORE_KEYS:
-            if _score(judge.get(key), 1.0) < 0.7:
+        candidates = {
+            **{key: judge.get(key) for key in SCORE_KEYS if key in judge},
+            **layer_values(judge, 'core_explainers'),
+            **layer_values(judge, 'specialized_metrics'),
+        }
+        for key, value in candidates.items():
+            if isinstance(value, (int, float)) and _score(value, 1.0) < 0.7:
                 totals[key] += 1
     return [key for key, _ in totals.most_common(3)] or ['answer_correctness']
 
@@ -163,7 +180,10 @@ def _answer_gap(row: Mapping[str, Any]) -> float:
 
 
 def _confidence(row: Mapping[str, Any]) -> float:
-    return {'high': 1.0, 'medium': 0.65, 'low': 0.25}.get(_text(row.get('confidence')), 0.0)
+    value = row.get('confidence')
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0.0, min(1.0, float(value)))
+    return {'high': 1.0, 'medium': 0.65, 'low': 0.25}.get(_text(value), 0.0)
 
 
 def _score(value: Any, default: float) -> float:
@@ -174,20 +194,28 @@ def _score(value: Any, default: float) -> float:
     return number if math.isfinite(number) else default
 
 
-def _list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    if value in (None, ''):
-        return []
-    return [value]
+def _policy_snapshot(judge: Mapping[str, Any]) -> dict[str, Any]:
+    policy = eval_policy(judge)
+    keys = (
+        'answer_good_threshold',
+        'answer_partial_threshold',
+        'answer_correctness_floor',
+        'groundedness_floor',
+        'answer_relevance_floor',
+        'key_point_recall_floor',
+        'contradiction_rate_ceiling',
+        'retrieval_top_k',
+        'top_k',
+        'judge_model',
+    )
+    return {key: policy[key] for key in keys if key in policy}
 
 
-def _clip(value: Any, limit: int) -> str:
-    text = _text(value)
-    return text if len(text) <= limit else text[:limit - 3] + '...'
-
-
-def _stable_id(value: Mapping[str, Any]) -> str:
-    return sha1(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+def _compact(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _compact(raw) for key, raw in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_compact(item) for item in list(value)[:8]]
+    if isinstance(value, str):
+        return _clip(value, 420)
+    return value
