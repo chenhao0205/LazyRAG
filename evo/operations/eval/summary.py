@@ -6,7 +6,6 @@ from typing import Any
 
 from .answer_process import build_answer_process_panel
 
-EVAL_FRONTEND_VIEW_VERSION = 'eval_frontend_view.v1'
 UNSCORED = {'infra_failure', 'judge_contract_error', 'dataset_contract_error'}
 SCORES = (
     'answer_correctness',
@@ -417,7 +416,6 @@ def build_eval_frontend_view(
     case_overviews = [_frontend_case_overview(row) for row in rows]
     case_details = [_frontend_case_detail(row) for row in rows]
     return {
-        'frontend_view_version': EVAL_FRONTEND_VIEW_VERSION,
         'overview': overview,
         'case_overviews': case_overviews,
         'case_details': case_details,

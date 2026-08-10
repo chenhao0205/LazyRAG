@@ -230,7 +230,6 @@ class ProjectionService:
             'step': 'eval',
             'version': version,
             'content': public_value({
-                'frontend_view_version': summary.get('frontend_view_version'),
                 'overview': summary.get('overview') or {},
                 'case_overviews': summary.get('case_overviews') or [],
                 'case_details': summary.get('case_details') or [],

@@ -638,7 +638,6 @@ def test_eval_detail_summary_exposes_frontend_overview_fields(monkeypatch):
 
     summary = build_eval_detail_summary([judge_case(case, answer, {'judge_llm_config': {'evo_llm': {'model': 'fake'}}})])
 
-    assert summary['frontend_view_version'] == 'eval_frontend_view.v1'
     assert summary['overview']['total_cases'] == 1
     assert summary['overview']['completed_cases'] == 1
     assert summary['overview']['average_scores']['overall'] == summary['metrics']['overall_score_avg']
