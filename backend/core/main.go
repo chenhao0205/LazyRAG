@@ -18,8 +18,10 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/common/readonlyorm"
+	compatbootstrap "lazymind/core/compat/bootstrap"
 	"lazymind/core/evalset"
 	"lazymind/core/log"
+	"lazymind/core/mcpserver"
 	"lazymind/core/migrate"
 	"lazymind/core/modelprovider"
 	"lazymind/core/plugin"
@@ -213,6 +215,17 @@ func main() {
 
 	// text/PrompttextInitialize（DB + Redis）。DB text ACL text；Redis textConversationtext/text/text。
 	store.Init(db.DB, readonlyDB.DB, store.MustStateFromEnv())
+	inboundRuntime, err := compatbootstrap.NewSkillRuntime(db.DB, inboundMCPObjectRoot())
+	if err != nil {
+		log.Logger.Fatal().Err(err).Msg("construct inbound MCP runtime failed")
+	}
+	inboundMCP, err := mcpserver.New(inboundRuntime, mcpserver.HeaderIdentityProvider{}, mcpserver.Options{
+		ServerName:    "lazymind",
+		ServerVersion: "0.1.0",
+	})
+	if err != nil {
+		log.Logger.Fatal().Err(err).Msg("construct inbound MCP server failed")
+	}
 	evalset.RegisterAsyncJobs()
 	plugin.RegisterPluginDraftGenerateJob()
 	startBackgroundJobs := backgroundJobsEnabled()
@@ -272,6 +285,7 @@ func main() {
 	r := mux.NewRouter()
 	r.UseEncodedPath()
 	registerCoreRoutes(r)
+	r.Handle("/mcp", inboundMCP.StreamableHTTPHandler(mcpserver.TransportOptions{}))
 
 	// Starttext OpenAPI spec，text doc_swag.go / swag init
 	openAPIJSON, err := buildOpenAPISpecFromRouter(r)
