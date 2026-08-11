@@ -8,10 +8,15 @@ import (
 )
 
 type ToolDefinition struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	ReadOnly    bool           `json:"-"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema map[string]any  `json:"inputSchema"`
+	Annotations ToolAnnotations `json:"annotations,omitempty"`
+	ReadOnly    bool            `json:"-"`
+}
+
+type ToolAnnotations struct {
+	ReadOnlyHint bool `json:"readOnlyHint,omitempty"`
 }
 
 type Registry struct {

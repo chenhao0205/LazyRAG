@@ -17,8 +17,12 @@ import (
 type fakeSkillPort struct {
 	listResult compatskill.ListResult
 	listErr    error
+	getResult  compatskill.Summary
+	getErr     error
 	callCtx    contract.CallContext
 	input      compatskill.ListInput
+	getCallCtx contract.CallContext
+	getSkillID string
 }
 
 func (p *fakeSkillPort) List(_ context.Context, callCtx contract.CallContext, input compatskill.ListInput) (compatskill.ListResult, error) {
@@ -26,8 +30,9 @@ func (p *fakeSkillPort) List(_ context.Context, callCtx contract.CallContext, in
 	return p.listResult, p.listErr
 }
 
-func (p *fakeSkillPort) GetMetadata(context.Context, contract.CallContext, string) (compatskill.Summary, error) {
-	return compatskill.Summary{}, errors.New("not implemented")
+func (p *fakeSkillPort) GetMetadata(_ context.Context, callCtx contract.CallContext, skillID string) (compatskill.Summary, error) {
+	p.getCallCtx, p.getSkillID = callCtx, skillID
+	return p.getResult, p.getErr
 }
 
 func (p *fakeSkillPort) ReadContent(context.Context, contract.CallContext, string, string) (compatskill.Content, error) {
@@ -67,13 +72,14 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	if len(tools) != 1 || tools[0].Name != skillListToolName {
+	if len(tools) != 2 || tools[0].Name != skillGetToolName || tools[1].Name != skillListToolName {
 		t.Fatalf("tools = %#v", tools)
 	}
-	if tools[0].Description == "" || !tools[0].ReadOnly {
-		t.Fatalf("tool metadata = %#v", tools[0])
+	listTool := tools[1]
+	if listTool.Description == "" || !listTool.ReadOnly || !listTool.Annotations.ReadOnlyHint {
+		t.Fatalf("tool metadata = %#v", listTool)
 	}
-	properties := tools[0].InputSchema["properties"].(map[string]any)
+	properties := listTool.InputSchema["properties"].(map[string]any)
 	for _, field := range []string{"keyword", "category", "tags", "page_size", "page_token"} {
 		if _, ok := properties[field]; !ok {
 			t.Fatalf("schema missing %q: %#v", field, properties)
@@ -84,8 +90,15 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 			t.Fatalf("schema exposes forbidden identity field %q", forbidden)
 		}
 	}
-	if tools[0].InputSchema["additionalProperties"] != false {
+	if listTool.InputSchema["additionalProperties"] != false {
 		t.Fatalf("additionalProperties must be false")
+	}
+	getSchema := tools[0].InputSchema
+	if getSchema["additionalProperties"] != false || !tools[0].Annotations.ReadOnlyHint {
+		t.Fatalf("skill get schema = %#v", getSchema)
+	}
+	if _, ok := getSchema["properties"].(map[string]any)["skill_id"]; !ok {
+		t.Fatalf("skill get schema missing skill_id: %#v", getSchema)
 	}
 }
 
@@ -151,6 +164,38 @@ func TestToolsCallRejectsUnknownMalformedInvalidAndUnauthenticated(t *testing.T)
 	}
 	if malformed.Error == nil || malformed.Error.Code != rpcParseError {
 		t.Fatalf("malformed response = %#v", malformed)
+	}
+}
+
+func TestToolsCallSkillGetMetadataOnlyUsesPrincipal(t *testing.T) {
+	port := &fakeSkillPort{getResult: compatskill.Summary{ID: "skill-1", Name: "One", HeadRevisionID: "rev-1", Enabled: true}}
+	server := testServer(t, port)
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_skill_get","arguments":{"skill_id":"skill-1"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || port.getCallCtx.UserID != "trusted-user" || port.getSkillID != "skill-1" {
+		t.Fatalf("result=%#v callCtx=%#v skillID=%q", result, port.getCallCtx, port.getSkillID)
+	}
+	raw, err := json.Marshal(result["structuredContent"])
+	if err != nil || !strings.Contains(string(raw), `"skill-1"`) || strings.Contains(string(raw), "content") {
+		t.Fatalf("structured result=%s err=%v", raw, err)
+	}
+
+	invalid := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_skill_get","arguments":{"skill_id":"skill-1","user_id":"attacker"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	if !invalid.Result.(map[string]any)["isError"].(bool) {
+		t.Fatalf("identity override was accepted: %#v", invalid.Result)
+	}
+}
+
+func TestToolsCallSkillGetMapsNotFoundAndInvalid(t *testing.T) {
+	server := testServer(t, &fakeSkillPort{getErr: contract.NewError(contract.NotFound, "skill.get", "sql details", false, errors.New("postgres secret"))})
+	notFound := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_skill_get","arguments":{"skill_id":"missing"}}}`, map[string]string{"X-User-Id": "user"})
+	raw, _ := json.Marshal(notFound.Result)
+	if !strings.Contains(string(raw), "NOT_FOUND") || strings.Contains(string(raw), "secret") {
+		t.Fatalf("not found result=%s", raw)
+	}
+	invalid := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_skill_get","arguments":{}}}`, map[string]string{"X-User-Id": "user"})
+	if !invalid.Result.(map[string]any)["isError"].(bool) {
+		t.Fatalf("invalid result=%#v", invalid.Result)
 	}
 }
 

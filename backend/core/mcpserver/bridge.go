@@ -12,6 +12,7 @@ import (
 )
 
 const skillListToolName = "lazymind_skill_list"
+const skillGetToolName = "lazymind_skill_get"
 
 type toolCallParams struct {
 	Name      string          `json:"name"`
@@ -26,11 +27,16 @@ type skillListArguments struct {
 	PageToken string   `json:"page_token"`
 }
 
+type skillGetArguments struct {
+	SkillID string `json:"skill_id"`
+}
+
 func skillListTool() ToolDefinition {
 	return ToolDefinition{
 		Name:        skillListToolName,
 		Description: "List the authenticated user's LazyMind skills with optional metadata filters and pagination.",
 		ReadOnly:    true,
+		Annotations: ToolAnnotations{ReadOnlyHint: true},
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -40,6 +46,23 @@ func skillListTool() ToolDefinition {
 				"page_size":  map[string]any{"type": "integer", "minimum": contract.MinPageSize, "maximum": contract.MaxPageSize},
 				"page_token": map[string]any{"type": "string", "description": "Opaque pagination token."},
 			},
+			"additionalProperties": false,
+		},
+	}
+}
+
+func skillGetTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        skillGetToolName,
+		Description: "Get metadata for one authenticated user's LazyMind skill. Skill file content is not included.",
+		ReadOnly:    true,
+		Annotations: ToolAnnotations{ReadOnlyHint: true},
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"skill_id": map[string]any{"type": "string", "description": "Stable LazyMind skill ID."},
+			},
+			"required":             []string{"skill_id"},
 			"additionalProperties": false,
 		},
 	}
@@ -69,9 +92,26 @@ func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 	switch params.Name {
 	case skillListToolName:
 		return s.callSkillList(ctx, request.ID, params.Arguments, callCtx)
+	case skillGetToolName:
+		return s.callSkillGet(ctx, request.ID, params.Arguments, callCtx)
 	default:
 		return s.resultResponse(request.ID, toolErrorResult("NOT_FOUND", "Unknown tool."))
 	}
+}
+
+func (s *Server) callSkillGet(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.Skill == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Skill tools are not configured."))
+	}
+	args, err := decodeSkillGetArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.Skill.Get(ctx, callCtx, compatskill.GetInput{SkillID: args.SkillID, IncludeContent: false})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, skillGetResult(result))
 }
 
 func (s *Server) callSkillList(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
@@ -106,6 +146,22 @@ func decodeSkillListArguments(raw json.RawMessage) (skillListArguments, error) {
 	}
 	if decoder.More() {
 		return skillListArguments{}, fmt.Errorf("multiple JSON values")
+	}
+	return args, nil
+}
+
+func decodeSkillGetArguments(raw json.RawMessage) (skillGetArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return skillGetArguments{}, fmt.Errorf("skill_id is required")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var args skillGetArguments
+	if err := decoder.Decode(&args); err != nil {
+		return skillGetArguments{}, fmt.Errorf("decode skill get arguments: %w", err)
+	}
+	if strings.TrimSpace(args.SkillID) == "" {
+		return skillGetArguments{}, fmt.Errorf("skill_id is required")
 	}
 	return args, nil
 }

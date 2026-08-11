@@ -63,6 +63,19 @@ func skillListResult(result compatskill.ListResult) toolResult {
 	return toolResult{Content: []textContent{{Type: "text", Text: text}}, StructuredContent: structured}
 }
 
+func skillGetResult(result compatskill.GetResult) toolResult {
+	item := skillSummary{
+		ID: result.Skill.ID, Name: result.Skill.Name, Description: result.Skill.Description, Category: result.Skill.Category,
+		Tags: append([]string(nil), result.Skill.Tags...), HeadRevisionID: result.Skill.HeadRevisionID,
+		AutoEvo: result.Skill.AutoEvo, Enabled: result.Skill.Enabled,
+		Draft: draftSummary{HasUncommittedDraft: result.Skill.Draft.HasUncommittedDraft, TaskID: result.Skill.Draft.TaskID, Version: result.Skill.Draft.Version},
+	}
+	return toolResult{
+		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Skill %q metadata.", item.Name)}},
+		StructuredContent: map[string]any{"skill": item},
+	}
+}
+
 func toolErrorResult(code, message string) toolResult {
 	return toolResult{
 		Content:           []textContent{{Type: "text", Text: message}},
