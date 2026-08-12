@@ -11,6 +11,9 @@ import (
 	skillservice "lazymind/core/skillv2/service"
 )
 
+// NewSkillRuntime constructs the application-owned Compat Runtime. The name is
+// retained for compatibility with the existing bootstrap call site; the runtime
+// now also owns the Knowledge Catalog facade when its dependencies are present.
 func NewSkillRuntime(db *gorm.DB, objectRoot string) (*compatruntime.Runtime, error) {
 	skillService := skillservice.NewSkillService(skillservice.SkillServiceDeps{
 		DB:        db,
@@ -20,5 +23,12 @@ func NewSkillRuntime(db *gorm.DB, objectRoot string) (*compatruntime.Runtime, er
 	if err != nil {
 		return nil, err
 	}
-	return compatruntime.New(compatruntime.Dependencies{SkillPort: skillAdapter})
+	knowledgeAdapter, err := adaptercore.NewKnowledgeCatalogAdapterForDB(db)
+	if err != nil {
+		return nil, err
+	}
+	return compatruntime.New(compatruntime.Dependencies{
+		SkillPort:        skillAdapter,
+		KnowledgeCatalog: knowledgeAdapter,
+	})
 }

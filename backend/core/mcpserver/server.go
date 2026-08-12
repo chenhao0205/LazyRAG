@@ -57,6 +57,12 @@ func New(rt *runtime.Runtime, identity IdentityProvider, options Options) (*Serv
 	if err := registry.Register(skillGetTool()); err != nil {
 		return nil, err
 	}
+	if err := registry.Register(knowledgeListTool()); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(knowledgeGetTool()); err != nil {
+		return nil, err
+	}
 	name := strings.TrimSpace(options.ServerName)
 	if name == "" {
 		name = "lazymind"

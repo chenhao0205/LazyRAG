@@ -12,6 +12,7 @@ import (
 type Principal struct {
 	UserID   string
 	UserName string
+	TenantID string
 }
 
 // IdentityProvider resolves an already authenticated request to a Principal.
@@ -31,6 +32,7 @@ func (HeaderIdentityProvider) Principal(_ context.Context, request *http.Request
 	principal := Principal{
 		UserID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
 		UserName: strings.TrimSpace(request.Header.Get("X-User-Name")),
+		TenantID: strings.TrimSpace(request.Header.Get("X-Tenant-Id")),
 	}
 	if principal.UserID == "" {
 		return Principal{}, fmt.Errorf("authenticated principal is required")
@@ -46,6 +48,7 @@ func callContext(principal Principal, requestID string) (contract.CallContext, e
 	return contract.CallContext{
 		UserID:    userID,
 		UserName:  strings.TrimSpace(principal.UserName),
+		TenantID:  strings.TrimSpace(principal.TenantID),
 		RequestID: strings.TrimSpace(requestID),
 	}, nil
 }

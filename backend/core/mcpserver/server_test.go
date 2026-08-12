@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"lazymind/core/compat/contract"
+	compatknowledge "lazymind/core/compat/knowledge"
 	compatruntime "lazymind/core/compat/runtime"
 	compatskill "lazymind/core/compat/skill"
 )
@@ -23,6 +25,27 @@ type fakeSkillPort struct {
 	input      compatskill.ListInput
 	getCallCtx contract.CallContext
 	getSkillID string
+}
+
+type fakeKnowledgeCatalogPort struct {
+	listResult  compatknowledge.ListResult
+	listErr     error
+	getResult   compatknowledge.GetResult
+	getErr      error
+	listCallCtx contract.CallContext
+	listInput   compatknowledge.ListInput
+	getCallCtx  contract.CallContext
+	getInput    compatknowledge.GetInput
+}
+
+func (p *fakeKnowledgeCatalogPort) List(_ context.Context, callCtx contract.CallContext, input compatknowledge.ListInput) (compatknowledge.ListResult, error) {
+	p.listCallCtx, p.listInput = callCtx, input
+	return p.listResult, p.listErr
+}
+
+func (p *fakeKnowledgeCatalogPort) Get(_ context.Context, callCtx contract.CallContext, input compatknowledge.GetInput) (compatknowledge.GetResult, error) {
+	p.getCallCtx, p.getInput = callCtx, input
+	return p.getResult, p.getErr
 }
 
 func (p *fakeSkillPort) List(_ context.Context, callCtx contract.CallContext, input compatskill.ListInput) (compatskill.ListResult, error) {
@@ -40,8 +63,12 @@ func (p *fakeSkillPort) ReadContent(context.Context, contract.CallContext, strin
 }
 
 func testServer(t *testing.T, port *fakeSkillPort) *Server {
+	return testServerWithKnowledge(t, port, &fakeKnowledgeCatalogPort{})
+}
+
+func testServerWithKnowledge(t *testing.T, port *fakeSkillPort, catalog *fakeKnowledgeCatalogPort) *Server {
 	t.Helper()
-	rt, err := compatruntime.New(compatruntime.Dependencies{SkillPort: port})
+	rt, err := compatruntime.New(compatruntime.Dependencies{SkillPort: port, KnowledgeCatalog: catalog})
 	if err != nil {
 		t.Fatalf("Runtime.New: %v", err)
 	}
@@ -72,10 +99,10 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	if len(tools) != 2 || tools[0].Name != skillGetToolName || tools[1].Name != skillListToolName {
+	if len(tools) != 4 || tools[0].Name != knowledgeGetToolName || tools[1].Name != knowledgeListToolName || tools[2].Name != skillGetToolName || tools[3].Name != skillListToolName {
 		t.Fatalf("tools = %#v", tools)
 	}
-	listTool := tools[1]
+	listTool := tools[3]
 	if listTool.Description == "" || !listTool.ReadOnly || !listTool.Annotations.ReadOnlyHint {
 		t.Fatalf("tool metadata = %#v", listTool)
 	}
@@ -93,12 +120,42 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	if listTool.InputSchema["additionalProperties"] != false {
 		t.Fatalf("additionalProperties must be false")
 	}
-	getSchema := tools[0].InputSchema
-	if getSchema["additionalProperties"] != false || !tools[0].Annotations.ReadOnlyHint {
+	getSchema := tools[2].InputSchema
+	if getSchema["additionalProperties"] != false || !tools[2].Annotations.ReadOnlyHint {
 		t.Fatalf("skill get schema = %#v", getSchema)
 	}
 	if _, ok := getSchema["properties"].(map[string]any)["skill_id"]; !ok {
 		t.Fatalf("skill get schema missing skill_id: %#v", getSchema)
+	}
+}
+
+func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) {
+	server := testServer(t, &fakeSkillPort{})
+	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
+	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
+	for _, tool := range tools[:2] {
+		if !tool.Annotations.ReadOnlyHint || tool.InputSchema["additionalProperties"] != false {
+			t.Fatalf("knowledge tool metadata = %#v", tool)
+		}
+		properties := tool.InputSchema["properties"].(map[string]any)
+		for _, forbidden := range []string{"user_id", "user_name", "tenant_id"} {
+			if _, ok := properties[forbidden]; ok {
+				t.Fatalf("schema exposes %q", forbidden)
+			}
+		}
+	}
+	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["keyword"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", tools[1].InputSchema)
+	}
+	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["tags"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", tools[1].InputSchema)
+	}
+	if _, ok := tools[0].InputSchema["properties"].(map[string]any)["knowledge_id"]; !ok {
+		t.Fatalf("knowledge get schema = %#v", tools[0].InputSchema)
+	}
+	raw, err := json.Marshal(response.Result)
+	if err != nil || !strings.Contains(string(raw), `"annotations":{"readOnlyHint":true}`) {
+		t.Fatalf("tools/list wire annotations = %s, err=%v", raw, err)
 	}
 }
 
@@ -199,12 +256,94 @@ func TestToolsCallSkillGetMapsNotFoundAndInvalid(t *testing.T) {
 	}
 }
 
+func TestToolsCallKnowledgeListUsesPrincipalAndTenantNotArguments(t *testing.T) {
+	total := int64(1)
+	catalog := &fakeKnowledgeCatalogPort{listResult: compatknowledge.ListResult{
+		Items: []compatknowledge.Summary{{ID: "knowledge-1", Name: "Catalog", Tags: []string{"go"}, DocumentCount: 2}},
+		Page:  contract.PageResult{NextPageToken: "offset:1", Total: &total},
+	}}
+	server := testServerWithKnowledge(t, &fakeSkillPort{}, catalog)
+	bad := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_knowledge_list","arguments":{"user_id":"attacker"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	if !bad.Result.(map[string]any)["isError"].(bool) {
+		t.Fatalf("identity override accepted: %#v", bad.Result)
+	}
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_knowledge_list","arguments":{"keyword":" catalog ","tags":["go"],"page_size":5,"page_token":"offset:5"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true {
+		t.Fatalf("tools/call error: %#v", result)
+	}
+	if catalog.listCallCtx.UserID != "trusted-user" || catalog.listCallCtx.TenantID != "tenant-a" || catalog.listInput.Keyword != "catalog" || len(catalog.listInput.Tags) != 1 || catalog.listInput.Tags[0] != "go" || catalog.listInput.Page.PageSize != 5 || catalog.listInput.Page.PageToken != "offset:5" {
+		t.Fatalf("callCtx=%#v input=%#v", catalog.listCallCtx, catalog.listInput)
+	}
+	raw, err := json.Marshal(result["structuredContent"])
+	if err != nil || !strings.Contains(string(raw), `"knowledge-1"`) || !strings.Contains(string(raw), `"next_page_token":"offset:1"`) {
+		t.Fatalf("structured result=%s err=%v", raw, err)
+	}
+	catalog.listErr = contract.NewError(contract.BackendUnavailable, "knowledge.list", "database /private/path", true, errors.New("postgres secret"))
+	safe := callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_knowledge_list","arguments":{}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safeRaw, _ := json.Marshal(safe.Result)
+	if !strings.Contains(string(safeRaw), "BACKEND_UNAVAILABLE") || strings.Contains(string(safeRaw), "secret") || strings.Contains(string(safeRaw), "private") {
+		t.Fatalf("unsafe list error=%s", safeRaw)
+	}
+}
+
+func TestToolsCallKnowledgeGetSafeMetadataAndErrors(t *testing.T) {
+	catalog := &fakeKnowledgeCatalogPort{getResult: compatknowledge.GetResult{Knowledge: compatknowledge.Summary{ID: "knowledge-1", Name: "Catalog", DocumentCount: 3}}}
+	server := testServerWithKnowledge(t, &fakeSkillPort{}, catalog)
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_knowledge_get","arguments":{"knowledge_id":"knowledge-1"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || catalog.getCallCtx.UserID != "trusted-user" || catalog.getCallCtx.TenantID != "tenant-a" || catalog.getInput.KnowledgeID != "knowledge-1" {
+		t.Fatalf("result=%#v callCtx=%#v input=%#v", result, catalog.getCallCtx, catalog.getInput)
+	}
+	raw, err := json.Marshal(result["structuredContent"])
+	if err != nil || !strings.Contains(string(raw), `"knowledge-1"`) || strings.Contains(string(raw), "content") {
+		t.Fatalf("unsafe structured result=%s err=%v", raw, err)
+	}
+	invalid := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_knowledge_get","arguments":{"knowledge_id":"knowledge-1","tenant_id":"attacker"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	if !invalid.Result.(map[string]any)["isError"].(bool) {
+		t.Fatalf("tenant override accepted: %#v", invalid.Result)
+	}
+	empty := callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_knowledge_get","arguments":{}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	if !empty.Result.(map[string]any)["isError"].(bool) {
+		t.Fatalf("empty knowledge id accepted: %#v", empty.Result)
+	}
+
+	catalog.getErr = contract.NewError(contract.NotFound, "knowledge.get", "sql details", false, errors.New("postgres secret"))
+	notFound := callHTTP(t, server, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lazymind_knowledge_get","arguments":{"knowledge_id":"missing"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safe, _ := json.Marshal(notFound.Result)
+	if !strings.Contains(string(safe), "NOT_FOUND") || strings.Contains(string(safe), "secret") || strings.Contains(string(safe), "sql details") {
+		t.Fatalf("unsafe error=%s", safe)
+	}
+}
+
+func TestKnowledgeToolsRequirePrincipal(t *testing.T) {
+	server := testServer(t, &fakeSkillPort{})
+	for _, name := range []string{knowledgeListToolName, knowledgeGetToolName} {
+		t.Run(name, func(t *testing.T) {
+			response := callHTTP(t, server, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{}}}`, name), nil)
+			result := response.Result.(map[string]any)
+			if result["isError"] != true {
+				t.Fatalf("missing principal result=%#v", result)
+			}
+		})
+	}
+}
+
+func TestKnowledgeListResultIsStructuredAndStableForEmptyList(t *testing.T) {
+	total := int64(0)
+	result := knowledgeListResult(compatknowledge.ListResult{Page: contract.PageResult{Total: &total}})
+	structured, ok := result.StructuredContent.(knowledgeListStructuredResult)
+	if result.IsError || !ok || structured.Items == nil || len(structured.Items) != 0 || structured.Page.Total == nil || *structured.Page.Total != 0 {
+		t.Fatalf("structured result=%#v", result)
+	}
+}
+
 func TestCallContextRequiresPrincipal(t *testing.T) {
 	if _, err := callContext(Principal{}, "request"); err == nil {
 		t.Fatal("empty principal was accepted")
 	}
-	ctx, err := callContext(Principal{UserID: " user ", UserName: " name "}, " request ")
-	if err != nil || ctx.UserID != "user" || ctx.UserName != "name" || ctx.RequestID != "request" {
+	ctx, err := callContext(Principal{UserID: " user ", UserName: " name ", TenantID: " tenant "}, " request ")
+	if err != nil || ctx.UserID != "user" || ctx.UserName != "name" || ctx.TenantID != "tenant" || ctx.RequestID != "request" {
 		t.Fatalf("CallContext = %#v, err=%v", ctx, err)
 	}
 }
