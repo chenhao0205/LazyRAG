@@ -4,8 +4,12 @@
 package bootstrap
 
 import (
+	"os"
+	"strings"
+
 	"gorm.io/gorm"
 
+	"lazymind/core/common"
 	adaptercore "lazymind/core/compat/internal/adapters/core"
 	compatruntime "lazymind/core/compat/runtime"
 	skillservice "lazymind/core/skillv2/service"
@@ -27,8 +31,19 @@ func NewSkillRuntime(db *gorm.DB, objectRoot string) (*compatruntime.Runtime, er
 	if err != nil {
 		return nil, err
 	}
-	return compatruntime.New(compatruntime.Dependencies{
+	deps := compatruntime.Dependencies{
 		SkillPort:        skillAdapter,
 		KnowledgeCatalog: knowledgeAdapter,
-	})
+	}
+	// Search requires an internal service credential. Leave its facade port
+	// unconfigured until application wiring supplies one, rather than making
+	// all Core startup depend on an optional search backend.
+	if strings.TrimSpace(os.Getenv("LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN")) != "" {
+		searchAdapter, err := adaptercore.NewKnowledgeSearchAdapterForDB(db, common.ChatServiceEndpoint())
+		if err != nil {
+			return nil, err
+		}
+		deps.KnowledgeSearch = searchAdapter
+	}
+	return compatruntime.New(deps)
 }

@@ -62,6 +62,20 @@ type knowledgeSummary struct {
 	DocumentCount     int64     `json:"document_count"`
 }
 
+type knowledgeSearchStructuredResult struct {
+	Hits []knowledgeSearchHit `json:"hits"`
+}
+
+type knowledgeSearchHit struct {
+	KnowledgeID string  `json:"knowledge_id"`
+	DocumentID  string  `json:"document_id"`
+	ChunkID     string  `json:"chunk_id"`
+	Text        string  `json:"text"`
+	Score       float64 `json:"score"`
+	SourceURL   string  `json:"source_url,omitempty"`
+	Title       string  `json:"title,omitempty"`
+}
+
 func skillListResult(result compatskill.ListResult) toolResult {
 	items := make([]skillSummary, 0, len(result.Items))
 	for _, item := range result.Items {
@@ -118,6 +132,20 @@ func knowledgeGetResult(result compatknowledge.GetResult) toolResult {
 	return toolResult{
 		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Knowledge catalog %q metadata.", item.Name)}},
 		StructuredContent: map[string]any{"knowledge": item},
+	}
+}
+
+func knowledgeSearchResult(result compatknowledge.SearchResult) toolResult {
+	hits := make([]knowledgeSearchHit, 0, len(result.Hits))
+	for _, hit := range result.Hits {
+		hits = append(hits, knowledgeSearchHit{
+			KnowledgeID: hit.KnowledgeID, DocumentID: hit.DocumentID, ChunkID: hit.ChunkID,
+			Text: hit.Text, Score: hit.Score, SourceURL: hit.SourceURL, Title: hit.Title,
+		})
+	}
+	return toolResult{
+		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Found %d knowledge search hit(s).", len(hits))}},
+		StructuredContent: knowledgeSearchStructuredResult{Hits: hits},
 	}
 }
 

@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	skillListToolName     = "lazymind_skill_list"
-	skillGetToolName      = "lazymind_skill_get"
-	knowledgeListToolName = "lazymind_knowledge_list"
-	knowledgeGetToolName  = "lazymind_knowledge_get"
+	skillListToolName       = "lazymind_skill_list"
+	skillGetToolName        = "lazymind_skill_get"
+	knowledgeListToolName   = "lazymind_knowledge_list"
+	knowledgeGetToolName    = "lazymind_knowledge_get"
+	knowledgeSearchToolName = "lazymind_knowledge_search"
 )
 
 type toolCallParams struct {
@@ -45,6 +46,12 @@ type knowledgeListArguments struct {
 
 type knowledgeGetArguments struct {
 	KnowledgeID string `json:"knowledge_id"`
+}
+
+type knowledgeSearchArguments struct {
+	Query        string   `json:"query"`
+	KnowledgeIDs []string `json:"knowledge_ids"`
+	TopK         int      `json:"top_k"`
 }
 
 func skillListTool() ToolDefinition {
@@ -120,6 +127,25 @@ func knowledgeGetTool() ToolDefinition {
 	}
 }
 
+func knowledgeSearchTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        knowledgeSearchToolName,
+		Description: "Search the authenticated user's specified LazyMind knowledge catalogs and return mapped document chunks.",
+		ReadOnly:    true,
+		Annotations: ToolAnnotations{ReadOnlyHint: true},
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query":         map[string]any{"type": "string", "description": "Search query."},
+				"knowledge_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "One or more stable LazyMind knowledge catalog IDs."},
+				"top_k":         map[string]any{"type": "integer", "minimum": 1, "maximum": compatknowledge.MaxSearchTopK, "description": "Maximum result count."},
+			},
+			"required":             []string{"query", "knowledge_ids"},
+			"additionalProperties": false,
+		},
+	}
+}
+
 func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 	var params toolCallParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -150,9 +176,30 @@ func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 		return s.callKnowledgeList(ctx, request.ID, params.Arguments, callCtx)
 	case knowledgeGetToolName:
 		return s.callKnowledgeGet(ctx, request.ID, params.Arguments, callCtx)
+	case knowledgeSearchToolName:
+		return s.callKnowledgeSearch(ctx, request.ID, params.Arguments, callCtx)
 	default:
 		return s.resultResponse(request.ID, toolErrorResult("NOT_FOUND", "Unknown tool."))
 	}
+}
+
+func (s *Server) callKnowledgeSearch(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.Knowledge == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Knowledge tools are not configured."))
+	}
+	args, err := decodeKnowledgeSearchArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.Knowledge.Search(ctx, callCtx, compatknowledge.SearchInput{
+		Query:        args.Query,
+		KnowledgeIDs: args.KnowledgeIDs,
+		TopK:         args.TopK,
+	})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, knowledgeSearchResult(result))
 }
 
 func (s *Server) callKnowledgeList(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
@@ -284,6 +331,22 @@ func decodeKnowledgeGetArguments(raw json.RawMessage) (knowledgeGetArguments, er
 	}
 	if strings.TrimSpace(args.KnowledgeID) == "" {
 		return knowledgeGetArguments{}, fmt.Errorf("knowledge_id is required")
+	}
+	return args, nil
+}
+
+func decodeKnowledgeSearchArguments(raw json.RawMessage) (knowledgeSearchArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return knowledgeSearchArguments{}, fmt.Errorf("query and knowledge_ids are required")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var args knowledgeSearchArguments
+	if err := decoder.Decode(&args); err != nil {
+		return knowledgeSearchArguments{}, fmt.Errorf("decode knowledge search arguments: %w", err)
+	}
+	if strings.TrimSpace(args.Query) == "" || len(args.KnowledgeIDs) == 0 {
+		return knowledgeSearchArguments{}, fmt.Errorf("query and knowledge_ids are required")
 	}
 	return args, nil
 }
