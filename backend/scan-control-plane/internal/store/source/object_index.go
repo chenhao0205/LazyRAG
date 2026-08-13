@@ -104,7 +104,7 @@ func (r *SQLRepository) ListObjects(ctx context.Context, req ObjectListRequest) 
 
 func (r *SQLRepository) SearchObjects(ctx context.Context, req ObjectSearchRequest) ([]ObjectWithState, string, bool, error) {
 	limit := normalizeSQLPageSize(req.PageSize) + 1
-	rows, err := objectWithStateBaseQuery(r.ormDB(ctx)).
+	db := objectWithStateBaseQuery(r.ormDB(ctx)).
 		Where("o.source_id = ?", req.SourceID).
 		Where("? = '' OR o.binding_id = ?", req.BindingID, req.BindingID).
 		Where("? = '' OR o.tree_key = ?", req.TreeKey, req.TreeKey).
@@ -113,7 +113,17 @@ func (r *SQLRepository) SearchObjects(ctx context.Context, req ObjectSearchReque
 		Where("NOT o.is_document OR COALESCE(s.document_list_visible, TRUE)").
 		Where("LOWER(o.search_name || ' ' || o.display_name) LIKE LOWER(?)", "%"+req.Keyword+"%").
 		Where("o.object_key > ?", req.Cursor).
-		Scopes(applyObjectStateFilter(req.StateFilter)).
+		Scopes(applyObjectStateFilter(req.StateFilter))
+	if connectorTypes := normalizeSourceListConnectorTypes(req.ConnectorTypes); len(connectorTypes) > 0 {
+		db = db.Where(`EXISTS (
+			SELECT 1 FROM source_bindings sb_filter
+			WHERE sb_filter.source_id = o.source_id
+			  AND sb_filter.binding_id = o.binding_id
+			  AND sb_filter.status <> ?
+			  AND sb_filter.connector_type IN ?
+		)`, "DELETING", connectorTypes)
+	}
+	rows, err := db.
 		Order("o.display_name, o.object_key").
 		Limit(limit).
 		Rows()

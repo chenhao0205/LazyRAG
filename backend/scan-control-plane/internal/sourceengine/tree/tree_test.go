@@ -2,6 +2,7 @@ package tree
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -824,6 +825,20 @@ func TestTreeSearchRejectsUnsupportedListMode(t *testing.T) {
 		MaxItems: 10,
 	})
 	assertTreeErrorCode(t, err, ErrCodeUnsupportedListMode)
+}
+
+func TestSourceTreeSearchPreservesConnectorTypesForStoreScope(t *testing.T) {
+	t.Parallel()
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{})
+	_, err := engine.Search(context.Background(), SourceTreeSearchRequest{SourceID: "source-1", Keyword: "hand", ConnectorTypes: []string{"feishu", "notion"}})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !reflect.DeepEqual(repo.lastSearch.ConnectorTypes, []string{"feishu", "notion"}) {
+		t.Fatalf("connector types=%#v", repo.lastSearch.ConnectorTypes)
+	}
 }
 
 func TestTargetTreeNodeUsesBindingTargetSemantics(t *testing.T) {

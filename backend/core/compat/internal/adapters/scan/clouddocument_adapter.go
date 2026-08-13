@@ -91,14 +91,8 @@ func (a *CloudDocumentAdapter) ListSources(ctx context.Context, callCtx contract
 
 func (a *CloudDocumentAdapter) GetSource(ctx context.Context, callCtx contract.CallContext, sourceID string) (clouddocument.SourceDetail, error) {
 	const operation = "cloud_document.get"
-	endpoint := a.endpoint("/api/scan/sources/" + url.PathEscape(sourceID))
-	query := endpoint.Query()
-	query.Set("include_bindings", "false")
-	query.Set("include_summary", "true")
-	endpoint.RawQuery = query.Encode()
-
-	var resp scanGetSourceResponse
-	if err := a.doJSON(ctx, callCtx, operation, http.MethodGet, endpoint, nil, &resp); err != nil {
+	resp, err := a.getCloudSource(ctx, callCtx, operation, sourceID)
+	if err != nil {
 		return clouddocument.SourceDetail{}, err
 	}
 	return mapSourceDetail(resp), nil
@@ -139,6 +133,13 @@ func (a *CloudDocumentAdapter) ListDocuments(ctx context.Context, callCtx contra
 
 func (a *CloudDocumentAdapter) Search(ctx context.Context, callCtx contract.CallContext, input clouddocument.SearchInput) (clouddocument.SearchResult, error) {
 	const operation = "cloud_document.search"
+	source, err := a.getCloudSource(ctx, callCtx, operation, input.SourceID)
+	if err != nil {
+		return clouddocument.SearchResult{}, err
+	}
+	if input.BindingID != "" && !source.hasCloudBinding(input.BindingID) {
+		return clouddocument.SearchResult{}, cloudSourceNotFound(operation)
+	}
 	page := input.Page.Normalize()
 	endpoint := a.endpoint("/api/scan/sources/" + url.PathEscape(input.SourceID) + "/tree/search")
 	refreshState := false
@@ -153,6 +154,7 @@ func (a *CloudDocumentAdapter) Search(ctx context.Context, callCtx contract.Call
 		ListMode:          "page",
 		PageSize:          page.PageSize,
 		Cursor:            page.PageToken,
+		ConnectorTypes:    cloudDocumentConnectorTypes(),
 	}
 	if input.IncludeDocuments || input.IncludeContainers {
 		body.IncludeDocuments = input.IncludeDocuments
@@ -170,6 +172,48 @@ func (a *CloudDocumentAdapter) Search(ctx context.Context, callCtx contract.Call
 		Hits: hits,
 		Page: contract.PageResult{NextPageToken: resp.NextCursor},
 	}, nil
+}
+
+func (a *CloudDocumentAdapter) getCloudSource(ctx context.Context, callCtx contract.CallContext, operation, sourceID string) (scanGetSourceResponse, error) {
+	endpoint := a.endpoint("/api/scan/sources/" + url.PathEscape(sourceID))
+	query := endpoint.Query()
+	query.Set("include_bindings", "true")
+	query.Set("include_summary", "true")
+	endpoint.RawQuery = query.Encode()
+	var resp scanGetSourceResponse
+	if err := a.doJSON(ctx, callCtx, operation, http.MethodGet, endpoint, nil, &resp); err != nil {
+		return scanGetSourceResponse{}, err
+	}
+	if !resp.hasCloudBinding("") {
+		return scanGetSourceResponse{}, cloudSourceNotFound(operation)
+	}
+	return resp, nil
+}
+
+func (r scanGetSourceResponse) hasCloudBinding(bindingID string) bool {
+	for _, binding := range r.Bindings {
+		if bindingID != "" && binding.BindingID != bindingID {
+			continue
+		}
+		if isCloudDocumentConnector(binding.ConnectorType) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloudDocumentConnectorTypes() []string { return []string{"feishu", "notion"} }
+
+func isCloudDocumentConnector(connectorType string) bool {
+	switch strings.ToLower(strings.TrimSpace(connectorType)) {
+	case "feishu", "notion":
+		return true
+	}
+	return false
+}
+
+func cloudSourceNotFound(operation string) error {
+	return contract.NewError(contract.NotFound, operation, "cloud source not found", false, nil)
 }
 
 func (a *CloudDocumentAdapter) endpoint(path string) *url.URL {
@@ -418,8 +462,14 @@ type scanAuthConnectionStatus struct {
 }
 
 type scanGetSourceResponse struct {
-	Source  scanSource     `json:"source"`
-	Summary map[string]any `json:"summary,omitempty"`
+	Source   scanSource          `json:"source"`
+	Bindings []scanSourceBinding `json:"bindings,omitempty"`
+	Summary  map[string]any      `json:"summary,omitempty"`
+}
+
+type scanSourceBinding struct {
+	BindingID     string `json:"binding_id"`
+	ConnectorType string `json:"connector_type"`
 }
 
 type scanSource struct {
@@ -467,6 +517,7 @@ type scanSearchSourceTreeRequest struct {
 	ListMode          string   `json:"list_mode,omitempty"`
 	PageSize          int      `json:"page_size,omitempty"`
 	Cursor            string   `json:"cursor,omitempty"`
+	ConnectorTypes    []string `json:"connector_types,omitempty"`
 }
 
 type scanTreeNodePage struct {

@@ -90,6 +90,7 @@ type ObjectSearchRequest struct {
 	StateFilter       []string
 	PageSize          int
 	Cursor            string
+	ConnectorTypes    []string
 }
 
 type ObjectWithState struct {

@@ -34,6 +34,7 @@ func (e *DBSourceTreeQueryEngine) Search(ctx context.Context, req SourceTreeSear
 		IncludeDocuments:  req.IncludeDocuments,
 		IncludeContainers: req.IncludeContainers,
 		StateFilter:       req.StateFilter,
+		ConnectorTypes:    req.ConnectorTypes,
 		PageSize:          pageSize,
 		Cursor:            req.Cursor,
 	})

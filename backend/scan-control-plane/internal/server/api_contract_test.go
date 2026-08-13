@@ -540,7 +540,7 @@ func TestTreeSearchHandlersAcceptPageListMode(t *testing.T) {
 		t.Fatalf("target search request was not decoded with list_mode/page_size: %+v", targetTree.lastSearch)
 	}
 
-	sourceReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/search", strings.NewReader(`{"binding_id":"binding-1","tree_key":"tree-root","keyword":"hand","include_documents":true,"include_containers":true,"list_mode":"page","page_size":50}`))
+	sourceReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/search", strings.NewReader(`{"binding_id":"binding-1","tree_key":"tree-root","keyword":"hand","include_documents":true,"include_containers":true,"list_mode":"page","page_size":50,"connector_types":["feishu","notion"]}`))
 	setAPIContractActor(sourceReq)
 	sourceResp := httptest.NewRecorder()
 	handler.ServeHTTP(sourceResp, sourceReq)
@@ -550,6 +550,9 @@ func TestTreeSearchHandlersAcceptPageListMode(t *testing.T) {
 	}
 	if sourceTree.searchCalls != 1 || sourceTree.lastSearch.ListMode != tree.ListModePage || sourceTree.lastSearch.PageSize != 50 {
 		t.Fatalf("source search request was not decoded with list_mode/page_size: %+v", sourceTree.lastSearch)
+	}
+	if !reflect.DeepEqual(sourceTree.lastSearch.ConnectorTypes, []string{"feishu", "notion"}) {
+		t.Fatalf("source search connector types = %#v", sourceTree.lastSearch.ConnectorTypes)
 	}
 }
 

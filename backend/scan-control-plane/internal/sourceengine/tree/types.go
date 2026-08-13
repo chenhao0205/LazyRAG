@@ -127,6 +127,7 @@ type SourceTreeSearchRequest struct {
 	ListMode          string   `json:"list_mode,omitempty"`
 	PageSize          int      `json:"page_size,omitempty"`
 	Cursor            string   `json:"cursor,omitempty"`
+	ConnectorTypes    []string `json:"connector_types,omitempty"`
 	MaxItems          int      `json:"max_items,omitempty"`
 }
 

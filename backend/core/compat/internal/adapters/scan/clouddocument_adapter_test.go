@@ -95,6 +95,7 @@ func TestCloudDocumentAdapterGetSourceRequestAndMapping(t *testing.T) {
 			},
 			"bindings": []map[string]any{{
 				"binding_id":         "binding-1",
+				"connector_type":     "feishu",
 				"auth_connection_id": "conn-secret",
 				"provider_options":   map[string]any{"refresh_token": "source-secret"},
 			}},
@@ -110,7 +111,7 @@ func TestCloudDocumentAdapterGetSourceRequestAndMapping(t *testing.T) {
 	if gotMethod != http.MethodGet || gotPath != "/api/scan/sources/source-1" {
 		t.Fatalf("request = %s %s, want GET source", gotMethod, gotPath)
 	}
-	for _, want := range []string{"include_bindings=false", "include_summary=true"} {
+	for _, want := range []string{"include_bindings=true", "include_summary=true"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("query = %q, want contains %s", gotQuery, want)
 		}
@@ -249,6 +250,13 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 	var gotMethod, gotPath, gotUserID string
 	var gotBody scanSearchSourceTreeRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeTestJSON(t, w, map[string]any{
+				"source":   map[string]any{"source_id": "source-1", "name": "Docs", "dataset_id": "dataset-1"},
+				"bindings": []map[string]any{{"binding_id": "binding-1", "connector_type": "feishu"}},
+			})
+			return
+		}
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotUserID = r.Header.Get("X-User-ID")
@@ -311,6 +319,9 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 	if gotBody.Keyword != "spec" || gotBody.BindingID != "binding-1" || gotBody.TreeKey != "tree-1" || gotBody.ListMode != "page" || gotBody.PageSize != 50 || gotBody.Cursor != "obj-0" {
 		t.Fatalf("body = %#v, want scan search fields", gotBody)
 	}
+	if !reflect.DeepEqual(gotBody.ConnectorTypes, []string{"feishu", "notion"}) {
+		t.Fatalf("connector types = %#v, want feishu/notion", gotBody.ConnectorTypes)
+	}
 	if gotBody.RefreshState == nil || *gotBody.RefreshState {
 		t.Fatalf("refresh_state = %#v, want false", gotBody.RefreshState)
 	}
@@ -327,6 +338,118 @@ func TestCloudDocumentAdapterSearchRequestAndMapping(t *testing.T) {
 	assertNoFields(t, reflect.TypeOf(hit), "ObjectType", "BindingID", "SourceState", "SyncState", "PendingAction", "ParseQueueState", "HasUpdate", "UpdateType")
 	assertNoSensitiveOutput(t, result)
 	assertNoBodySearchOutput(t, result)
+}
+
+func TestCloudDocumentAdapterRejectsAuthorizedNonCloudSources(t *testing.T) {
+	for _, operation := range []string{"get", "search"} {
+		t.Run(operation, func(t *testing.T) {
+			searchCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					searchCalls++
+					t.Fatal("tree search reached for non-Cloud source")
+				}
+				writeTestJSON(t, w, map[string]any{
+					"source":   map[string]any{"source_id": "local-source", "name": "Local", "dataset_id": "dataset-local"},
+					"bindings": []map[string]any{{"binding_id": "local-binding", "connector_type": "local_fs"}},
+				})
+			}))
+			defer server.Close()
+			adapter := mustAdapter(t, server.URL)
+			var err error
+			if operation == "get" {
+				_, err = adapter.GetSource(context.Background(), contract.CallContext{UserID: "allowed-user"}, "local-source")
+			} else {
+				_, err = adapter.Search(context.Background(), contract.CallContext{UserID: "allowed-user"}, clouddocument.SearchInput{SourceID: "local-source", Query: "local"})
+			}
+			if code, ok := contract.CodeOf(err); !ok || code != contract.NotFound {
+				t.Fatalf("error=%v code=%s ok=%v, want NOT_FOUND", err, code, ok)
+			}
+			if searchCalls != 0 {
+				t.Fatalf("search calls=%d", searchCalls)
+			}
+		})
+	}
+}
+
+func TestCloudDocumentAdapterSupportsFeishuAndNotionSources(t *testing.T) {
+	for _, connectorType := range []string{"feishu", "notion"} {
+		t.Run(connectorType, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					var body scanSearchSourceTreeRequest
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatalf("decode search=%v", err)
+					}
+					if !reflect.DeepEqual(body.ConnectorTypes, []string{"feishu", "notion"}) {
+						t.Fatalf("connector types=%#v", body.ConnectorTypes)
+					}
+					writeTestJSON(t, w, map[string]any{"items": []any{}})
+					return
+				}
+				writeTestJSON(t, w, map[string]any{
+					"source":   map[string]any{"source_id": connectorType + "-source", "name": "Cloud", "dataset_id": "dataset-1"},
+					"bindings": []map[string]any{{"binding_id": connectorType + "-binding", "connector_type": connectorType}},
+				})
+			}))
+			defer server.Close()
+			result, err := mustAdapter(t, server.URL).GetSource(context.Background(), contract.CallContext{UserID: "allowed-user"}, connectorType+"-source")
+			if err != nil || result.ID != connectorType+"-source" {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			search, err := mustAdapter(t, server.URL).Search(context.Background(), contract.CallContext{UserID: "allowed-user"}, clouddocument.SearchInput{SourceID: connectorType + "-source", Query: "guide"})
+			if err != nil || search.Hits == nil {
+				t.Fatalf("search=%#v err=%v", search, err)
+			}
+		})
+	}
+}
+
+func TestCloudDocumentAdapterMapsUnauthorizedGetAndSearchSafely(t *testing.T) {
+	for _, operation := range []string{"get", "search"} {
+		t.Run(operation, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"message":"scan token secret"}`))
+			}))
+			defer server.Close()
+			adapter := mustAdapter(t, server.URL)
+			var err error
+			if operation == "get" {
+				_, err = adapter.GetSource(context.Background(), contract.CallContext{UserID: "unauthorized-user"}, "source-1")
+			} else {
+				_, err = adapter.Search(context.Background(), contract.CallContext{UserID: "unauthorized-user"}, clouddocument.SearchInput{SourceID: "source-1", Query: "doc"})
+			}
+			if code, ok := contract.CodeOf(err); !ok || code != contract.Internal {
+				t.Fatalf("error=%v code=%s ok=%v", err, code, ok)
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "secret") {
+				t.Fatalf("unsafe error=%v", err)
+			}
+		})
+	}
+}
+
+func TestCloudDocumentAdapterSearchRejectsNonCloudBinding(t *testing.T) {
+	searchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			searchCalls++
+			t.Fatal("tree search reached for non-Cloud binding")
+		}
+		writeTestJSON(t, w, map[string]any{
+			"source":   map[string]any{"source_id": "mixed-source", "name": "Mixed", "dataset_id": "dataset-1"},
+			"bindings": []map[string]any{{"binding_id": "feishu-binding", "connector_type": "feishu"}, {"binding_id": "local-binding", "connector_type": "local_fs"}},
+		})
+	}))
+	defer server.Close()
+	_, err := mustAdapter(t, server.URL).Search(context.Background(), contract.CallContext{UserID: "allowed-user"}, clouddocument.SearchInput{SourceID: "mixed-source", Query: "doc", BindingID: "local-binding"})
+	if code, ok := contract.CodeOf(err); !ok || code != contract.NotFound {
+		t.Fatalf("error=%v code=%s ok=%v, want NOT_FOUND", err, code, ok)
+	}
+	if searchCalls != 0 {
+		t.Fatalf("search calls=%d", searchCalls)
+	}
 }
 
 func TestCloudDocumentAdapterMapsHTTPJSONAndPermissionErrorsSafely(t *testing.T) {
