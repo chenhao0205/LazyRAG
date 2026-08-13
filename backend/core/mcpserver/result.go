@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	compatcloud "lazymind/core/compat/clouddocument"
 	compatknowledge "lazymind/core/compat/knowledge"
 	compatskill "lazymind/core/compat/skill"
 )
@@ -12,6 +13,60 @@ type toolResult struct {
 	Content           []textContent `json:"content"`
 	StructuredContent any           `json:"structuredContent,omitempty"`
 	IsError           bool          `json:"isError,omitempty"`
+}
+
+type cloudDocumentListStructuredResult struct {
+	Sources []cloudDocumentSource `json:"sources"`
+	Page    skillListPage         `json:"page"`
+}
+type cloudDocumentSource struct {
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Status               string    `json:"status"`
+	DatasetID            string    `json:"dataset_id"`
+	BindingCount         int       `json:"binding_count"`
+	AuthConnectionStatus string    `json:"auth_connection_status"`
+	DocumentCount        *int64    `json:"document_count,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+type cloudDocumentMetadata struct {
+	ID                string                     `json:"id"`
+	SourceID          string                     `json:"source_id"`
+	ObjectKey         string                     `json:"object_key"`
+	DisplayName       string                     `json:"display_name"`
+	Name              string                     `json:"name"`
+	FileType          string                     `json:"file_type"`
+	SizeBytes         *int64                     `json:"size_bytes,omitempty"`
+	SourceModifiedAt  *time.Time                 `json:"source_modified_at,omitempty"`
+	LastSyncedAt      *time.Time                 `json:"last_synced_at,omitempty"`
+	KnowledgeDocument *cloudKnowledgeDocumentRef `json:"knowledge_document,omitempty"`
+}
+type cloudKnowledgeDocumentRef struct {
+	KnowledgeID string `json:"knowledge_id"`
+	DocumentID  string `json:"document_id"`
+}
+type cloudDocumentGetStructuredResult struct {
+	Source        cloudDocumentSource     `json:"source"`
+	Documents     []cloudDocumentMetadata `json:"documents,omitempty"`
+	DocumentsPage *skillListPage          `json:"documents_page,omitempty"`
+}
+type cloudDocumentSearchStructuredResult struct {
+	Hits []cloudDocumentSearchHit `json:"hits"`
+	Page skillListPage            `json:"page"`
+}
+type cloudDocumentSearchHit struct {
+	Key         string `json:"key"`
+	DisplayName string `json:"display_name"`
+	SearchName  string `json:"search_name"`
+	SourceID    string `json:"source_id"`
+	TreeKey     string `json:"tree_key"`
+	ObjectKey   string `json:"object_key"`
+	ParentKey   string `json:"parent_key"`
+	IsDocument  bool   `json:"is_document"`
+	IsContainer bool   `json:"is_container"`
+	HasChildren bool   `json:"has_children"`
+	Selectable  bool   `json:"selectable"`
 }
 
 type textContent struct {
@@ -184,6 +239,50 @@ func knowledgeDocumentGetResult(result compatknowledge.GetDocumentResult) toolRe
 		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Knowledge document %q metadata.", item.Name)}},
 		StructuredContent: map[string]any{"document": item},
 	}
+}
+
+func cloudSource(item compatcloud.SourceSummary) cloudDocumentSource {
+	return cloudDocumentSource{ID: item.ID, Name: item.Name, Status: item.Status, DatasetID: item.DatasetID, BindingCount: item.BindingCount, AuthConnectionStatus: item.AuthConnectionStatus, DocumentCount: item.DocumentCount, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
+}
+func cloudSourceDetail(item compatcloud.SourceDetail) cloudDocumentSource {
+	return cloudDocumentSource{ID: item.ID, Name: item.Name, Status: item.Status, DatasetID: item.DatasetID, DocumentCount: item.DocumentCount, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
+}
+func cloudDocument(item compatcloud.DocumentSummary) cloudDocumentMetadata {
+	out := cloudDocumentMetadata{ID: item.ID, SourceID: item.SourceID, ObjectKey: item.ObjectKey, DisplayName: item.DisplayName, Name: item.Name, FileType: item.FileType, SizeBytes: item.SizeBytes, SourceModifiedAt: item.SourceModifiedAt, LastSyncedAt: item.LastSyncedAt}
+	if item.KnowledgeDocument != nil {
+		out.KnowledgeDocument = &cloudKnowledgeDocumentRef{KnowledgeID: item.KnowledgeDocument.KnowledgeID, DocumentID: item.KnowledgeDocument.DocumentID}
+	}
+	return out
+}
+
+func cloudDocumentListResult(result compatcloud.ListResult) toolResult {
+	items := make([]cloudDocumentSource, 0, len(result.Sources))
+	for _, item := range result.Sources {
+		items = append(items, cloudSource(item))
+	}
+	text := fmt.Sprintf("Found %d Cloud source(s).", len(items))
+	if result.Page.Total != nil {
+		text = fmt.Sprintf("Found %d Cloud source(s) in this page (%d total).", len(items), *result.Page.Total)
+	}
+	return toolResult{Content: []textContent{{Type: "text", Text: text}}, StructuredContent: cloudDocumentListStructuredResult{Sources: items, Page: skillListPage{NextPageToken: result.Page.NextPageToken, Total: result.Page.Total}}}
+}
+func cloudDocumentGetResult(result compatcloud.GetResult) toolResult {
+	documents := make([]cloudDocumentMetadata, 0, len(result.Documents))
+	for _, item := range result.Documents {
+		documents = append(documents, cloudDocument(item))
+	}
+	structured := cloudDocumentGetStructuredResult{Source: cloudSourceDetail(result.Source), Documents: documents}
+	if result.DocumentsPage != nil {
+		structured.DocumentsPage = &skillListPage{NextPageToken: result.DocumentsPage.NextPageToken, Total: result.DocumentsPage.Total}
+	}
+	return toolResult{Content: []textContent{{Type: "text", Text: fmt.Sprintf("Cloud source %q metadata.", result.Source.Name)}}, StructuredContent: structured}
+}
+func cloudDocumentSearchResult(result compatcloud.SearchResult) toolResult {
+	hits := make([]cloudDocumentSearchHit, 0, len(result.Hits))
+	for _, hit := range result.Hits {
+		hits = append(hits, cloudDocumentSearchHit{Key: hit.Key, DisplayName: hit.DisplayName, SearchName: hit.SearchName, SourceID: hit.SourceID, TreeKey: hit.TreeKey, ObjectKey: hit.ObjectKey, ParentKey: hit.ParentKey, IsDocument: hit.IsDocument, IsContainer: hit.IsContainer, HasChildren: hit.HasChildren, Selectable: hit.Selectable})
+	}
+	return toolResult{Content: []textContent{{Type: "text", Text: fmt.Sprintf("Found %d Cloud metadata search hit(s).", len(hits))}}, StructuredContent: cloudDocumentSearchStructuredResult{Hits: hits, Page: skillListPage{NextPageToken: result.Page.NextPageToken, Total: result.Page.Total}}}
 }
 
 func toolErrorResult(code, message string) toolResult {

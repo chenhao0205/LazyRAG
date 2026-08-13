@@ -69,6 +69,15 @@ func New(rt *runtime.Runtime, identity IdentityProvider, options Options) (*Serv
 	if err := registry.Register(knowledgeSearchTool()); err != nil {
 		return nil, err
 	}
+	if err := registry.Register(cloudDocumentListTool()); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(cloudDocumentGetTool()); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(cloudDocumentSearchTool()); err != nil {
+		return nil, err
+	}
 	name := strings.TrimSpace(options.ServerName)
 	if name == "" {
 		name = "lazymind"

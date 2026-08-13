@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	compatcloud "lazymind/core/compat/clouddocument"
 	"lazymind/core/compat/contract"
 	compatknowledge "lazymind/core/compat/knowledge"
 	compatruntime "lazymind/core/compat/runtime"
@@ -50,6 +51,36 @@ type fakeKnowledgeDocumentPort struct {
 	err     error
 	callCtx contract.CallContext
 	input   compatknowledge.GetDocumentInput
+}
+
+type fakeCloudDocumentPort struct {
+	listResult                                              compatcloud.ListResult
+	getResult                                               compatcloud.SourceDetail
+	docResult                                               compatcloud.DocumentListResult
+	searchResult                                            compatcloud.SearchResult
+	listErr, getErr, docErr, searchErr                      error
+	listCallCtx, getCallCtx, documentCallCtx, searchCallCtx contract.CallContext
+	listInput                                               compatcloud.ListInput
+	getSourceID                                             string
+	documentInput                                           compatcloud.GetInput
+	searchInput                                             compatcloud.SearchInput
+}
+
+func (p *fakeCloudDocumentPort) ListSources(_ context.Context, callCtx contract.CallContext, input compatcloud.ListInput) (compatcloud.ListResult, error) {
+	p.listCallCtx, p.listInput = callCtx, input
+	return p.listResult, p.listErr
+}
+func (p *fakeCloudDocumentPort) GetSource(_ context.Context, callCtx contract.CallContext, sourceID string) (compatcloud.SourceDetail, error) {
+	p.getCallCtx, p.getSourceID = callCtx, sourceID
+	return p.getResult, p.getErr
+}
+func (p *fakeCloudDocumentPort) ListDocuments(_ context.Context, callCtx contract.CallContext, _ compatcloud.SourceDetail, input compatcloud.GetInput) (compatcloud.DocumentListResult, error) {
+	p.documentCallCtx, p.documentInput = callCtx, input
+	return p.docResult, p.docErr
+}
+func (p *fakeCloudDocumentPort) Search(_ context.Context, callCtx contract.CallContext, input compatcloud.SearchInput) (compatcloud.SearchResult, error) {
+	p.searchCallCtx, p.searchInput = callCtx, input
+	return p.searchResult, p.searchErr
 }
 
 func (p *fakeKnowledgeDocumentPort) GetDocument(_ context.Context, callCtx contract.CallContext, input compatknowledge.GetDocumentInput) (compatknowledge.GetDocumentResult, error) {
@@ -120,6 +151,19 @@ func testServerWithKnowledgeDocument(t *testing.T, document *fakeKnowledgeDocume
 	return server
 }
 
+func testServerWithCloudDocument(t *testing.T, cloud *fakeCloudDocumentPort) *Server {
+	t.Helper()
+	rt, err := compatruntime.New(compatruntime.Dependencies{SkillPort: &fakeSkillPort{}, CloudDocumentPort: cloud})
+	if err != nil {
+		t.Fatalf("Runtime.New: %v", err)
+	}
+	server, err := New(rt, HeaderIdentityProvider{}, Options{ServerName: "test-server", ServerVersion: "test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return server
+}
+
 func TestInitializeCapabilities(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize"})
@@ -140,10 +184,11 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	if len(tools) != 6 || tools[0].Name != knowledgeDocumentGetToolName || tools[1].Name != knowledgeGetToolName || tools[2].Name != knowledgeListToolName || tools[3].Name != knowledgeSearchToolName || tools[4].Name != skillGetToolName || tools[5].Name != skillListToolName {
+	if len(tools) != 9 {
 		t.Fatalf("tools = %#v", tools)
 	}
-	listTool := tools[5]
+	byName := toolDefinitionsByName(tools)
+	listTool := byName[skillListToolName]
 	if listTool.Description == "" || !listTool.ReadOnly || !listTool.Annotations.ReadOnlyHint {
 		t.Fatalf("tool metadata = %#v", listTool)
 	}
@@ -161,8 +206,9 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	if listTool.InputSchema["additionalProperties"] != false {
 		t.Fatalf("additionalProperties must be false")
 	}
-	getSchema := tools[4].InputSchema
-	if getSchema["additionalProperties"] != false || !tools[4].Annotations.ReadOnlyHint {
+	getTool := byName[skillGetToolName]
+	getSchema := getTool.InputSchema
+	if getSchema["additionalProperties"] != false || !getTool.Annotations.ReadOnlyHint {
 		t.Fatalf("skill get schema = %#v", getSchema)
 	}
 	if _, ok := getSchema["properties"].(map[string]any)["skill_id"]; !ok {
@@ -174,7 +220,9 @@ func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) 
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	for _, tool := range tools[:4] {
+	byName := toolDefinitionsByName(tools)
+	for _, name := range []string{knowledgeDocumentGetToolName, knowledgeGetToolName, knowledgeListToolName, knowledgeSearchToolName} {
+		tool := byName[name]
 		if !tool.Annotations.ReadOnlyHint || tool.InputSchema["additionalProperties"] != false {
 			t.Fatalf("knowledge tool metadata = %#v", tool)
 		}
@@ -185,16 +233,16 @@ func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) 
 			}
 		}
 	}
-	if _, ok := tools[2].InputSchema["properties"].(map[string]any)["keyword"]; !ok {
-		t.Fatalf("knowledge list schema = %#v", tools[2].InputSchema)
+	if _, ok := byName[knowledgeListToolName].InputSchema["properties"].(map[string]any)["keyword"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", byName[knowledgeListToolName].InputSchema)
 	}
-	if _, ok := tools[2].InputSchema["properties"].(map[string]any)["tags"]; !ok {
-		t.Fatalf("knowledge list schema = %#v", tools[2].InputSchema)
+	if _, ok := byName[knowledgeListToolName].InputSchema["properties"].(map[string]any)["tags"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", byName[knowledgeListToolName].InputSchema)
 	}
-	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["knowledge_id"]; !ok {
-		t.Fatalf("knowledge get schema = %#v", tools[1].InputSchema)
+	if _, ok := byName[knowledgeGetToolName].InputSchema["properties"].(map[string]any)["knowledge_id"]; !ok {
+		t.Fatalf("knowledge get schema = %#v", byName[knowledgeGetToolName].InputSchema)
 	}
-	searchProperties := tools[3].InputSchema["properties"].(map[string]any)
+	searchProperties := byName[knowledgeSearchToolName].InputSchema["properties"].(map[string]any)
 	for _, field := range []string{"query", "knowledge_ids", "top_k"} {
 		if _, ok := searchProperties[field]; !ok {
 			t.Fatalf("knowledge search schema missing %q: %#v", field, searchProperties)
@@ -537,6 +585,139 @@ func TestSkillListResultIsStructuredAndStableForEmptyList(t *testing.T) {
 	}
 }
 
+func TestToolsListPublishesCloudDocumentSchemas(t *testing.T) {
+	server := testServerWithCloudDocument(t, &fakeCloudDocumentPort{})
+	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
+	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
+	want := map[string][]string{
+		cloudDocumentListToolName:   {"keyword", "status", "page_size", "page_token"},
+		cloudDocumentGetToolName:    {"source_id", "include_documents", "page_size", "page_token"},
+		cloudDocumentSearchToolName: {"source_id", "query", "page_size", "page_token", "binding_id", "tree_key", "state_filter", "include_documents", "include_containers"},
+	}
+	for _, tool := range tools {
+		fields, ok := want[tool.Name]
+		if !ok {
+			continue
+		}
+		if !tool.Annotations.ReadOnlyHint || tool.InputSchema["additionalProperties"] != false {
+			t.Fatalf("tool metadata=%#v", tool)
+		}
+		properties := tool.InputSchema["properties"].(map[string]any)
+		for _, field := range fields {
+			if _, ok := properties[field]; !ok {
+				t.Fatalf("%s missing %s", tool.Name, field)
+			}
+		}
+		for _, forbidden := range []string{"user_id", "user_name", "tenant_id", "access_token", "credential", "provider_secret", "feishu_token", "notion_token"} {
+			if _, ok := properties[forbidden]; ok {
+				t.Fatalf("%s exposes %s", tool.Name, forbidden)
+			}
+		}
+		delete(want, tool.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing cloud tools=%#v", want)
+	}
+	raw, err := json.Marshal(response.Result)
+	if err != nil || !strings.Contains(string(raw), `"annotations":{"readOnlyHint":true}`) {
+		t.Fatalf("wire tools=%s err=%v", raw, err)
+	}
+}
+
+func TestCloudDocumentListUsesPrincipalTenantAndStructuredResult(t *testing.T) {
+	total := int64(2)
+	cloud := &fakeCloudDocumentPort{listResult: compatcloud.ListResult{Sources: []compatcloud.SourceSummary{{ID: "source-1", Name: "Team Docs", Status: "ACTIVE", DatasetID: "dataset-1"}}, Page: contract.PageResult{NextPageToken: "offset:1", Total: &total}}}
+	server := testServerWithCloudDocument(t, cloud)
+	bad := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_cloud_document_list","arguments":{"user_id":"attacker"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	if bad.Result.(map[string]any)["isError"] != true {
+		t.Fatalf("identity override accepted=%#v", bad.Result)
+	}
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_cloud_document_list","arguments":{"keyword":" docs ","status":" ACTIVE ","page_size":5,"page_token":"offset:5"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || cloud.listCallCtx.UserID != "trusted-user" || cloud.listCallCtx.TenantID != "tenant-a" || cloud.listInput.Keyword != "docs" || cloud.listInput.Status != "ACTIVE" || cloud.listInput.Page.PageSize != 5 || cloud.listInput.Page.PageToken != "offset:5" {
+		t.Fatalf("result=%#v ctx=%#v input=%#v", result, cloud.listCallCtx, cloud.listInput)
+	}
+	raw, _ := json.Marshal(result["structuredContent"])
+	if !strings.Contains(string(raw), `"source-1"`) || !strings.Contains(string(raw), `"next_page_token":"offset:1"`) {
+		t.Fatalf("structured=%s", raw)
+	}
+	cloud.listErr = contract.NewError(contract.BackendUnavailable, "cloud_document.list", "http://scan/private secret", true, errors.New("token secret"))
+	safe := callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_cloud_document_list","arguments":{}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safeRaw, _ := json.Marshal(safe.Result)
+	if !strings.Contains(string(safeRaw), "BACKEND_UNAVAILABLE") || strings.Contains(string(safeRaw), "secret") || strings.Contains(string(safeRaw), "http://") {
+		t.Fatalf("unsafe=%s", safeRaw)
+	}
+}
+
+func TestCloudDocumentGetMapsMetadataOnlyAndRejectsInvalidArguments(t *testing.T) {
+	total := int64(1)
+	cloud := &fakeCloudDocumentPort{getResult: compatcloud.SourceDetail{ID: "source-1", Name: "Team Docs", DatasetID: "dataset-1"}, docResult: compatcloud.DocumentListResult{Documents: []compatcloud.DocumentSummary{{ID: "cloud-doc-1", SourceID: "source-1", ObjectKey: "object-1", DisplayName: "Guide", Name: "Guide.md", KnowledgeDocument: &compatcloud.KnowledgeDocumentRef{KnowledgeID: "dataset-1", DocumentID: "core-doc-1"}}}, Page: contract.PageResult{Total: &total}}}
+	server := testServerWithCloudDocument(t, cloud)
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_cloud_document_get","arguments":{"source_id":"source-1","include_documents":true,"page_size":5}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || cloud.getCallCtx.UserID != "trusted-user" || cloud.getCallCtx.TenantID != "tenant-a" || cloud.getSourceID != "source-1" || cloud.documentInput.DocumentsPage.PageSize != 5 {
+		t.Fatalf("result=%#v get=%#v doc=%#v", result, cloud.getCallCtx, cloud.documentInput)
+	}
+	raw, _ := json.Marshal(result["structuredContent"])
+	for _, want := range []string{`"source-1"`, `"cloud-doc-1"`, `"core-doc-1"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("structured=%s missing=%s", raw, want)
+		}
+	}
+	for _, arguments := range []string{`{}`, `{"source_id":"source-1","tenant_id":"attacker"}`, `{"source_id":"source-1","raw":true}`} {
+		invalid := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_cloud_document_get","arguments":`+arguments+`}}`, map[string]string{"X-User-Id": "trusted-user"})
+		if invalid.Result.(map[string]any)["isError"] != true {
+			t.Fatalf("arguments accepted=%s result=%#v", arguments, invalid.Result)
+		}
+	}
+	cloud.getErr = contract.NewError(contract.NotFound, "cloud_document.get", "scan /private/path secret", false, errors.New("token secret"))
+	notFound := callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_cloud_document_get","arguments":{"source_id":"missing"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safe, _ := json.Marshal(notFound.Result)
+	if !strings.Contains(string(safe), "NOT_FOUND") || strings.Contains(string(safe), "secret") || strings.Contains(string(safe), "private") {
+		t.Fatalf("unsafe=%s", safe)
+	}
+}
+
+func TestCloudDocumentSearchUsesPrincipalAndSafeStructuredResult(t *testing.T) {
+	total := int64(1)
+	cloud := &fakeCloudDocumentPort{searchResult: compatcloud.SearchResult{Hits: []compatcloud.SearchHit{{Key: "hit-1", DisplayName: "Guide", SearchName: "Guide.md", SourceID: "source-1", TreeKey: "root", ObjectKey: "object-1", IsDocument: true, Selectable: true}}, Page: contract.PageResult{Total: &total}}}
+	server := testServerWithCloudDocument(t, cloud)
+	bad := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_cloud_document_search","arguments":{"source_id":"source-1","query":"guide","tenant_id":"attacker"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	if bad.Result.(map[string]any)["isError"] != true {
+		t.Fatalf("identity override accepted=%#v", bad.Result)
+	}
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_cloud_document_search","arguments":{"source_id":"source-1","query":" guide ","binding_id":"binding-1","tree_key":"root","state_filter":[" ACTIVE "],"include_documents":true,"page_size":2}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || cloud.searchCallCtx.UserID != "trusted-user" || cloud.searchCallCtx.TenantID != "tenant-a" || cloud.searchInput.Query != "guide" || cloud.searchInput.BindingID != "binding-1" || len(cloud.searchInput.StateFilter) != 1 || cloud.searchInput.StateFilter[0] != "ACTIVE" {
+		t.Fatalf("result=%#v ctx=%#v input=%#v", result, cloud.searchCallCtx, cloud.searchInput)
+	}
+	raw, _ := json.Marshal(result["structuredContent"])
+	if !strings.Contains(string(raw), `"hit-1"`) || strings.Contains(string(raw), "token") {
+		t.Fatalf("structured=%s", raw)
+	}
+	cloud.searchErr = contract.NewError(contract.BackendUnavailable, "cloud_document.search", "http://scan/private secret", true, errors.New("token secret"))
+	safe := callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_cloud_document_search","arguments":{"source_id":"source-1","query":"guide"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safeRaw, _ := json.Marshal(safe.Result)
+	if !strings.Contains(string(safeRaw), "BACKEND_UNAVAILABLE") || strings.Contains(string(safeRaw), "secret") || strings.Contains(string(safeRaw), "http://") {
+		t.Fatalf("unsafe=%s", safeRaw)
+	}
+}
+
+func TestCloudDocumentToolsRequirePrincipalAndHaveStableEmptyResults(t *testing.T) {
+	server := testServerWithCloudDocument(t, &fakeCloudDocumentPort{})
+	for _, name := range []string{cloudDocumentListToolName, cloudDocumentGetToolName, cloudDocumentSearchToolName} {
+		response := callHTTP(t, server, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{}}}`, name), nil)
+		if response.Result.(map[string]any)["isError"] != true {
+			t.Fatalf("missing principal accepted for %s", name)
+		}
+	}
+	list := cloudDocumentListResult(compatcloud.ListResult{})
+	search := cloudDocumentSearchResult(compatcloud.SearchResult{})
+	if list.StructuredContent.(cloudDocumentListStructuredResult).Sources == nil || search.StructuredContent.(cloudDocumentSearchStructuredResult).Hits == nil {
+		t.Fatalf("empty results are not stable list=%#v search=%#v", list, search)
+	}
+}
+
 func callHTTP(t *testing.T, server *Server, body string, headers map[string]string) rpcResponse {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
@@ -556,4 +737,12 @@ func callHTTP(t *testing.T, server *Server, body string, headers map[string]stri
 		t.Fatalf("rpc error = %#v", response.Error)
 	}
 	return response
+}
+
+func toolDefinitionsByName(tools []ToolDefinition) map[string]ToolDefinition {
+	byName := make(map[string]ToolDefinition, len(tools))
+	for _, tool := range tools {
+		byName[tool.Name] = tool
+	}
+	return byName
 }

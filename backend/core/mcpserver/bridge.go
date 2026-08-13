@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	compatcloud "lazymind/core/compat/clouddocument"
 	"lazymind/core/compat/contract"
 	compatknowledge "lazymind/core/compat/knowledge"
 	compatskill "lazymind/core/compat/skill"
@@ -19,6 +20,9 @@ const (
 	knowledgeGetToolName         = "lazymind_knowledge_get"
 	knowledgeDocumentGetToolName = "lazymind_knowledge_document_get"
 	knowledgeSearchToolName      = "lazymind_knowledge_search"
+	cloudDocumentListToolName    = "lazymind_cloud_document_list"
+	cloudDocumentGetToolName     = "lazymind_cloud_document_get"
+	cloudDocumentSearchToolName  = "lazymind_cloud_document_search"
 )
 
 type toolCallParams struct {
@@ -58,6 +62,32 @@ type knowledgeSearchArguments struct {
 	Query        string   `json:"query"`
 	KnowledgeIDs []string `json:"knowledge_ids"`
 	TopK         int      `json:"top_k"`
+}
+
+type cloudDocumentListArguments struct {
+	Keyword   string `json:"keyword"`
+	Status    string `json:"status"`
+	PageSize  int    `json:"page_size"`
+	PageToken string `json:"page_token"`
+}
+
+type cloudDocumentGetArguments struct {
+	SourceID         string `json:"source_id"`
+	IncludeDocuments bool   `json:"include_documents"`
+	PageSize         int    `json:"page_size"`
+	PageToken        string `json:"page_token"`
+}
+
+type cloudDocumentSearchArguments struct {
+	SourceID          string   `json:"source_id"`
+	Query             string   `json:"query"`
+	PageSize          int      `json:"page_size"`
+	PageToken         string   `json:"page_token"`
+	BindingID         string   `json:"binding_id"`
+	TreeKey           string   `json:"tree_key"`
+	StateFilter       []string `json:"state_filter"`
+	IncludeDocuments  bool     `json:"include_documents"`
+	IncludeContainers bool     `json:"include_containers"`
 }
 
 func skillListTool() ToolDefinition {
@@ -170,6 +200,44 @@ func knowledgeSearchTool() ToolDefinition {
 	}
 }
 
+func cloudDocumentListTool() ToolDefinition {
+	return ToolDefinition{Name: cloudDocumentListToolName, Description: "List Cloud document sources visible to the authenticated caller.", ReadOnly: true, Annotations: ToolAnnotations{ReadOnlyHint: true}, InputSchema: map[string]any{
+		"type": "object", "properties": map[string]any{
+			"keyword":    map[string]any{"type": "string", "description": "Optional Cloud source metadata keyword."},
+			"status":     map[string]any{"type": "string", "description": "Optional source status."},
+			"page_size":  map[string]any{"type": "integer", "minimum": contract.MinPageSize, "maximum": contract.MaxPageSize},
+			"page_token": map[string]any{"type": "string", "description": "Opaque pagination token."},
+		}, "additionalProperties": false,
+	}}
+}
+
+func cloudDocumentGetTool() ToolDefinition {
+	return ToolDefinition{Name: cloudDocumentGetToolName, Description: "Get Cloud source metadata and, optionally, one page of document metadata. Document body content is not included.", ReadOnly: true, Annotations: ToolAnnotations{ReadOnlyHint: true}, InputSchema: map[string]any{
+		"type": "object", "properties": map[string]any{
+			"source_id":         map[string]any{"type": "string", "description": "Stable Cloud source ID."},
+			"include_documents": map[string]any{"type": "boolean", "description": "Include one page of document metadata."},
+			"page_size":         map[string]any{"type": "integer", "minimum": contract.MinPageSize, "maximum": contract.MaxPageSize},
+			"page_token":        map[string]any{"type": "string", "description": "Opaque document pagination token."},
+		}, "required": []string{"source_id"}, "additionalProperties": false,
+	}}
+}
+
+func cloudDocumentSearchTool() ToolDefinition {
+	return ToolDefinition{Name: cloudDocumentSearchToolName, Description: "Search titles, display names, and tree metadata within one Cloud source. This does not search document body content.", ReadOnly: true, Annotations: ToolAnnotations{ReadOnlyHint: true}, InputSchema: map[string]any{
+		"type": "object", "properties": map[string]any{
+			"source_id":          map[string]any{"type": "string", "description": "Stable Cloud source ID."},
+			"query":              map[string]any{"type": "string", "description": "Cloud metadata search query."},
+			"page_size":          map[string]any{"type": "integer", "minimum": contract.MinPageSize, "maximum": contract.MaxPageSize},
+			"page_token":         map[string]any{"type": "string", "description": "Opaque pagination token."},
+			"binding_id":         map[string]any{"type": "string", "description": "Optional source binding filter."},
+			"tree_key":           map[string]any{"type": "string", "description": "Optional tree root filter."},
+			"state_filter":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional source state filters."},
+			"include_documents":  map[string]any{"type": "boolean"},
+			"include_containers": map[string]any{"type": "boolean"},
+		}, "required": []string{"source_id", "query"}, "additionalProperties": false,
+	}}
+}
+
 func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 	var params toolCallParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -204,9 +272,60 @@ func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 		return s.callKnowledgeDocumentGet(ctx, request.ID, params.Arguments, callCtx)
 	case knowledgeSearchToolName:
 		return s.callKnowledgeSearch(ctx, request.ID, params.Arguments, callCtx)
+	case cloudDocumentListToolName:
+		return s.callCloudDocumentList(ctx, request.ID, params.Arguments, callCtx)
+	case cloudDocumentGetToolName:
+		return s.callCloudDocumentGet(ctx, request.ID, params.Arguments, callCtx)
+	case cloudDocumentSearchToolName:
+		return s.callCloudDocumentSearch(ctx, request.ID, params.Arguments, callCtx)
 	default:
 		return s.resultResponse(request.ID, toolErrorResult("NOT_FOUND", "Unknown tool."))
 	}
+}
+
+func (s *Server) callCloudDocumentList(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.CloudDocument == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Cloud document tools are not configured."))
+	}
+	args, err := decodeCloudDocumentListArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.CloudDocument.List(ctx, callCtx, compatcloud.ListInput{Keyword: args.Keyword, Status: args.Status, Page: contract.PageRequest{PageSize: args.PageSize, PageToken: args.PageToken}})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, cloudDocumentListResult(result))
+}
+
+func (s *Server) callCloudDocumentGet(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.CloudDocument == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Cloud document tools are not configured."))
+	}
+	args, err := decodeCloudDocumentGetArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.CloudDocument.Get(ctx, callCtx, compatcloud.GetInput{SourceID: args.SourceID, IncludeDocuments: args.IncludeDocuments, DocumentsPage: contract.PageRequest{PageSize: args.PageSize, PageToken: args.PageToken}})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, cloudDocumentGetResult(result))
+}
+
+func (s *Server) callCloudDocumentSearch(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.CloudDocument == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Cloud document tools are not configured."))
+	}
+	args, err := decodeCloudDocumentSearchArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.CloudDocument.Search(ctx, callCtx, compatcloud.SearchInput{SourceID: args.SourceID, Query: args.Query, Page: contract.PageRequest{PageSize: args.PageSize, PageToken: args.PageToken}, BindingID: args.BindingID, TreeKey: args.TreeKey, StateFilter: args.StateFilter, IncludeDocuments: args.IncludeDocuments, IncludeContainers: args.IncludeContainers})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, cloudDocumentSearchResult(result))
 }
 
 func (s *Server) callKnowledgeDocumentGet(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
@@ -409,6 +528,57 @@ func decodeKnowledgeSearchArguments(raw json.RawMessage) (knowledgeSearchArgumen
 		return knowledgeSearchArguments{}, fmt.Errorf("query and knowledge_ids are required")
 	}
 	return args, nil
+}
+
+func decodeCloudDocumentListArguments(raw json.RawMessage) (cloudDocumentListArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return cloudDocumentListArguments{}, nil
+	}
+	var args cloudDocumentListArguments
+	if err := decodeStrictArguments(raw, &args); err != nil {
+		return cloudDocumentListArguments{}, err
+	}
+	return args, nil
+}
+
+func decodeCloudDocumentGetArguments(raw json.RawMessage) (cloudDocumentGetArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return cloudDocumentGetArguments{}, fmt.Errorf("source_id is required")
+	}
+	var args cloudDocumentGetArguments
+	if err := decodeStrictArguments(raw, &args); err != nil {
+		return cloudDocumentGetArguments{}, err
+	}
+	if strings.TrimSpace(args.SourceID) == "" {
+		return cloudDocumentGetArguments{}, fmt.Errorf("source_id is required")
+	}
+	return args, nil
+}
+
+func decodeCloudDocumentSearchArguments(raw json.RawMessage) (cloudDocumentSearchArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return cloudDocumentSearchArguments{}, fmt.Errorf("source_id and query are required")
+	}
+	var args cloudDocumentSearchArguments
+	if err := decodeStrictArguments(raw, &args); err != nil {
+		return cloudDocumentSearchArguments{}, err
+	}
+	if strings.TrimSpace(args.SourceID) == "" || strings.TrimSpace(args.Query) == "" {
+		return cloudDocumentSearchArguments{}, fmt.Errorf("source_id and query are required")
+	}
+	return args, nil
+}
+
+func decodeStrictArguments(raw json.RawMessage, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if decoder.More() {
+		return fmt.Errorf("multiple JSON values")
+	}
+	return nil
 }
 
 type requestContextKey struct{}
