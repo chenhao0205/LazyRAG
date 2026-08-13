@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -616,6 +617,31 @@ func TestListSourcesReturnsPlanFlatItems(t *testing.T) {
 	item := resp.Items[0]
 	if item.SourceID != "source-1" || item.Name != "Docs" || item.DatasetID != "dataset-1" || item.BindingCount != 2 || item.ConfigVersion != 2 {
 		t.Fatalf("source list item was not flat plan shape: %+v", item)
+	}
+}
+
+func TestListSourcesPassesConnectorTypeFilterToStore(t *testing.T) {
+	t.Parallel()
+
+	now := fixedSourceTestTime()
+	repo := newSourceEngineRepoStub()
+	engine := newTestSourceEngine(t, repo, &sourceCoreSpy{}, &sourceSpyConnector{}, now)
+
+	_, err := engine.ListSources(context.Background(), ListSourcesRequest{
+		CallerID:       "user-1",
+		TenantID:       "tenant-1",
+		ConnectorTypes: []connector.ConnectorType{"feishu", "notion"},
+		Page:           2,
+		PageSize:       3,
+	})
+	if err != nil {
+		t.Fatalf("list sources: %v", err)
+	}
+	if got, want := fmt.Sprint(repo.lastList.ConnectorTypes), "[feishu notion]"; got != want {
+		t.Fatalf("store connector type filter = %s, want %s", got, want)
+	}
+	if repo.lastList.Page != 2 || repo.lastList.PageSize != 3 {
+		t.Fatalf("store pagination = page %d size %d, want page 2 size 3", repo.lastList.Page, repo.lastList.PageSize)
 	}
 }
 
@@ -1974,6 +2000,7 @@ type sourceEngineRepoStub struct {
 	sources             map[string]store.Source
 	bindings            map[string][]store.Binding
 	listRecords         []store.SourceListRecord
+	lastList            store.SourceListRequest
 	objects             map[string]store.SourceObject
 	createRecords       []store.SourceCreateRecord
 	agentCommands       []store.AgentCommand
@@ -2034,7 +2061,8 @@ func (r *sourceEngineRepoStub) CreateSourceWithBindings(_ context.Context, recor
 	return nil
 }
 
-func (r *sourceEngineRepoStub) ListSources(context.Context, store.SourceListRequest) ([]store.SourceListRecord, int, error) {
+func (r *sourceEngineRepoStub) ListSources(_ context.Context, req store.SourceListRequest) ([]store.SourceListRecord, int, error) {
+	r.lastList = req
 	return append([]store.SourceListRecord(nil), r.listRecords...), len(r.listRecords), nil
 }
 
