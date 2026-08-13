@@ -48,7 +48,10 @@ def expected_internal_token() -> str:
 def require_internal_token(provided: Optional[str]) -> str:
     expected = expected_internal_token()
     if not expected:
-        raise HTTPException(status_code=503, detail={'code': 'BACKEND_UNAVAILABLE', 'message': 'internal token is not configured'})
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'BACKEND_UNAVAILABLE', 'message': 'internal token is not configured'},
+        )
     provided = (provided or '').strip()
     if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail={'code': 'UNAUTHORIZED', 'message': 'unauthorized'})
@@ -72,8 +75,17 @@ async def search_knowledge(
     except knowledge_search_service.KnowledgeSearchError as exc:
         status = 400 if exc.code == 'INVALID_ARGUMENT' else 503
         raise HTTPException(status_code=status, detail={'code': exc.code, 'message': str(exc)}) from exc
-    return KnowledgeSearchResponse(hits=[
-        KnowledgeSearchHitResponse(kb_id=hit.kb_id, doc_id=hit.doc_id, chunk_id=hit.chunk_id,
-                                   text=hit.text, score=hit.score, title=hit.title, source_url=hit.source_url)
-        for hit in hits
-    ])
+    return KnowledgeSearchResponse(
+        hits=[
+            KnowledgeSearchHitResponse(
+                kb_id=hit.kb_id,
+                doc_id=hit.doc_id,
+                chunk_id=hit.chunk_id,
+                text=hit.text,
+                score=hit.score,
+                title=hit.title,
+                source_url=hit.source_url,
+            )
+            for hit in hits
+        ]
+    )

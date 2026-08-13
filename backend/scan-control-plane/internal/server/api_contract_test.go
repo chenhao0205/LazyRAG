@@ -61,10 +61,12 @@ func TestCreateSourceHandlerRequiresBindingsArray(t *testing.T) {
 	}
 }
 
-func TestListSourcesHandlerParsesCloudConnectorTypes(t *testing.T) {
+func TestListSourcesHandlerParsesConnectorTypeFilter(t *testing.T) {
+	t.Parallel()
+
 	engine := &serverSourceEngineStub{}
 	handler := NewHandler(WithSourceEngine(engine), WithAccessChecker(allowAccess{}))
-	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources?connector_type=feishu,notion&connector_type=feishu", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources?keyword=doc&status=ACTIVE&connector_type=feishu,notion&page=2&page_size=3", nil)
 	setAPIContractActor(req)
 	w := httptest.NewRecorder()
 
@@ -73,8 +75,15 @@ func TestListSourcesHandlerParsesCloudConnectorTypes(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if !reflect.DeepEqual(engine.lastList.ConnectorTypes, []connector.ConnectorType{"feishu", "notion", "feishu"}) {
-		t.Fatalf("ConnectorTypes = %#v", engine.lastList.ConnectorTypes)
+	if engine.listCalls != 1 {
+		t.Fatalf("expected list source call, got %d", engine.listCalls)
+	}
+	got := engine.lastList
+	if got.CallerID != "user-1" || got.TenantID != "tenant-1" || got.Keyword != "doc" || got.Status != "ACTIVE" || got.Page != 2 || got.PageSize != 3 {
+		t.Fatalf("list request did not preserve basic filters: %+v", got)
+	}
+	if len(got.ConnectorTypes) != 2 || got.ConnectorTypes[0] != connector.ConnectorType("feishu") || got.ConnectorTypes[1] != connector.ConnectorType("notion") {
+		t.Fatalf("connector type filter = %+v, want [feishu notion]", got.ConnectorTypes)
 	}
 }
 
@@ -540,7 +549,7 @@ func TestTreeSearchHandlersAcceptPageListMode(t *testing.T) {
 		t.Fatalf("target search request was not decoded with list_mode/page_size: %+v", targetTree.lastSearch)
 	}
 
-	sourceReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/search", strings.NewReader(`{"binding_id":"binding-1","tree_key":"tree-root","keyword":"hand","include_documents":true,"include_containers":true,"list_mode":"page","page_size":50,"connector_types":["feishu","notion"]}`))
+	sourceReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/search", strings.NewReader(`{"binding_id":"binding-1","tree_key":"tree-root","keyword":"hand","include_documents":true,"include_containers":true,"list_mode":"page","page_size":50}`))
 	setAPIContractActor(sourceReq)
 	sourceResp := httptest.NewRecorder()
 	handler.ServeHTTP(sourceResp, sourceReq)
@@ -550,9 +559,6 @@ func TestTreeSearchHandlersAcceptPageListMode(t *testing.T) {
 	}
 	if sourceTree.searchCalls != 1 || sourceTree.lastSearch.ListMode != tree.ListModePage || sourceTree.lastSearch.PageSize != 50 {
 		t.Fatalf("source search request was not decoded with list_mode/page_size: %+v", sourceTree.lastSearch)
-	}
-	if !reflect.DeepEqual(sourceTree.lastSearch.ConnectorTypes, []string{"feishu", "notion"}) {
-		t.Fatalf("source search connector types = %#v", sourceTree.lastSearch.ConnectorTypes)
 	}
 }
 
@@ -926,6 +932,7 @@ func assertJSONNumber(t *testing.T, value any, want string) {
 
 type serverSourceEngineStub struct {
 	createCalls          int
+	listCalls            int
 	addBindingCalls      int
 	getByDatasetCalls    int
 	deleteByDatasetCalls int
@@ -969,12 +976,9 @@ func (s *serverSourceEngineStub) CreateSource(_ context.Context, req sourceengin
 }
 
 func (s *serverSourceEngineStub) ListSources(_ context.Context, req sourceengine.ListSourcesRequest) (sourceengine.ListSourcesResponse, error) {
+	s.listCalls++
 	s.lastList = req
 	return sourceengine.ListSourcesResponse{}, nil
-}
-
-func (s *serverSourceEngineStub) IsBindingPathAccessible(context.Context, string, string) bool {
-	return true
 }
 
 func (s *serverSourceEngineStub) GetSource(context.Context, sourceengine.GetSourceRequest) (sourceengine.GetSourceResponse, error) {
@@ -1055,6 +1059,10 @@ func (s *serverSourceEngineStub) DeleteBinding(context.Context, string, string) 
 
 func (s *serverSourceEngineStub) UpdateBindingChatEnabled(_ context.Context, bindingID string, chatEnabled bool) error {
 	return nil
+}
+
+func (s *serverSourceEngineStub) IsBindingPathAccessible(context.Context, string, string) bool {
+	return true
 }
 
 func (s *serverSourceEngineStub) BatchGetSourcesByDatasetIDs(_ context.Context, datasetIDs []string) (map[string]bool, error) {

@@ -88,14 +88,16 @@ func (h *Handler) listSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := sourceengine.ListSourcesRequest{
-		CallerID:       actor.UserID,
-		TenantID:       actor.TenantID,
-		SourceIDs:      sourceIDs,
-		Keyword:        r.URL.Query().Get("keyword"),
-		Status:         r.URL.Query().Get("status"),
-		ConnectorTypes: parseConnectorTypesQuery(r.URL.Query()["connector_type"]),
-		Page:           parseIntQuery(r, "page"),
-		PageSize:       parseIntQuery(r, "page_size"),
+		CallerID:  actor.UserID,
+		TenantID:  actor.TenantID,
+		SourceIDs: sourceIDs,
+		Keyword:   r.URL.Query().Get("keyword"),
+		Status:    r.URL.Query().Get("status"),
+		ConnectorTypes: parseConnectorTypesQuery(
+			r.URL.Query()["connector_type"],
+		),
+		Page:     parseIntQuery(r, "page"),
+		PageSize: parseIntQuery(r, "page_size"),
 	}
 	resp, err := h.sources.ListSources(r.Context(), req)
 	if err != nil {
@@ -112,9 +114,11 @@ func parseConnectorTypesQuery(values []string) []connector.ConnectorType {
 	out := make([]connector.ConnectorType, 0, len(values))
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
-			if part = strings.TrimSpace(part); part != "" {
-				out = append(out, connector.ConnectorType(part))
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
 			}
+			out = append(out, connector.ConnectorType(trimmed))
 		}
 	}
 	return out

@@ -87,16 +87,6 @@ func TestNewCreatesSkillFacadeWhenPortProvided(t *testing.T) {
 	}
 }
 
-func TestNewCreatesCloudDocumentFacadeWhenPortProvided(t *testing.T) {
-	rt, err := New(Dependencies{CloudDocumentPort: stubCloudDocumentPort{}})
-	if err != nil {
-		t.Fatalf("New returned error: %v", err)
-	}
-	if rt.CloudDocument == nil {
-		t.Fatal("CloudDocument facade is nil")
-	}
-}
-
 func TestNewCreatesKnowledgeFacadeWhenCatalogProvided(t *testing.T) {
 	rt, err := New(Dependencies{KnowledgeCatalog: stubKnowledgeCatalogPort{}})
 	if err != nil {
@@ -195,6 +185,32 @@ func TestNewAllowsNilSkillPort(t *testing.T) {
 	if rt.Knowledge != nil {
 		t.Fatalf("Knowledge facade = %#v, want nil", rt.Knowledge)
 	}
+	if rt.CloudDocument != nil {
+		t.Fatalf("CloudDocument facade = %#v, want nil", rt.CloudDocument)
+	}
+}
+
+func TestNewCreatesCloudDocumentFacadeWhenPortProvided(t *testing.T) {
+	rt, err := New(Dependencies{CloudDocumentPort: stubCloudDocumentPort{}})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if rt.CloudDocument == nil {
+		t.Fatalf("CloudDocument facade is nil")
+	}
+}
+
+func TestNewAllowsNilCloudDocumentPortWithoutAffectingSkill(t *testing.T) {
+	rt, err := New(Dependencies{SkillPort: stubSkillPort{}})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if rt.Skill == nil {
+		t.Fatalf("Skill facade is nil")
+	}
+	if rt.CloudDocument != nil {
+		t.Fatalf("CloudDocument facade = %#v, want nil", rt.CloudDocument)
+	}
 }
 
 func TestRuntimeDoesNotContainRequestState(t *testing.T) {
@@ -249,5 +265,19 @@ func TestNewWiresAllKnowledgePorts(t *testing.T) {
 	}
 	if _, err := rt.Knowledge.Search(context.Background(), contract.CallContext{UserID: "user"}, knowledge.SearchInput{Query: "q", KnowledgeIDs: []string{"ds-1"}}); err != nil {
 		t.Fatalf("Search returned error: %v", err)
+	}
+}
+
+func TestNewWiresSkillKnowledgeAndCloudDocumentTogether(t *testing.T) {
+	rt, err := New(Dependencies{
+		SkillPort:         stubSkillPort{},
+		KnowledgeDocument: stubKnowledgeDocumentPort{},
+		CloudDocumentPort: stubCloudDocumentPort{},
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if rt.Skill == nil || rt.Knowledge == nil || rt.CloudDocument == nil {
+		t.Fatalf("Skill=%#v Knowledge=%#v CloudDocument=%#v, want all wired", rt.Skill, rt.Knowledge, rt.CloudDocument)
 	}
 }

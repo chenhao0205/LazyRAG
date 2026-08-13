@@ -49,9 +49,11 @@ func connectorTypeStrings(types []connector.ConnectorType) []string {
 	}
 	out := make([]string, 0, len(types))
 	for _, connectorType := range types {
-		if value := strings.TrimSpace(string(connectorType)); value != "" {
-			out = append(out, value)
+		value := strings.TrimSpace(string(connectorType))
+		if value == "" {
+			continue
 		}
+		out = append(out, value)
 	}
 	return out
 }

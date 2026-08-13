@@ -327,12 +327,14 @@ func applySourceListFilters(db *gorm.DB, req SourceListRequest) *gorm.DB {
 	if connectorTypes := normalizeSourceListConnectorTypes(req.ConnectorTypes); len(connectorTypes) > 0 {
 		db = db.Where(
 			`EXISTS (
-				SELECT 1 FROM source_bindings sb_filter
+				SELECT 1
+				FROM source_bindings sb_filter
 				WHERE sb_filter.source_id = s.source_id
 					AND sb_filter.status <> ?
 					AND sb_filter.connector_type IN ?
 			)`,
-			"DELETING", connectorTypes,
+			"DELETING",
+			connectorTypes,
 		)
 	}
 	if strings.TrimSpace(req.Keyword) != "" {
@@ -342,18 +344,21 @@ func applySourceListFilters(db *gorm.DB, req SourceListRequest) *gorm.DB {
 }
 
 func normalizeSourceListConnectorTypes(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value == "" {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == "" {
 			continue
 		}
-		if _, ok := seen[value]; ok {
+		if _, ok := seen[trimmed]; ok {
 			continue
 		}
-		seen[value] = struct{}{}
-		out = append(out, value)
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
 	}
 	return out
 }

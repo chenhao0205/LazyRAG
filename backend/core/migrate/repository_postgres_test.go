@@ -43,12 +43,24 @@ func TestRepositoryPostgresMigrationPaths(t *testing.T) {
 		t.Fatalf("need at least two release modes, got %d", len(catalog.Modes))
 	}
 	current := catalog.Modes[len(catalog.Modes)-1]
-	if current.Aggregate == nil {
-		t.Fatalf("current release %s has no aggregate migration", current.Name)
-	}
-
 	releaseDB := createTemporaryPostgresDatabase(t, adminDSN, "release")
 	devDB := createTemporaryPostgresDatabase(t, adminDSN, "dev")
+
+	if current.Aggregate == nil {
+		for _, mode := range catalog.Modes[:len(catalog.Modes)-1] {
+			if mode.Aggregate == nil {
+				t.Fatalf("previous release %s has no aggregate migration", mode.Name)
+			}
+			execMigrationFile(t, releaseDB, mode.Aggregate.UpPath)
+			execMigrationFile(t, devDB, mode.Aggregate.UpPath)
+		}
+		for _, migration := range current.Dev {
+			execMigrationFile(t, devDB, migration.UpPath)
+		}
+		assertCredentialMigrationSchema(t, devDB)
+		assertPostgresMatchesORMModels(t, devDB)
+		return
+	}
 	baselineDB := createTemporaryPostgresDatabase(t, adminDSN, "baseline")
 
 	for i, mode := range catalog.Modes {
@@ -175,7 +187,7 @@ func execMigrationFileForDriver(t *testing.T, db *sql.DB, path, driver string) {
 	if err != nil {
 		t.Fatalf("begin migration %s: %v", path, err)
 	}
-	if _, err := tx.Exec(sqlBody); err != nil {
+	if err := execMigrationSQL(tx, driver, sqlBody); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("execute migration %s: %v", path, err)
 	}

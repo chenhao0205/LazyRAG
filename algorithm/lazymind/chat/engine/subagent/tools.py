@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 from lazymind.chat.engine.attachment_reader import (
     is_chat_attachment_file,
@@ -16,6 +17,11 @@ from lazymind.chat.engine.tools.attachment_edit import (
     effective_attachment_path,
 )
 
+from lazymind.chat.service.utils.static_file_url import (
+    local_path_from_static_file_url,
+    resolve_local_image_path,
+)
+
 from .context import get_context, require_context, LARGE_ARTIFACT_THRESHOLD
 
 # Valid artifact content types.
@@ -23,6 +29,52 @@ _CONTENT_TYPES = {'text', 'json', 'image', 'file', 'file_list'}
 
 UPLOAD_MARKER = '/var/lib/lazymind/uploads/'
 SUBAGENT_MARKER = '/data/subagent/'
+
+
+def _materialize_local_path(path: str) -> str:
+    """Resolve Docker-canonical upload paths onto the real LAZYMIND_UPLOAD_ROOT.
+
+    Docker stores/returns ``/var/lib/lazymind/uploads/...``. Local runtime keeps
+    the same relative layout under ``~/.local/share/LazyMind/data/core/uploads``.
+    Remap before exists checks, signing, and vision tools so local works without
+    a ``/var/lib/lazymind/uploads`` mount.
+    """
+    raw = str(path or '').strip()
+    if not raw:
+        return raw
+    if raw.lower().startswith(('http://', 'https://')):
+        return raw
+    resolved = resolve_local_image_path(raw) or local_path_from_static_file_url(raw)
+    if resolved and (resolved == raw or os.path.exists(resolved) or not os.path.exists(raw)):
+        return resolved
+    return raw
+
+
+def _sign_static_file_url(path: str) -> Optional[str]:
+    """Ask Go core to sign a local upload path. Returns None on any failure."""
+    raw = str(path or '').strip()
+    if not raw or raw.lower().startswith(('http://', 'https://')):
+        return None
+    if raw.startswith('/static-files/'):
+        return raw
+    try:
+        import httpx
+        from lazymind.config import config as _cfg
+        core_url = str(_cfg['core_api_url']).rstrip('/')
+        resp = httpx.post(
+            f'{core_url}/static-files:sign',
+            json={'paths': [raw]},
+            timeout=3.0,
+        )
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        data = payload.get('data') if isinstance(payload.get('data'), dict) else payload
+        urls = (data or {}).get('urls') or {}
+        signed = urls.get(raw)
+        return str(signed).strip() if signed else None
+    except Exception:
+        return None
 
 
 def _is_valid_image_ref(path: str) -> bool:
@@ -68,7 +120,26 @@ def _build_artifact_value(value: Any, content_type: str):
             return {'type': 'json', 'path': abs_path, 'size': os.path.getsize(abs_path)}, 'file'
         return {'data': value}, 'json'
     if content_type == 'image':
-        src = str(value).strip()
+        image_metadata: Dict[str, Any] = {}
+        if isinstance(value, dict):
+            image_metadata = value
+            src = str(
+                value.get('path') or value.get('image_url') or value.get('url') or ''
+            ).strip()
+        else:
+            src = str(value).strip()
+
+        def image_value(path: str) -> Dict[str, Any]:
+            built = {'path': path}
+            embedded_caption = image_metadata.get('caption')
+            if embedded_caption is not None:
+                built['caption'] = str(embedded_caption)
+            return built
+
+        if src.startswith('/static-files/'):
+            return image_value(src), 'image'
+        if not src.lower().startswith(('http://', 'https://')):
+            src = _materialize_local_path(src)
         if not _is_valid_image_ref(src):
             raise ValueError(
                 f'Invalid image reference {src!r}: expected http(s) URL, /static-files/ path, '
@@ -77,13 +148,13 @@ def _build_artifact_value(value: Any, content_type: str):
         # '/static-files/...' (possibly with query) is a signed URL path, not a local
         # filesystem path. Keep it as URL text instead of copying from disk.
         if src.startswith('/static-files/'):
-            return {'path': src}, 'image'
+            return image_value(src), 'image'
         if os.path.isabs(src):
             # Copy into workspace; keep absolute path so Go core can sign a URL for it.
             dst_rel = ctx.copy_into_workspace(src)
             dst_abs = os.path.join(ctx.workspace_path, dst_rel)
-            return {'path': dst_abs}, 'image'
-        return {'path': src}, 'image'
+            return image_value(dst_abs), 'image'
+        return image_value(src), 'image'
     if content_type == 'file':
         source = str(value).strip()
         if not source:
@@ -130,6 +201,16 @@ def _build_artifact_value(value: Any, content_type: str):
     return {'text': str(value)}, 'text'
 
 
+def _validate_declared_artifact_type(
+    ctx: Any,
+    key: str,
+    content_type: str,
+) -> Optional[str]:
+    """Workflow slot type validation is enforced by the workflow runtime."""
+    _ = (ctx, key, content_type)
+    return None
+
+
 def _save_artifact(key: str, value: Any, content_type: str = 'text',
                    source_tool: Optional[str] = None,
                    sort_order: Optional[int] = None,
@@ -167,7 +248,9 @@ def _save_artifact(key: str, value: Any, content_type: str = 'text',
     Args:
         key (str): Artifact key. Must be one of the declared output_slots.
         value (Any): The artifact value. For text: a string. For json: a dict/list.
-            For image/file: a local absolute path. For file_list: a list of absolute paths.
+            For image: a path/URL string or an object containing path/image_url/url and
+            optional caption. For file: a local absolute path. For file_list: a list of
+            absolute paths.
         content_type (str): One of text, json, image, file, file_list. Default text.
         source_tool (str): Optional name of the tool that produced this artifact,
             e.g. 'web_search', 'wikipedia', 'image_generation'. Used for display only.
@@ -190,6 +273,9 @@ def _save_artifact(key: str, value: Any, content_type: str = 'text',
             f'Allowed keys: {", ".join(ctx.output_slots)}',
         )
     ct = content_type if content_type in _CONTENT_TYPES else 'text'
+    contract_error = _validate_declared_artifact_type(ctx, key, ct)
+    if contract_error:
+        return tool_error('save_artifacts', contract_error)
     built, actual_ct = _build_artifact_value(value, ct)
     if source_tool:
         built['_source_tool'] = str(source_tool)
@@ -242,14 +328,17 @@ def save_artifacts(artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
             return tool_error(
                 'save_artifacts', f'artifacts[{index}] requires key and value.',
             )
-        results.append(_save_artifact(
+        saved = _save_artifact(
             key=str(item['key']),
             value=item['value'],
             content_type=str(item.get('content_type') or 'text'),
             source_tool=item.get('source_tool'),
             sort_order=item.get('sort_order'),
             caption=item.get('caption'),
-        ))
+        )
+        if not saved.get('success'):
+            return saved
+        results.append(saved)
     return tool_success('save_artifacts', {
         'status': 'ok',
         'saved_count': len(results),
@@ -305,15 +394,14 @@ def _resolve_list_index_from_sort_order(
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        session_id: str = cfg.get('plugin_session_id', '')
+        session_id: str = cfg.get('workflow_session_id', '')
         if not session_id:
             return None, None
-        ctx = require_context()
-        order_list = ctx.db.load_slot_order_list(session_id, slot)
-        if not order_list:
+        artifacts = _public_workflow_artifacts(session_id, slot)
+        if not artifacts:
             # Single-cardinality slot — sort_order is meaningless, ignore silently.
             return None, None
-        n = len(order_list)
+        n = len(artifacts)
         if sort_order < 1:
             return None, (
                 f'sort_order must be >= 1 (sort_order is 1-based, where 1 is the first item). '
@@ -325,7 +413,7 @@ def _resolve_list_index_from_sort_order(
                 f'(valid range: 1–{n}). Artifact appended as a new item instead. '
                 f'If you intended to overwrite, use a sort_order between 1 and {n}.'
             )
-        return int(order_list[sort_order - 1]), None
+        return sort_order - 1, None
     except Exception:
         return None, None
 
@@ -337,7 +425,7 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
     Args:
         key (str): The artifact key to read.
         sort_order (int): Optional. 1-based display position within a list slot.
-            For plugin sessions: resolves via plugin_slot_order → fetches that specific
+            For workflow sessions: resolves via workflow_slot_order → fetches that specific
             selected revision (human or AI).
             For ordinary SubAgents: treated as seq, returns the artifact at that position.
             When omitted, returns all artifacts for this key (or the latest for single slots).
@@ -355,7 +443,7 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
     """
     ctx = require_context()
 
-    # Plugin session: resolve sort_order via DB lookup.
+    # Workflow session: resolve sort_order via DB lookup.
     try:
         import lazyllm
         cfg: Dict[str, Any] = {}
@@ -363,17 +451,12 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        plugin_session_id: str = cfg.get('plugin_session_id', '')
+        workflow_session_id: str = cfg.get('workflow_session_id', '')
     except Exception:
-        plugin_session_id = ''
+        workflow_session_id = ''
 
-    bound_rows = ctx.db.load_bound_slot_artifacts(ctx.task_id, key) if plugin_session_id else []
-    if bound_rows:
-        result = _get_bound_plugin_artifacts(ctx, key, bound_rows, sort_order)
-    elif plugin_session_id and sort_order is not None:
-        result = _get_plugin_artifact_by_sort_order(ctx, key, plugin_session_id, sort_order)
-    elif plugin_session_id and sort_order is None:
-        result = _get_plugin_artifact_all(ctx, key, plugin_session_id)
+    if workflow_session_id:
+        result = _get_public_workflow_artifacts(key, workflow_session_id, sort_order)
     elif sort_order is not None:
         # Ordinary SubAgent: read from sub_agent_artifacts.
         rows = ctx.local_artifacts(keys=[key]) or ctx.db.load_artifacts(ctx.task_id, keys=[key])
@@ -404,10 +487,10 @@ def _resolve_artifact_text(
 
     Resolution priority:
     1. Draft file (reflects latest patch_artifact edits in this step).
-    2. Exact revision frozen in the current plugin attempt's input binding.
-    3. Plugin session selected revision via load_slot_artifact_by_sort_order —
+    2. Exact revision frozen in the current workflow attempt's input binding.
+    3. Workflow session selected revision via load_slot_artifact_by_sort_order —
        this is the ONLY path that surfaces human-edited artifacts stored in
-       plugin_human_artifacts; must be checked before sub_agent_artifacts.
+       workflow_human_artifacts; must be checked before sub_agent_artifacts.
     4. Local in-memory cache (same step, sub_agent_artifacts).
     5. DB sub_agent_artifacts (previous steps).
 
@@ -418,7 +501,7 @@ def _resolve_artifact_text(
     if draft is not None:
         return draft[0], draft[1]
 
-    # 2. Plugin session: use the full resolution chain that knows about human edits.
+    # 2. Workflow session: use the full resolution chain that knows about human edits.
     try:
         import lazyllm
         cfg: Dict[str, Any] = {}
@@ -426,35 +509,20 @@ def _resolve_artifact_text(
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        plugin_session_id: str = cfg.get('plugin_session_id', '')
+        workflow_session_id: str = cfg.get('workflow_session_id', '')
     except Exception:
-        plugin_session_id = ''
+        workflow_session_id = ''
 
-    if plugin_session_id:
-        so = sort_order if sort_order is not None else 1
-        bound_rows = ctx.db.load_bound_slot_artifacts(ctx.task_id, key)
-        if bound_rows:
-            row = bound_rows[so - 1] if 1 <= so <= len(bound_rows) else None
-            if row is None:
-                return None, 'text'
-            value, content_type = ctx.db.resolve_slot_revision_value(row)
-            if value is None:
-                return None, 'text'
+    if workflow_session_id:
+        values = _public_workflow_artifacts(workflow_session_id, key)
+        position = (sort_order or 1) - 1
+        if 0 <= position < len(values):
+            value = values[position].get('value') or {}
+            content_type = str(values[position].get('content_type') or 'text')
             original_type = 'json' if content_type == 'json' else 'text'
-            if content_type == 'file':
+            if content_type == 'file' and isinstance(value, dict):
                 original_type = value.get('type', 'text')
             return _extract_text_from_value(ctx, value, original_type), original_type
-
-        row = ctx.db.load_slot_artifact_by_sort_order(plugin_session_id, key, so)
-        if row is not None:
-            value, content_type = ctx.db.resolve_slot_revision_value(row)
-            if value is not None:
-                original_type = 'json' if content_type == 'json' else 'text'
-                if content_type == 'file':
-                    original_type = value.get('type', 'text')
-                text = _extract_text_from_value(ctx, value, original_type)
-                if text is not None:
-                    return text, original_type
 
     # 3. Local in-memory cache (same step).
     rows = ctx.local_artifacts(keys=[key])
@@ -552,90 +620,38 @@ def _apply_line_range(
     })
 
 
-def _get_plugin_artifact_by_sort_order(
-    ctx: Any, key: str, session_id: str, sort_order: int
+def _workflow_client() -> Any:
+    import httpx
+    import lazyllm
+    from lazymind.config import config
+    from lazymind.workflow_sdk import WorkflowClient
+    cfg = lazyllm.globals.get('agentic_config') or {}
+    return WorkflowClient(
+        str(config['core_api_url']).rstrip('/'), str(cfg.get('user_id') or ''),
+        host='lazymind', transport=httpx,
+    )
+
+
+def _public_workflow_artifacts(session_id: str, key: str = '') -> List[Dict[str, Any]]:
+    response = _workflow_client().list_artifacts(session_id).result
+    artifacts = response.get('artifacts') if isinstance(response, dict) else []
+    values = [dict(item) for item in artifacts if isinstance(item, dict)]
+    if key:
+        values = [item for item in values if item.get('slot') == key]
+    return values
+
+
+def _get_public_workflow_artifacts(
+    key: str, session_id: str, sort_order: Optional[int],
 ) -> Dict[str, Any]:
-    """Fetch a single plugin slot artifact by sort_order via DB resolve."""
-    row = ctx.db.load_slot_artifact_by_sort_order(session_id, key, sort_order)
-    if row is None:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': (
-                f"No artifact found for key '{key}' at sort_order={sort_order} "
-                f'in plugin session {session_id}.'
-            ),
-        })
-
-    value, content_type = ctx.db.resolve_slot_revision_value(row)
-    if value is None:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': f"Artifact key '{key}' at sort_order={sort_order} resolved to null value.",
-        })
-    return tool_success('get_artifact', {
-        'status': 'ok',
-        'key': key,
-        'sort_order': sort_order,
-        'content_type': content_type,
-        'artifacts': [{'slot': key, 'content_type': content_type, 'value': value, 'sort_order': sort_order}],
-    })
-
-
-def _get_bound_plugin_artifacts(
-    ctx: Any,
-    key: str,
-    rows: list[Dict[str, Any]],
-    sort_order: Optional[int],
-) -> Dict[str, Any]:
-    """Resolve artifacts from the immutable input bindings of this attempt."""
-    selected_rows = rows
+    """Read Workflow Artifacts only through the public SDK."""
+    artifacts = _public_workflow_artifacts(session_id, key)
     if sort_order is not None:
-        if sort_order < 1 or sort_order > len(rows):
-            return tool_success('get_artifact', {
-                'status': 'empty',
-                'message': f"No bound artifact found for key '{key}' at sort_order={sort_order}.",
-            })
-        selected_rows = [rows[sort_order - 1]]
-
-    artifacts = []
-    for position, row in enumerate(selected_rows, start=1):
-        value, content_type = ctx.db.resolve_slot_revision_value(row)
-        if value is None:
-            continue
-        artifact_sort_order = sort_order if sort_order is not None else position
-        artifacts.append({
-            'slot': key,
-            'content_type': content_type,
-            'value': value,
-            'sort_order': artifact_sort_order,
-            'revision': row.get('revision'),
-            '_from_attempt_binding': True,
-        })
+        artifacts = artifacts[sort_order - 1:sort_order] if sort_order > 0 else []
     if not artifacts:
         return tool_success('get_artifact', {
             'status': 'empty',
-            'message': f"Bound artifact key '{key}' could not be resolved.",
-        })
-    return tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': artifacts})
-
-
-def _get_plugin_artifact_all(ctx: Any, key: str, session_id: str) -> Dict[str, Any]:
-    """Return all selected revisions for a plugin slot key (sort_order=None)."""
-    resolved_rows = ctx.db.load_selected_slot_artifacts_resolved_with_order(session_id)
-    artifacts = [
-        {
-            'slot': r['slot'],
-            'content_type': r.get('content_type'),
-            'value': r['value'],
-            'sort_order': r.get('sort_order'),
-        }
-        for r in resolved_rows
-        if r.get('slot') == key
-    ]
-    if not artifacts:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': f"No artifact found for key '{key}' in plugin session {session_id}.",
+            'message': f"No artifact found for key '{key}' in workflow session {session_id}.",
         })
     return tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': artifacts})
 
@@ -684,7 +700,7 @@ def patch_artifact(
     draft_result = ctx.read_draft(key, list_index)
     if draft_result is None:
         # Auto-initialize draft from latest committed artifact.
-        # Plugin sessions: this path also checks plugin_human_artifacts (human edits).
+        # Workflow sessions: this path also checks workflow_human_artifacts (human edits).
         text, original_type = _resolve_artifact_text(ctx, key, sort_order)
         if text is None:
             return tool_success('patch_artifact', {
@@ -1026,12 +1042,20 @@ def _resolve_attachment(
     if not files and not history_files_per_turn:
         return None, 'No attached files found in this conversation.'
 
+    def _display_name(path: str) -> str:
+        raw = str(path or '')
+        if raw.lower().startswith(('http://', 'https://')):
+            parsed = urlparse(raw)
+            base = os.path.basename(parsed.path)
+            return base or raw
+        return os.path.basename(raw)
+
     def _dedupe_turn(paths: List[str]) -> List[tuple[str, str]]:
         """Return (display_name, abs_path) pairs with intra-turn dedup (no size)."""
         seen: Dict[str, int] = {}
         result: List[tuple[str, str]] = []
         for path in paths:
-            base = os.path.basename(path)
+            base = _display_name(path)
             name_no_ext, ext = os.path.splitext(base)
             if base not in seen:
                 seen[base] = 0
@@ -1095,7 +1119,7 @@ def read_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
     Documents (pdf/doc/docx/pptx): OCR reader. Plain-text files: direct UTF-8 read.
     Images: vision-model text description.
     Do NOT call this just because a file is attached. For images used in visual tasks
-    (edit, plugin, image_generator), use find_user_attachment for path/url instead.
+    (edit, workflow, image_generator), use find_user_attachment for path/url instead.
     Call this when the user needs document text or a textual summary of image content.
 
     Args:
@@ -1112,7 +1136,10 @@ def read_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
     matched, err = _resolve_attachment(filename, turn)
     if err:
         return tool_success('read_user_attachment', {'status': 'error', 'message': err})
-    if not os.path.exists(matched):
+    is_remote = str(matched or '').lower().startswith(('http://', 'https://'))
+    if not is_remote:
+        matched = _materialize_local_path(matched)
+    if not is_remote and not os.path.exists(matched):
         return tool_success('read_user_attachment', {
             'status': 'error',
             'message': f"File '{os.path.basename(matched)}' was found in the index but is no longer on disk.",
@@ -1281,7 +1308,7 @@ def find_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
     """Return path/url of a user-uploaded attachment without parsing it.
 
     Prefer this over read_user_attachment when you only need the file location: image
-    editing, plugins, vision_extractor, or passing an image path to other tools.
+    editing, workflows, vision_extractor, or passing an image path to other tools.
     Does not run OCR or vision description (fast).
 
     Args:
@@ -1298,46 +1325,37 @@ def find_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
     matched, err = _resolve_attachment(filename, turn)
     if err:
         return tool_success('find_user_attachment', {'status': 'error', 'message': err})
-    if not os.path.exists(matched):
+    is_remote = str(matched or '').lower().startswith(('http://', 'https://'))
+    if not is_remote:
+        matched = _materialize_local_path(matched)
+    if not is_remote and not os.path.exists(matched):
         return tool_success('find_user_attachment', {
             'status': 'error',
             'message': f"File '{os.path.basename(matched)}' was found in the index but is no longer on disk.",
         })
 
-    # Try to get a signed URL from Go /static-files:sign.
-    signed_url: Optional[str] = None
-    try:
-        import httpx
-        from lazymind.config import config as _cfg
-        core_url = str(_cfg['core_api_url']).rstrip('/')
-        resp = httpx.post(
-            f'{core_url}/static-files:sign',
-            json={'path': matched},
-            timeout=3.0,
-        )
-        if resp.status_code == 200:
-            signed_url = resp.json().get('data', {}).get('url') or resp.json().get('url')
-    except Exception:
-        pass
+    signed_url = None if is_remote else _sign_static_file_url(matched)
 
+    display_name = os.path.basename(urlparse(matched).path) if is_remote else os.path.basename(matched)
     result: Dict[str, Any] = {
         'status': 'ok',
-        'filename': os.path.basename(matched),
+        'filename': display_name or matched,
         'path': matched,
     }
     if signed_url:
         result['url'] = signed_url
     else:
-        result['url'] = matched  # fallback to local path
-        result['message'] = 'Signed URL unavailable; use the local path instead.'
+        result['url'] = matched
+        if not is_remote:
+            result['message'] = 'Signed URL unavailable; use the local path instead.'
     return tool_success('find_user_attachment', result)
 
 
 def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]:
-    """Return the accessible URL or local path of a plugin artifact.
+    """Return the accessible URL or local path of a workflow artifact.
 
-    Analogous to find_user_attachment but for plugin step outputs.
-    Reads session_id and plugin_id from agentic_config (same as save_artifacts / get_artifact).
+    Analogous to find_user_attachment but for workflow step outputs.
+    Reads session_id and workflow_id from agentic_config (same as save_artifacts / get_artifact).
 
     Args:
         slot (str): The slot id to look up (e.g. 'image_output').
@@ -1354,11 +1372,11 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
     except Exception:
         cfg = {}
 
-    session_id: str = cfg.get('plugin_session_id', '')
+    session_id: str = cfg.get('workflow_session_id', '')
     if not session_id:
         return tool_success('find_artifact', {
             'status': 'error',
-            'message': 'No active plugin session found in agentic_config.',
+            'message': 'No active workflow session found in agentic_config.',
         })
 
     ctx = get_context()
@@ -1367,12 +1385,7 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
             'status': 'error',
             'message': 'find_artifact requires an active SubAgent context.',
         })
-    if sort_order is not None:
-        result_dict = _get_plugin_artifact_by_sort_order(
-            ctx, slot, session_id, sort_order,
-        )
-    else:
-        result_dict = _get_plugin_artifact_all(ctx, slot, session_id)
+    result_dict = get_artifact(slot, sort_order=sort_order)
 
     # Unwrap inner result to extract the path.
     inner = result_dict.get('result', result_dict)
@@ -1407,24 +1420,12 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
             'message': f"Artifact '{slot}' has no resolvable path.",
         })
 
+    if not path.lower().startswith(('http://', 'https://', '/static-files/')):
+        path = _materialize_local_path(path)
+
     # Re-sign local paths when the slots API did not already provide a URL.
     if not signed_url:
-        try:
-            import httpx
-            from lazymind.config import config as _cfg
-            core_url = str(_cfg['core_api_url']).rstrip('/')
-            resp = httpx.post(
-                f'{core_url}/static-files:sign',
-                json={'paths': [path]},
-                timeout=3.0,
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                data = payload.get('data') if isinstance(payload.get('data'), dict) else payload
-                urls = data.get('urls') or {}
-                signed_url = urls.get(path)
-        except Exception:
-            pass
+        signed_url = _sign_static_file_url(path)
 
     out: Dict[str, Any] = {
         'status': 'ok',

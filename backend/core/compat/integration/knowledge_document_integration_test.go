@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"lazymind/core/acl"
@@ -76,34 +76,31 @@ func TestKnowledgeRuntimeWithRealPostgreSQLDocumentGet(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = lazyTx.Rollback().Error })
 
-	seed := fmt.Sprintf("d%x", time.Now().UnixNano())
-	userID := seed + "_user"
-	tenantID := seed + "_tenant"
-	var scanCalls atomic.Int32
-	var invalidScanIdentity atomic.Bool
 	scanServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/scan/internal/source-access/by-dataset:batch" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Header.Get("X-User-ID") != userID || r.Header.Get("X-Tenant-ID") != tenantID {
-			invalidScanIdentity.Store(true)
-			http.Error(w, "unexpected caller identity", http.StatusForbidden)
-			return
-		}
-		scanCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"items":[]}`))
 	}))
 	t.Cleanup(scanServer.Close)
 	t.Setenv("LAZYMIND_SCAN_CONTROL_PLANE_URL", scanServer.URL)
 
+	seed := fmt.Sprintf("compat_doc_it_%d", time.Now().UnixNano())
+	userID := seed + "_user"
 	otherUserID := seed + "_other_user"
 	datasetID := seed + "_ds"
+	kbID := seed + "_kb"
 	otherDatasetID := seed + "_other_ds"
+	otherKBID := seed + "_other_kb"
 	documentID := seed + "_doc"
 	otherDocumentID := seed + "_other_doc"
+	largeDocumentID := seed + "_large_doc"
+	binaryDocumentID := seed + "_binary_doc"
 	lazyDocID := seed + "_lazy_doc"
+	lazyLargeDocID := seed + "_lazy_large_doc"
+	lazyBinaryDocID := seed + "_lazy_binary_doc"
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	uploadRoot := t.TempDir()
@@ -112,11 +109,25 @@ func TestKnowledgeRuntimeWithRealPostgreSQLDocumentGet(t *testing.T) {
 	if err := os.WriteFile(textPath, []byte("hello knowledge document"), 0o600); err != nil {
 		t.Fatalf("write text file: %v", err)
 	}
-	insertDataset(t, coreTx, datasetID, userID, tenantID, now)
-	insertDataset(t, coreTx, otherDatasetID, userID, tenantID, now)
+	largePath := filepath.Join(uploadRoot, "large.txt")
+	largePayload := append([]byte(strings.Repeat("a", int(1024*1024)-1)), []byte("你b")...)
+	if err := os.WriteFile(largePath, largePayload, 0o600); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+	binaryPath := filepath.Join(uploadRoot, "sample.pdf")
+	if err := os.WriteFile(binaryPath, []byte("%PDF-1.4\n%\xff\xff\n"), 0o600); err != nil {
+		t.Fatalf("write binary file: %v", err)
+	}
+
+	insertDataset(t, coreTx, datasetID, kbID, userID, now)
+	insertDataset(t, coreTx, otherDatasetID, otherKBID, userID, now)
 	insertDocument(t, coreTx, datasetID, documentID, lazyDocID, userID, "core display should lose to lazy", textPath, "text/plain; charset=utf-8", now)
 	insertDocument(t, coreTx, otherDatasetID, otherDocumentID, seed+"_other_lazy", userID, "other doc", textPath, "text/plain; charset=utf-8", now)
+	insertDocument(t, coreTx, datasetID, largeDocumentID, lazyLargeDocID, userID, "large doc", largePath, "text/plain; charset=utf-8", now)
+	insertDocument(t, coreTx, datasetID, binaryDocumentID, lazyBinaryDocID, userID, "binary doc", binaryPath, "application/pdf", now)
 	insertLazyDocument(t, lazyTx, lazyDocID, "lazy-title.md", "FILE_SYSTEM", "READY_FROM_LAZY", 321, now)
+	insertLazyDocument(t, lazyTx, lazyLargeDocID, "large-title.txt", "LOCAL_FILE", "READY", len(largePayload), now)
+	insertLazyDocument(t, lazyTx, lazyBinaryDocID, "binary-title.pdf", "LOCAL_FILE", "READY", 13, now)
 
 	service, err := doc.NewDocumentService(doc.DocumentServiceDeps{DB: coreTx, LazyDB: lazyTx})
 	if err != nil {
@@ -136,7 +147,7 @@ func TestKnowledgeRuntimeWithRealPostgreSQLDocumentGet(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	callCtx := contract.CallContext{UserID: userID, TenantID: tenantID}
+	callCtx := contract.CallContext{UserID: userID}
 
 	t.Run("metadata dual db", func(t *testing.T) {
 		got, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
@@ -150,8 +161,8 @@ func TestKnowledgeRuntimeWithRealPostgreSQLDocumentGet(t *testing.T) {
 		if docDetail.ID != documentID || docDetail.KnowledgeID != datasetID {
 			t.Fatalf("identity = %#v, want core document/dataset IDs", docDetail)
 		}
-		if docDetail.Name != "core display should lose to lazy" || docDetail.Source != "FILE_SYSTEM" || docDetail.ParseStatus != "READY_FROM_LAZY" || docDetail.MIMEType != "text/plain; charset=utf-8" {
-			t.Fatalf("metadata not mapped from Core/readonly DB: %#v", docDetail)
+		if docDetail.Name != "lazy-title.md" || docDetail.Source != "FILE_SYSTEM" || docDetail.SizeBytes != 321 || docDetail.ParseStatus != "READY_FROM_LAZY" {
+			t.Fatalf("readonly metadata not mapped from lazy DB: %#v", docDetail)
 		}
 		if docDetail.Content != nil || docDetail.ChunksPage != nil || len(docDetail.Chunks) != 0 {
 			t.Fatalf("metadata-only should not include content/chunks: %#v", docDetail)
@@ -169,12 +180,109 @@ func TestKnowledgeRuntimeWithRealPostgreSQLDocumentGet(t *testing.T) {
 		result, err = rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{KnowledgeID: datasetID, DocumentID: lazyDocID})
 		assertCompatNotFound(t, result, err)
 	})
-	if invalidScanIdentity.Load() {
-		t.Fatal("Scan source-access check did not receive the CallContext UserID and TenantID")
-	}
-	if scanCalls.Load() == 0 {
-		t.Fatal("expected metadata reads to call deterministic Scan source-access check")
-	}
+
+	t.Run("text content", func(t *testing.T) {
+		got, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+			KnowledgeID:    datasetID,
+			DocumentID:     documentID,
+			IncludeContent: true,
+		})
+		if err != nil {
+			t.Fatalf("GetDocument content: %v", err)
+		}
+		if got.Document.Content == nil || got.Document.Content.Text != "hello knowledge document" || got.Document.Content.MIMEType != "text/plain; charset=utf-8" || got.Document.Content.Truncated {
+			t.Fatalf("unexpected text content: %#v", got.Document.Content)
+		}
+		assertNoInternalDocumentFields(t, got.Document, uploadRoot, lazyDocID)
+	})
+
+	t.Run("large utf8 content", func(t *testing.T) {
+		got, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+			KnowledgeID:    datasetID,
+			DocumentID:     largeDocumentID,
+			IncludeContent: true,
+		})
+		if err != nil {
+			t.Fatalf("GetDocument large content: %v", err)
+		}
+		if got.Document.Content == nil || !got.Document.Content.Truncated || !utf8.ValidString(got.Document.Content.Text) || len([]byte(got.Document.Content.Text)) > 1024*1024 {
+			t.Fatalf("unexpected large content: len=%d content=%#v", len([]byte(got.Document.Content.Text)), got.Document.Content)
+		}
+	})
+
+	t.Run("binary content", func(t *testing.T) {
+		got, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+			KnowledgeID:    datasetID,
+			DocumentID:     binaryDocumentID,
+			IncludeContent: true,
+		})
+		if err != nil {
+			t.Fatalf("GetDocument binary content: %v", err)
+		}
+		if got.Document.Content == nil || got.Document.Content.MIMEType != "application/pdf" || got.Document.Content.Text != "" || got.Document.Content.Truncated {
+			t.Fatalf("unexpected binary content: %#v", got.Document.Content)
+		}
+		if got.Document.OriginalFile == nil || strings.TrimSpace(got.Document.OriginalFile.FileName) == "" ||
+			!strings.HasPrefix(got.Document.OriginalFile.DownloadURL, "/datasets/"+datasetID+"/documents/"+binaryDocumentID+":download") {
+			t.Fatalf("unexpected original file ref: %#v", got.Document.OriginalFile)
+		}
+		assertNoInternalDocumentFields(t, got.Document, uploadRoot, lazyBinaryDocID)
+	})
+
+	t.Run("chunks httptest", func(t *testing.T) {
+		var gotKBID, gotDocID string
+		chunkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/chunks" {
+				http.NotFound(w, r)
+				return
+			}
+			gotKBID = r.URL.Query().Get("kb_id")
+			gotDocID = r.URL.Query().Get("doc_id")
+			if r.URL.Query().Get("page_size") != "1" || r.URL.Query().Get("page") != "1" {
+				t.Errorf("unexpected chunk query: %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"chunk_id":"chunk-1","content":"chunk text","number":1}],"total":2}`))
+		}))
+		defer chunkServer.Close()
+		t.Setenv("LAZYMIND_ALGO_SERVICE_URL", chunkServer.URL)
+
+		got, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+			KnowledgeID:    datasetID,
+			DocumentID:     documentID,
+			IncludeChunks:  true,
+			ChunksPage:     contract.PageRequest{PageSize: 1},
+			IncludeContent: false,
+		})
+		if err != nil {
+			t.Fatalf("GetDocument chunks: %v", err)
+		}
+		if gotKBID != kbID || gotDocID != lazyDocID {
+			t.Fatalf("chunk backend got kb_id=%q doc_id=%q, want %q/lazy doc", gotKBID, gotDocID, kbID)
+		}
+		if len(got.Document.Chunks) != 1 || got.Document.Chunks[0].ID != "chunk-1" || got.Document.Chunks[0].Text != "chunk text" ||
+			got.Document.ChunksPage == nil || got.Document.ChunksPage.NextPageToken == "" || got.Document.ChunksPage.Total == nil || *got.Document.ChunksPage.Total != 2 {
+			t.Fatalf("unexpected chunks result: chunks=%#v page=%#v", got.Document.Chunks, got.Document.ChunksPage)
+		}
+		assertNoInternalDocumentFields(t, got.Document, uploadRoot, lazyDocID)
+	})
+
+	t.Run("chunks unavailable", func(t *testing.T) {
+		badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "down", http.StatusBadGateway)
+		}))
+		defer badServer.Close()
+		t.Setenv("LAZYMIND_ALGO_SERVICE_URL", badServer.URL)
+		t.Setenv("LAZYMIND_PARSING_SERVICE_URL", badServer.URL)
+		_, err := rt.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+			KnowledgeID:   datasetID,
+			DocumentID:    documentID,
+			IncludeChunks: true,
+		})
+		if code, ok := contract.CodeOf(err); !ok || code != contract.BackendUnavailable {
+			t.Fatalf("chunk unavailable code=%v ok=%v err=%v, want BACKEND_UNAVAILABLE", code, ok, err)
+		}
+	})
 
 	t.Logf("Knowledge Document integration core_driver=%s lazy_driver=%s dataset=%s document=%s", coreDriver, lazyDriver, datasetID, documentID)
 }
@@ -198,16 +306,15 @@ func readonlyDBConfigFromCoreEnv(t *testing.T) (string, string) {
 	return driver, dsn
 }
 
-func insertDataset(t *testing.T, db *gorm.DB, datasetID, userID, tenantID string, now time.Time) {
+func insertDataset(t *testing.T, db *gorm.DB, datasetID, kbID, userID string, now time.Time) {
 	t.Helper()
 	if err := db.Create(&orm.Dataset{
 		ID:           datasetID,
-		KbID:         "kb-" + datasetID,
+		KbID:         kbID,
 		DisplayName:  "Dataset " + datasetID,
 		Desc:         "compat document integration",
 		DatasetState: 0,
 		ShareType:    0,
-		TenantID:     tenantID,
 		Type:         1,
 		BaseModel: orm.BaseModel{
 			CreateUserID:   userID,

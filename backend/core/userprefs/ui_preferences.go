@@ -12,20 +12,22 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
-	"lazymind/core/preferencefile"
+	"lazymind/core/currentmemory"
 	"lazymind/core/store"
 )
 
 type uiPreferencesResponse struct {
 	ChatPreferenceNoticeDismissed bool   `json:"chat_preference_notice_dismissed"`
 	DeveloperModeActive           bool   `json:"developer_mode_active"`
+	AcceptedUserAgreementVersion  string `json:"accepted_user_agreement_version"`
 	UserPreferenceConfigured      bool   `json:"user_preference_configured"`
 	UpdatedAt                     string `json:"updated_at"`
 }
 
 type uiPreferencesPatchRequest struct {
-	ChatPreferenceNoticeDismissed *bool `json:"chat_preference_notice_dismissed"`
-	DeveloperModeActive           *bool `json:"developer_mode_active"`
+	ChatPreferenceNoticeDismissed *bool   `json:"chat_preference_notice_dismissed"`
+	DeveloperModeActive           *bool   `json:"developer_mode_active"`
+	AcceptedUserAgreementVersion  *string `json:"accepted_user_agreement_version"`
 }
 
 func GetUIPreferences(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +72,9 @@ func PatchUIPreferences(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if req.ChatPreferenceNoticeDismissed == nil && req.DeveloperModeActive == nil {
+	if req.ChatPreferenceNoticeDismissed == nil &&
+		req.DeveloperModeActive == nil &&
+		req.AcceptedUserAgreementVersion == nil {
 		common.ReplyErr(w, "no valid fields to update", http.StatusBadRequest)
 		return
 	}
@@ -117,6 +121,9 @@ func UpsertUserUIPreferences(ctx context.Context, db *gorm.DB, userID string, re
 		if req.DeveloperModeActive != nil {
 			row.DeveloperModeActive = *req.DeveloperModeActive
 		}
+		if req.AcceptedUserAgreementVersion != nil {
+			row.AcceptedUserAgreementVersion = strings.TrimSpace(*req.AcceptedUserAgreementVersion)
+		}
 		if err := db.WithContext(ctx).Create(&row).Error; err != nil {
 			return orm.UserUIPreferences{}, err
 		}
@@ -135,6 +142,11 @@ func UpsertUserUIPreferences(ctx context.Context, db *gorm.DB, userID string, re
 		updates["developer_mode_active"] = *req.DeveloperModeActive
 		row.DeveloperModeActive = *req.DeveloperModeActive
 	}
+	if req.AcceptedUserAgreementVersion != nil {
+		version := strings.TrimSpace(*req.AcceptedUserAgreementVersion)
+		updates["accepted_user_agreement_version"] = version
+		row.AcceptedUserAgreementVersion = version
+	}
 	if err := db.WithContext(ctx).Model(&orm.UserUIPreferences{}).
 		Where("user_id = ?", userID).
 		Updates(updates).Error; err != nil {
@@ -145,30 +157,22 @@ func UpsertUserUIPreferences(ctx context.Context, db *gorm.DB, userID string, re
 }
 
 func LoadUserPreferenceConfigured(ctx context.Context, db *gorm.DB, userID string) (bool, error) {
-	var row struct {
-		Content []byte
-	}
-	err := db.WithContext(ctx).
-		Table("personal_resources AS r").
-		Select("b.content").
-		Joins("JOIN personal_resource_revisions AS rev ON rev.id = r.head_revision_id AND rev.resource_id = r.id").
-		Joins("JOIN personal_resource_blobs AS b ON b.hash = rev.blob_hash").
-		Where("r.user_id = ? AND r.resource_type = ?", strings.TrimSpace(userID), "user_preference").
-		Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	row, err := currentmemory.NewRepository(db).GetEntry(
+		ctx,
+		userID,
+		currentmemory.PreferencePath,
+	)
+	if errors.Is(err, currentmemory.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	file, err := preferencefile.ParseFileContent(string(row.Content))
+	document, err := currentmemory.ParsePreferences(row.Content)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(file.AgentPersona) != "" ||
-		strings.TrimSpace(file.PreferredName) != "" ||
-		strings.TrimSpace(file.ResponseStyle) != "" ||
-		strings.TrimSpace(file.Content) != "", nil
+	return len(document.Preferences) > 0, nil
 }
 
 func buildUIPreferencesResponse(row orm.UserUIPreferences, userPreferenceConfigured bool) uiPreferencesResponse {
@@ -179,6 +183,7 @@ func buildUIPreferencesResponse(row orm.UserUIPreferences, userPreferenceConfigu
 	return uiPreferencesResponse{
 		ChatPreferenceNoticeDismissed: row.ChatPreferenceNoticeDismissed,
 		DeveloperModeActive:           row.DeveloperModeActive,
+		AcceptedUserAgreementVersion:  row.AcceptedUserAgreementVersion,
 		UserPreferenceConfigured:      userPreferenceConfigured,
 		UpdatedAt:                     updatedAt,
 	}
