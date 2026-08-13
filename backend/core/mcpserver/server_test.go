@@ -45,6 +45,18 @@ type fakeKnowledgeSearchPort struct {
 	input   compatknowledge.SearchInput
 }
 
+type fakeKnowledgeDocumentPort struct {
+	result  compatknowledge.GetDocumentResult
+	err     error
+	callCtx contract.CallContext
+	input   compatknowledge.GetDocumentInput
+}
+
+func (p *fakeKnowledgeDocumentPort) GetDocument(_ context.Context, callCtx contract.CallContext, input compatknowledge.GetDocumentInput) (compatknowledge.GetDocumentResult, error) {
+	p.callCtx, p.input = callCtx, input
+	return p.result, p.err
+}
+
 func (p *fakeKnowledgeSearchPort) Search(_ context.Context, callCtx contract.CallContext, input compatknowledge.SearchInput) (compatknowledge.SearchResult, error) {
 	p.callCtx, p.input = callCtx, input
 	return p.result, p.err
@@ -95,6 +107,19 @@ func testServerWithKnowledgeSearch(t *testing.T, port *fakeSkillPort, catalog *f
 	return server
 }
 
+func testServerWithKnowledgeDocument(t *testing.T, document *fakeKnowledgeDocumentPort) *Server {
+	t.Helper()
+	rt, err := compatruntime.New(compatruntime.Dependencies{SkillPort: &fakeSkillPort{}, KnowledgeDocument: document})
+	if err != nil {
+		t.Fatalf("Runtime.New: %v", err)
+	}
+	server, err := New(rt, HeaderIdentityProvider{}, Options{ServerName: "test-server", ServerVersion: "test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return server
+}
+
 func TestInitializeCapabilities(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize"})
@@ -115,10 +140,10 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	if len(tools) != 5 || tools[0].Name != knowledgeGetToolName || tools[1].Name != knowledgeListToolName || tools[2].Name != knowledgeSearchToolName || tools[3].Name != skillGetToolName || tools[4].Name != skillListToolName {
+	if len(tools) != 6 || tools[0].Name != knowledgeDocumentGetToolName || tools[1].Name != knowledgeGetToolName || tools[2].Name != knowledgeListToolName || tools[3].Name != knowledgeSearchToolName || tools[4].Name != skillGetToolName || tools[5].Name != skillListToolName {
 		t.Fatalf("tools = %#v", tools)
 	}
-	listTool := tools[4]
+	listTool := tools[5]
 	if listTool.Description == "" || !listTool.ReadOnly || !listTool.Annotations.ReadOnlyHint {
 		t.Fatalf("tool metadata = %#v", listTool)
 	}
@@ -136,8 +161,8 @@ func TestToolsListPublishesSkillListSchemaWithoutIdentityFields(t *testing.T) {
 	if listTool.InputSchema["additionalProperties"] != false {
 		t.Fatalf("additionalProperties must be false")
 	}
-	getSchema := tools[3].InputSchema
-	if getSchema["additionalProperties"] != false || !tools[3].Annotations.ReadOnlyHint {
+	getSchema := tools[4].InputSchema
+	if getSchema["additionalProperties"] != false || !tools[4].Annotations.ReadOnlyHint {
 		t.Fatalf("skill get schema = %#v", getSchema)
 	}
 	if _, ok := getSchema["properties"].(map[string]any)["skill_id"]; !ok {
@@ -149,7 +174,7 @@ func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) 
 	server := testServer(t, &fakeSkillPort{})
 	response := server.Handle(context.Background(), rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/list"})
 	tools := response.Result.(map[string]any)["tools"].([]ToolDefinition)
-	for _, tool := range tools[:3] {
+	for _, tool := range tools[:4] {
 		if !tool.Annotations.ReadOnlyHint || tool.InputSchema["additionalProperties"] != false {
 			t.Fatalf("knowledge tool metadata = %#v", tool)
 		}
@@ -160,16 +185,16 @@ func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) 
 			}
 		}
 	}
-	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["keyword"]; !ok {
-		t.Fatalf("knowledge list schema = %#v", tools[1].InputSchema)
+	if _, ok := tools[2].InputSchema["properties"].(map[string]any)["keyword"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", tools[2].InputSchema)
 	}
-	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["tags"]; !ok {
-		t.Fatalf("knowledge list schema = %#v", tools[1].InputSchema)
+	if _, ok := tools[2].InputSchema["properties"].(map[string]any)["tags"]; !ok {
+		t.Fatalf("knowledge list schema = %#v", tools[2].InputSchema)
 	}
-	if _, ok := tools[0].InputSchema["properties"].(map[string]any)["knowledge_id"]; !ok {
-		t.Fatalf("knowledge get schema = %#v", tools[0].InputSchema)
+	if _, ok := tools[1].InputSchema["properties"].(map[string]any)["knowledge_id"]; !ok {
+		t.Fatalf("knowledge get schema = %#v", tools[1].InputSchema)
 	}
-	searchProperties := tools[2].InputSchema["properties"].(map[string]any)
+	searchProperties := tools[3].InputSchema["properties"].(map[string]any)
 	for _, field := range []string{"query", "knowledge_ids", "top_k"} {
 		if _, ok := searchProperties[field]; !ok {
 			t.Fatalf("knowledge search schema missing %q: %#v", field, searchProperties)
@@ -178,6 +203,51 @@ func TestToolsListPublishesKnowledgeSchemasAndReadOnlyAnnotations(t *testing.T) 
 	raw, err := json.Marshal(response.Result)
 	if err != nil || !strings.Contains(string(raw), `"annotations":{"readOnlyHint":true}`) {
 		t.Fatalf("tools/list wire annotations = %s, err=%v", raw, err)
+	}
+}
+
+func TestToolsCallKnowledgeDocumentGetMetadataOnlyUsesPrincipal(t *testing.T) {
+	document := &fakeKnowledgeDocumentPort{result: compatknowledge.GetDocumentResult{Document: compatknowledge.DocumentDetail{
+		ID: "doc-1", KnowledgeID: "knowledge-1", Name: "Readme", MIMEType: "text/plain",
+		Content: &compatknowledge.DocumentContent{Text: "must not leak"}, Chunks: []compatknowledge.DocumentChunk{{ID: "chunk-1", Text: "must not leak"}},
+	}}}
+	server := testServerWithKnowledgeDocument(t, document)
+	response := callHTTP(t, server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lazymind_knowledge_document_get","arguments":{"knowledge_id":"knowledge-1","document_id":"doc-1"}}}`, map[string]string{"X-User-Id": "trusted-user", "X-Tenant-Id": "tenant-a"})
+	result := response.Result.(map[string]any)
+	if result["isError"] == true || document.callCtx.UserID != "trusted-user" || document.callCtx.TenantID != "tenant-a" || document.input.IncludeContent || document.input.IncludeChunks {
+		t.Fatalf("result=%#v callCtx=%#v input=%#v", result, document.callCtx, document.input)
+	}
+	raw, err := json.Marshal(result["structuredContent"])
+	if err != nil || !strings.Contains(string(raw), `"document_id":"doc-1"`) || strings.Contains(string(raw), "must not leak") || strings.Contains(string(raw), "chunks") {
+		t.Fatalf("metadata-only structured result=%s err=%v", raw, err)
+	}
+
+	for _, arguments := range []string{
+		`{"knowledge_id":"knowledge-1"}`,
+		`{"document_id":"doc-1"}`,
+		`{"knowledge_id":"knowledge-1","document_id":"doc-1","tenant_id":"attacker"}`,
+	} {
+		response = callHTTP(t, server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazymind_knowledge_document_get","arguments":`+arguments+`}}`, map[string]string{"X-User-Id": "trusted-user"})
+		if response.Result.(map[string]any)["isError"] != true {
+			t.Fatalf("arguments %s accepted: %#v", arguments, response.Result)
+		}
+	}
+	response = callHTTP(t, server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lazymind_knowledge_document_get","arguments":{"knowledge_id":"knowledge-1","document_id":"missing"}}}`, nil)
+	if response.Result.(map[string]any)["isError"] != true {
+		t.Fatalf("missing principal accepted: %#v", response.Result)
+	}
+
+	document.err = contract.NewError(contract.NotFound, "knowledge.document.get", "SQL /private/path secret", false, errors.New("postgres password=secret"))
+	response = callHTTP(t, server, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lazymind_knowledge_document_get","arguments":{"knowledge_id":"knowledge-1","document_id":"missing"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safe, _ := json.Marshal(response.Result)
+	if !strings.Contains(string(safe), "NOT_FOUND") || strings.Contains(string(safe), "secret") || strings.Contains(string(safe), "private") || strings.Contains(string(safe), "SQL") {
+		t.Fatalf("unsafe document error=%s", safe)
+	}
+	document.err = contract.NewError(contract.BackendUnavailable, "knowledge.document.get", "readonly database /private/path", true, errors.New("postgres password=secret"))
+	response = callHTTP(t, server, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lazymind_knowledge_document_get","arguments":{"knowledge_id":"knowledge-1","document_id":"doc-1"}}}`, map[string]string{"X-User-Id": "trusted-user"})
+	safe, _ = json.Marshal(response.Result)
+	if !strings.Contains(string(safe), "BACKEND_UNAVAILABLE") || strings.Contains(string(safe), "secret") || strings.Contains(string(safe), "private") || strings.Contains(string(safe), "database") {
+		t.Fatalf("unsafe document unavailable error=%s", safe)
 	}
 }
 

@@ -215,7 +215,7 @@ func main() {
 
 	// text/PrompttextInitialize（DB + Redis）。DB text ACL text；Redis textConversationtext/text/text。
 	store.Init(db.DB, readonlyDB.DB, store.MustStateFromEnv())
-	inboundRuntime, err := compatbootstrap.NewSkillRuntime(db.DB, inboundMCPObjectRoot())
+	inboundRuntime, err := compatbootstrap.NewSkillRuntime(db.DB, readonlyDB.DB, inboundMCPObjectRoot())
 	if err != nil {
 		log.Logger.Fatal().Err(err).Msg("construct inbound MCP runtime failed")
 	}

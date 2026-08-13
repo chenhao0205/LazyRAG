@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	skillListToolName       = "lazymind_skill_list"
-	skillGetToolName        = "lazymind_skill_get"
-	knowledgeListToolName   = "lazymind_knowledge_list"
-	knowledgeGetToolName    = "lazymind_knowledge_get"
-	knowledgeSearchToolName = "lazymind_knowledge_search"
+	skillListToolName            = "lazymind_skill_list"
+	skillGetToolName             = "lazymind_skill_get"
+	knowledgeListToolName        = "lazymind_knowledge_list"
+	knowledgeGetToolName         = "lazymind_knowledge_get"
+	knowledgeDocumentGetToolName = "lazymind_knowledge_document_get"
+	knowledgeSearchToolName      = "lazymind_knowledge_search"
 )
 
 type toolCallParams struct {
@@ -46,6 +47,11 @@ type knowledgeListArguments struct {
 
 type knowledgeGetArguments struct {
 	KnowledgeID string `json:"knowledge_id"`
+}
+
+type knowledgeDocumentGetArguments struct {
+	KnowledgeID string `json:"knowledge_id"`
+	DocumentID  string `json:"document_id"`
 }
 
 type knowledgeSearchArguments struct {
@@ -127,6 +133,24 @@ func knowledgeGetTool() ToolDefinition {
 	}
 }
 
+func knowledgeDocumentGetTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        knowledgeDocumentGetToolName,
+		Description: "Get metadata for one document in an authenticated LazyMind knowledge catalog. Content and chunks are not included.",
+		ReadOnly:    true,
+		Annotations: ToolAnnotations{ReadOnlyHint: true},
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"knowledge_id": map[string]any{"type": "string", "description": "Stable LazyMind knowledge catalog ID."},
+				"document_id":  map[string]any{"type": "string", "description": "Stable LazyMind Core document ID."},
+			},
+			"required":             []string{"knowledge_id", "document_id"},
+			"additionalProperties": false,
+		},
+	}
+}
+
 func knowledgeSearchTool() ToolDefinition {
 	return ToolDefinition{
 		Name:        knowledgeSearchToolName,
@@ -176,11 +200,31 @@ func (s *Server) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 		return s.callKnowledgeList(ctx, request.ID, params.Arguments, callCtx)
 	case knowledgeGetToolName:
 		return s.callKnowledgeGet(ctx, request.ID, params.Arguments, callCtx)
+	case knowledgeDocumentGetToolName:
+		return s.callKnowledgeDocumentGet(ctx, request.ID, params.Arguments, callCtx)
 	case knowledgeSearchToolName:
 		return s.callKnowledgeSearch(ctx, request.ID, params.Arguments, callCtx)
 	default:
 		return s.resultResponse(request.ID, toolErrorResult("NOT_FOUND", "Unknown tool."))
 	}
+}
+
+func (s *Server) callKnowledgeDocumentGet(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
+	if s.runtime.Knowledge == nil {
+		return s.resultResponse(requestID, toolErrorResult("UNSUPPORTED", "Knowledge tools are not configured."))
+	}
+	args, err := decodeKnowledgeDocumentGetArguments(raw)
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorResult("INVALID_ARGUMENT", "Invalid tool arguments."))
+	}
+	result, err := s.runtime.Knowledge.GetDocument(ctx, callCtx, compatknowledge.GetDocumentInput{
+		KnowledgeID: args.KnowledgeID, DocumentID: args.DocumentID,
+		IncludeContent: false, IncludeChunks: false,
+	})
+	if err != nil {
+		return s.resultResponse(requestID, toolErrorFromCompat(err))
+	}
+	return s.resultResponse(requestID, knowledgeDocumentGetResult(result))
 }
 
 func (s *Server) callKnowledgeSearch(ctx context.Context, requestID json.RawMessage, raw json.RawMessage, callCtx contract.CallContext) rpcResponse {
@@ -331,6 +375,22 @@ func decodeKnowledgeGetArguments(raw json.RawMessage) (knowledgeGetArguments, er
 	}
 	if strings.TrimSpace(args.KnowledgeID) == "" {
 		return knowledgeGetArguments{}, fmt.Errorf("knowledge_id is required")
+	}
+	return args, nil
+}
+
+func decodeKnowledgeDocumentGetArguments(raw json.RawMessage) (knowledgeDocumentGetArguments, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return knowledgeDocumentGetArguments{}, fmt.Errorf("knowledge_id and document_id are required")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var args knowledgeDocumentGetArguments
+	if err := decoder.Decode(&args); err != nil {
+		return knowledgeDocumentGetArguments{}, fmt.Errorf("decode knowledge document get arguments: %w", err)
+	}
+	if strings.TrimSpace(args.KnowledgeID) == "" || strings.TrimSpace(args.DocumentID) == "" {
+		return knowledgeDocumentGetArguments{}, fmt.Errorf("knowledge_id and document_id are required")
 	}
 	return args, nil
 }

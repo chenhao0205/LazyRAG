@@ -76,6 +76,26 @@ type knowledgeSearchHit struct {
 	Title       string  `json:"title,omitempty"`
 }
 
+type knowledgeDocumentMetadata struct {
+	DocumentID   string                    `json:"document_id"`
+	KnowledgeID  string                    `json:"knowledge_id"`
+	Name         string                    `json:"name"`
+	Source       string                    `json:"source"`
+	Tags         []string                  `json:"tags"`
+	ParseStatus  string                    `json:"parse_status"`
+	MIMEType     string                    `json:"mime_type"`
+	SizeBytes    int64                     `json:"size_bytes"`
+	CreatedAt    time.Time                 `json:"created_at"`
+	UpdatedAt    time.Time                 `json:"updated_at"`
+	CreatedBy    string                    `json:"created_by"`
+	OriginalFile *knowledgeDocumentFileRef `json:"original_file,omitempty"`
+}
+
+type knowledgeDocumentFileRef struct {
+	FileName    string `json:"file_name"`
+	DownloadURL string `json:"download_url"`
+}
+
 func skillListResult(result compatskill.ListResult) toolResult {
 	items := make([]skillSummary, 0, len(result.Items))
 	for _, item := range result.Items {
@@ -146,6 +166,23 @@ func knowledgeSearchResult(result compatknowledge.SearchResult) toolResult {
 	return toolResult{
 		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Found %d knowledge search hit(s).", len(hits))}},
 		StructuredContent: knowledgeSearchStructuredResult{Hits: hits},
+	}
+}
+
+func knowledgeDocumentGetResult(result compatknowledge.GetDocumentResult) toolResult {
+	document := result.Document
+	item := knowledgeDocumentMetadata{
+		DocumentID: document.ID, KnowledgeID: document.KnowledgeID, Name: document.Name,
+		Source: document.Source, Tags: append([]string(nil), document.Tags...), ParseStatus: document.ParseStatus,
+		MIMEType: document.MIMEType, SizeBytes: document.SizeBytes, CreatedAt: document.CreatedAt,
+		UpdatedAt: document.UpdatedAt, CreatedBy: document.CreatedBy,
+	}
+	if document.OriginalFile != nil {
+		item.OriginalFile = &knowledgeDocumentFileRef{FileName: document.OriginalFile.FileName, DownloadURL: document.OriginalFile.DownloadURL}
+	}
+	return toolResult{
+		Content:           []textContent{{Type: "text", Text: fmt.Sprintf("Knowledge document %q metadata.", item.Name)}},
+		StructuredContent: map[string]any{"document": item},
 	}
 }
 

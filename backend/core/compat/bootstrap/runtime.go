@@ -18,7 +18,7 @@ import (
 // NewSkillRuntime constructs the application-owned Compat Runtime. The name is
 // retained for compatibility with the existing bootstrap call site; the runtime
 // now also owns the Knowledge Catalog facade when its dependencies are present.
-func NewSkillRuntime(db *gorm.DB, objectRoot string) (*compatruntime.Runtime, error) {
+func NewSkillRuntime(db, readonlyDB *gorm.DB, objectRoot string) (*compatruntime.Runtime, error) {
 	skillService := skillservice.NewSkillService(skillservice.SkillServiceDeps{
 		DB:        db,
 		BlobStore: skillservice.NewBlobStore(db, skillservice.NewLocalObjectStore(objectRoot)),
@@ -31,9 +31,14 @@ func NewSkillRuntime(db *gorm.DB, objectRoot string) (*compatruntime.Runtime, er
 	if err != nil {
 		return nil, err
 	}
+	documentAdapter, err := adaptercore.NewKnowledgeDocumentAdapterForDBs(db, readonlyDB)
+	if err != nil {
+		return nil, err
+	}
 	deps := compatruntime.Dependencies{
-		SkillPort:        skillAdapter,
-		KnowledgeCatalog: knowledgeAdapter,
+		SkillPort:         skillAdapter,
+		KnowledgeCatalog:  knowledgeAdapter,
+		KnowledgeDocument: documentAdapter,
 	}
 	// Search requires an internal service credential. Leave its facade port
 	// unconfigured until application wiring supplies one, rather than making
