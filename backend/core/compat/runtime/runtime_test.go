@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"lazymind/core/compat/clouddocument"
 	"lazymind/core/compat/contract"
 	"lazymind/core/compat/knowledge"
 	"lazymind/core/compat/skill"
@@ -58,6 +59,24 @@ func (stubKnowledgeSearchPort) Search(context.Context, contract.CallContext, kno
 	return knowledge.SearchResult{Hits: []knowledge.SearchHit{{KnowledgeID: "ds-1", DocumentID: "doc-1", Text: "hit"}}}, nil
 }
 
+type stubCloudDocumentPort struct{}
+
+func (stubCloudDocumentPort) ListSources(context.Context, contract.CallContext, clouddocument.ListInput) (clouddocument.ListResult, error) {
+	return clouddocument.ListResult{}, nil
+}
+
+func (stubCloudDocumentPort) GetSource(context.Context, contract.CallContext, string) (clouddocument.SourceDetail, error) {
+	return clouddocument.SourceDetail{}, nil
+}
+
+func (stubCloudDocumentPort) ListDocuments(context.Context, contract.CallContext, clouddocument.SourceDetail, clouddocument.GetInput) (clouddocument.DocumentListResult, error) {
+	return clouddocument.DocumentListResult{}, nil
+}
+
+func (stubCloudDocumentPort) Search(context.Context, contract.CallContext, clouddocument.SearchInput) (clouddocument.SearchResult, error) {
+	return clouddocument.SearchResult{}, nil
+}
+
 func TestNewCreatesSkillFacadeWhenPortProvided(t *testing.T) {
 	rt, err := New(Dependencies{SkillPort: stubSkillPort{}})
 	if err != nil {
@@ -65,6 +84,16 @@ func TestNewCreatesSkillFacadeWhenPortProvided(t *testing.T) {
 	}
 	if rt.Skill == nil {
 		t.Fatalf("Skill facade is nil")
+	}
+}
+
+func TestNewCreatesCloudDocumentFacadeWhenPortProvided(t *testing.T) {
+	rt, err := New(Dependencies{CloudDocumentPort: stubCloudDocumentPort{}})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if rt.CloudDocument == nil {
+		t.Fatal("CloudDocument facade is nil")
 	}
 }
 
@@ -175,8 +204,8 @@ func TestRuntimeDoesNotContainRequestState(t *testing.T) {
 			t.Fatalf("Runtime contains request field %s", name)
 		}
 	}
-	if typ.NumField() != 2 {
-		t.Fatalf("Runtime field count = %d, want 2", typ.NumField())
+	if typ.NumField() != 3 {
+		t.Fatalf("Runtime field count = %d, want 3", typ.NumField())
 	}
 }
 
