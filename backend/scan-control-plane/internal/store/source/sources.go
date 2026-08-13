@@ -324,10 +324,43 @@ func applySourceListFilters(db *gorm.DB, req SourceListRequest) *gorm.DB {
 	if req.Status != "" {
 		db = db.Where("s.status = ?", req.Status)
 	}
+	if connectorTypes := normalizeSourceListConnectorTypes(req.ConnectorTypes); len(connectorTypes) > 0 {
+		db = db.Where(
+			`EXISTS (
+				SELECT 1
+				FROM source_bindings sb_filter
+				WHERE sb_filter.source_id = s.source_id
+					AND sb_filter.status <> ?
+					AND sb_filter.connector_type IN ?
+			)`,
+			"DELETING",
+			connectorTypes,
+		)
+	}
 	if strings.TrimSpace(req.Keyword) != "" {
 		db = db.Where("LOWER(s.name) LIKE ?", "%"+strings.ToLower(strings.TrimSpace(req.Keyword))+"%")
 	}
 	return db
+}
+
+func normalizeSourceListConnectorTypes(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func ormInsertSource(db *gorm.DB, source Source) error {

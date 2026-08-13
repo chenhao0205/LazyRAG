@@ -637,6 +637,155 @@ func TestListSourcesScansProjectedSourceFields(t *testing.T) {
 	}
 }
 
+func TestListSourcesFiltersConnectorTypesBeforePagination(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "scan.db"))+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewSQLRepositoryWithDriver("sqlite", db)
+	if err := repo.AutoMigrate(); err != nil {
+		t.Fatalf("auto migrate sqlite: %v", err)
+	}
+
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	for _, seed := range []struct {
+		sourceID      string
+		connectorType string
+		updatedAt     time.Time
+	}{
+		{sourceID: "local-new", connectorType: "local_fs", updatedAt: now.Add(6 * time.Minute)},
+		{sourceID: "feishu-1", connectorType: "feishu", updatedAt: now.Add(5 * time.Minute)},
+		{sourceID: "notion-1", connectorType: "notion", updatedAt: now.Add(4 * time.Minute)},
+		{sourceID: "local-mid", connectorType: "local_fs", updatedAt: now.Add(3 * time.Minute)},
+		{sourceID: "feishu-2", connectorType: "feishu", updatedAt: now.Add(2 * time.Minute)},
+		{sourceID: "notion-2", connectorType: "notion", updatedAt: now.Add(time.Minute)},
+		{sourceID: "local-old", connectorType: "local_fs", updatedAt: now},
+	} {
+		seedSourceWithBinding(t, repo, seed.sourceID, seed.connectorType, seed.updatedAt)
+	}
+
+	unfiltered, total, err := repo.ListSources(context.Background(), SourceListRequest{
+		TenantID: "tenant-1",
+		Page:     1,
+		PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("list unfiltered sources: %v", err)
+	}
+	if total != 7 || len(unfiltered) != 7 {
+		t.Fatalf("unfiltered result total=%d records=%d, want 7", total, len(unfiltered))
+	}
+
+	page1, total, err := repo.ListSources(context.Background(), SourceListRequest{
+		TenantID:       "tenant-1",
+		ConnectorTypes: []string{"feishu", "notion"},
+		Page:           1,
+		PageSize:       2,
+	})
+	if err != nil {
+		t.Fatalf("list cloud sources page 1: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("cloud total page 1 = %d, want 4", total)
+	}
+	if got, want := fmt.Sprint(sourceListRecordIDs(page1)), "[feishu-1 notion-1]"; got != want {
+		t.Fatalf("cloud page 1 ids = %s, want %s", got, want)
+	}
+
+	page2, total, err := repo.ListSources(context.Background(), SourceListRequest{
+		TenantID:       "tenant-1",
+		ConnectorTypes: []string{"feishu", "notion"},
+		Page:           2,
+		PageSize:       2,
+	})
+	if err != nil {
+		t.Fatalf("list cloud sources page 2: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("cloud total page 2 = %d, want 4", total)
+	}
+	if got, want := fmt.Sprint(sourceListRecordIDs(page2)), "[feishu-2 notion-2]"; got != want {
+		t.Fatalf("cloud page 2 ids = %s, want %s", got, want)
+	}
+
+	seen := map[string]struct{}{}
+	for _, record := range append(page1, page2...) {
+		if strings.HasPrefix(record.Source.SourceID, "local-") {
+			t.Fatalf("cloud page included local source: %s", record.Source.SourceID)
+		}
+		if _, ok := seen[record.Source.SourceID]; ok {
+			t.Fatalf("cloud pagination returned duplicate source: %s", record.Source.SourceID)
+		}
+		seen[record.Source.SourceID] = struct{}{}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("cloud pagination returned %d unique sources, want 4", len(seen))
+	}
+}
+
+func seedSourceWithBinding(t *testing.T, repo *SQLRepository, sourceID, connectorType string, updatedAt time.Time) {
+	t.Helper()
+	if err := repo.orm.Create(&ormSource{
+		SourceID:          sourceID,
+		TenantID:          "tenant-1",
+		CreatedBy:         "user-1",
+		Name:              sourceID,
+		DatasetID:         "dataset-" + sourceID,
+		Status:            "ACTIVE",
+		SourceOptions:     JSON{},
+		IncludeExtensions: JSON{},
+		ExcludeExtensions: JSON{},
+		ConfigVersion:     1,
+		CreatedAt:         updatedAt,
+		UpdatedAt:         updatedAt,
+	}).Error; err != nil {
+		t.Fatalf("seed source %s: %v", sourceID, err)
+	}
+	if err := repo.orm.Create(&ormBinding{
+		BindingID:         "binding-" + sourceID,
+		SourceID:          sourceID,
+		BindingType:       "connector_target",
+		ConnectorType:     connectorType,
+		TargetType:        sourceListTestTargetType(connectorType),
+		TargetRef:         "target-" + sourceID,
+		TargetFingerprint: "target-" + sourceID,
+		ProviderOptions:   JSON{},
+		TreeKey:           "tree-" + sourceID,
+		BindingGeneration: 1,
+		SyncMode:          "manual",
+		Status:            "ACTIVE",
+		CreatedAt:         updatedAt,
+		UpdatedAt:         updatedAt,
+	}).Error; err != nil {
+		t.Fatalf("seed binding %s: %v", sourceID, err)
+	}
+}
+
+func sourceListTestTargetType(connectorType string) string {
+	switch connectorType {
+	case "local_fs":
+		return "local_path"
+	case "feishu":
+		return "wiki_node"
+	case "notion":
+		return "page"
+	default:
+		return "target"
+	}
+}
+
+func sourceListRecordIDs(records []SourceListRecord) []string {
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.Source.SourceID)
+	}
+	return ids
+}
+
 func TestListBindingsBySourceIDsScansAuthConnections(t *testing.T) {
 	now := time.Date(2026, 5, 31, 15, 0, 0, 0, time.UTC)
 	db := openStoreFakeDB(t, []storeFakeQuery{

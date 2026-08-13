@@ -26,13 +26,14 @@ type SourceCreateRecord struct {
 }
 
 type SourceListRequest struct {
-	CallerID  string
-	TenantID  string
-	SourceIDs []string
-	Keyword   string
-	Status    string
-	Page      int
-	PageSize  int
+	CallerID       string
+	TenantID       string
+	SourceIDs      []string
+	Keyword        string
+	Status         string
+	ConnectorTypes []string
+	Page           int
+	PageSize       int
 }
 
 type SourceListRecord struct {
@@ -42,9 +43,9 @@ type SourceListRecord struct {
 }
 
 type SourceUpdateMutation struct {
-	Source                Source
-	CreateBindings        []BindingCreateMutation
-	UpdateBindings        []BindingUpdateMutation
+	Source         Source
+	CreateBindings []BindingCreateMutation
+	UpdateBindings []BindingUpdateMutation
 	DeleteBindings []BindingDeleteMutation
 	Now            time.Time
 }

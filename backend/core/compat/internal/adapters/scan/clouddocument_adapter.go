@@ -17,7 +17,10 @@ import (
 	"lazymind/core/compat/contract"
 )
 
-const defaultCloudDocumentTimeout = 5 * time.Second
+const (
+	defaultCloudDocumentTimeout      = 5 * time.Second
+	cloudDocumentConnectorTypeFilter = "feishu,notion"
+)
 
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -62,6 +65,7 @@ func (a *CloudDocumentAdapter) ListSources(ctx context.Context, callCtx contract
 	if input.Status != "" {
 		query.Set("status", input.Status)
 	}
+	query.Set("connector_type", cloudDocumentConnectorTypeFilter)
 	query.Set("page", strconv.Itoa(offset/page.PageSize+1))
 	query.Set("page_size", strconv.Itoa(page.PageSize))
 	endpoint.RawQuery = query.Encode()
@@ -223,7 +227,7 @@ func mapHTTPError(operation string, resp *http.Response) error {
 	payload := scanErrorResponse{}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload)
 	cause := scanHTTPError{StatusCode: resp.StatusCode, Code: payload.Code, Message: payload.Message}
-	message := safeHTTPErrorMessage(resp.StatusCode, payload.Code)
+	message := safeHTTPErrorMessage(resp.StatusCode)
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
 		return contract.NewError(contract.InvalidArgument, operation, message, false, cause)
@@ -251,7 +255,7 @@ func (e scanHTTPError) Error() string {
 	return fmt.Sprintf("scan request failed: status=%d code=%s message=%s", e.StatusCode, e.Code, e.Message)
 }
 
-func safeHTTPErrorMessage(statusCode int, backendCode string) string {
+func safeHTTPErrorMessage(statusCode int) string {
 	switch statusCode {
 	case http.StatusBadRequest:
 		return "scan request is invalid"
@@ -267,9 +271,6 @@ func safeHTTPErrorMessage(statusCode int, backendCode string) string {
 		if statusCode >= http.StatusInternalServerError {
 			return "scan backend unavailable"
 		}
-	}
-	if strings.TrimSpace(backendCode) != "" {
-		return "scan request failed"
 	}
 	return "scan request failed"
 }

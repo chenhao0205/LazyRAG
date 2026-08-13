@@ -900,6 +900,7 @@ func sourceListQueryParameters() []map[string]any {
 	return []map[string]any{
 		queryParameter("keyword", stringSchema()),
 		queryParameter("status", schemaRef("SourceStatus")),
+		queryParameter("connector_type", stringSchema()),
 		queryParameter("page", integerSchema()),
 		queryParameter("page_size", integerSchema()),
 	}

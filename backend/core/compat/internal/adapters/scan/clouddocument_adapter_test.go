@@ -54,7 +54,7 @@ func TestCloudDocumentAdapterListSourcesRequestAndMapping(t *testing.T) {
 	if gotUserID != "user-1" {
 		t.Fatalf("X-User-ID = %q, want user-1", gotUserID)
 	}
-	for _, want := range []string{"keyword=doc", "status=ACTIVE", "page=3", "page_size=20"} {
+	for _, want := range []string{"keyword=doc", "status=ACTIVE", "connector_type=feishu%2Cnotion", "page=3", "page_size=20"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("query = %q, want contains %s", gotQuery, want)
 		}

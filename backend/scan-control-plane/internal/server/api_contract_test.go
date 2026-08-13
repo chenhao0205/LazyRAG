@@ -61,6 +61,32 @@ func TestCreateSourceHandlerRequiresBindingsArray(t *testing.T) {
 	}
 }
 
+func TestListSourcesHandlerParsesConnectorTypeFilter(t *testing.T) {
+	t.Parallel()
+
+	engine := &serverSourceEngineStub{}
+	handler := NewHandler(WithSourceEngine(engine), WithAccessChecker(allowAccess{}))
+	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources?keyword=doc&status=ACTIVE&connector_type=feishu,notion&page=2&page_size=3", nil)
+	setAPIContractActor(req)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if engine.listCalls != 1 {
+		t.Fatalf("expected list source call, got %d", engine.listCalls)
+	}
+	got := engine.lastList
+	if got.CallerID != "user-1" || got.TenantID != "tenant-1" || got.Keyword != "doc" || got.Status != "ACTIVE" || got.Page != 2 || got.PageSize != 3 {
+		t.Fatalf("list request did not preserve basic filters: %+v", got)
+	}
+	if len(got.ConnectorTypes) != 2 || got.ConnectorTypes[0] != connector.ConnectorType("feishu") || got.ConnectorTypes[1] != connector.ConnectorType("notion") {
+		t.Fatalf("connector type filter = %+v, want [feishu notion]", got.ConnectorTypes)
+	}
+}
+
 func TestCreateSourceHandlerRejectsLocalSourceForNonAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -906,10 +932,12 @@ func assertJSONNumber(t *testing.T, value any, want string) {
 
 type serverSourceEngineStub struct {
 	createCalls          int
+	listCalls            int
 	addBindingCalls      int
 	getByDatasetCalls    int
 	deleteByDatasetCalls int
 	lastCreate           sourceengine.CreateSourceRequest
+	lastList             sourceengine.ListSourcesRequest
 	lastSync             sourceengine.TriggerSourceSyncRequest
 	lastGetDatasetID     string
 	lastDeleteDatasetID  string
@@ -947,7 +975,9 @@ func (s *serverSourceEngineStub) CreateSource(_ context.Context, req sourceengin
 	}, nil
 }
 
-func (s *serverSourceEngineStub) ListSources(context.Context, sourceengine.ListSourcesRequest) (sourceengine.ListSourcesResponse, error) {
+func (s *serverSourceEngineStub) ListSources(_ context.Context, req sourceengine.ListSourcesRequest) (sourceengine.ListSourcesResponse, error) {
+	s.listCalls++
+	s.lastList = req
 	return sourceengine.ListSourcesResponse{}, nil
 }
 
