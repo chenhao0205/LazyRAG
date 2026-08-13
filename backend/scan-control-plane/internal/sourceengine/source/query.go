@@ -32,14 +32,28 @@ func (e *DefaultEngine) ListSources(ctx context.Context, req ListSourcesRequest)
 
 func storeListSourcesRequest(req ListSourcesRequest) store.SourceListRequest {
 	return store.SourceListRequest{
-		CallerID:  req.CallerID,
-		TenantID:  req.TenantID,
-		SourceIDs: req.SourceIDs,
-		Keyword:   req.Keyword,
-		Status:    req.Status,
-		Page:      req.Page,
-		PageSize:  req.PageSize,
+		CallerID:       req.CallerID,
+		TenantID:       req.TenantID,
+		SourceIDs:      req.SourceIDs,
+		Keyword:        req.Keyword,
+		Status:         req.Status,
+		ConnectorTypes: connectorTypeStrings(req.ConnectorTypes),
+		Page:           req.Page,
+		PageSize:       req.PageSize,
 	}
+}
+
+func connectorTypeStrings(types []connector.ConnectorType) []string {
+	if len(types) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(types))
+	for _, connectorType := range types {
+		if value := strings.TrimSpace(string(connectorType)); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (e *DefaultEngine) attachAuthConnectionStatuses(ctx context.Context, req ListSourcesRequest, items []SourceListItemResponse) {

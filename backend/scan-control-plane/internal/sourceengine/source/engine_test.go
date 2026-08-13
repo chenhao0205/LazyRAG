@@ -619,6 +619,17 @@ func TestListSourcesReturnsPlanFlatItems(t *testing.T) {
 	}
 }
 
+func TestStoreListSourcesRequestPreservesConnectorTypes(t *testing.T) {
+	got := storeListSourcesRequest(ListSourcesRequest{
+		CallerID:       "user-1",
+		TenantID:       "tenant-1",
+		ConnectorTypes: []connector.ConnectorType{"feishu", " notion ", ""},
+	})
+	if !reflect.DeepEqual(got.ConnectorTypes, []string{"feishu", "notion"}) {
+		t.Fatalf("ConnectorTypes = %#v, want feishu/notion", got.ConnectorTypes)
+	}
+}
+
 func TestListSourcesAttachesBatchAuthConnectionStatus(t *testing.T) {
 	t.Parallel()
 

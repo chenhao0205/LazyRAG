@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lazymind/scan_control_plane/internal/access"
+	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector"
 	sourceengine "github.com/lazymind/scan_control_plane/internal/sourceengine/source"
 )
 
@@ -87,13 +88,14 @@ func (h *Handler) listSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := sourceengine.ListSourcesRequest{
-		CallerID:  actor.UserID,
-		TenantID:  actor.TenantID,
-		SourceIDs: sourceIDs,
-		Keyword:   r.URL.Query().Get("keyword"),
-		Status:    r.URL.Query().Get("status"),
-		Page:      parseIntQuery(r, "page"),
-		PageSize:  parseIntQuery(r, "page_size"),
+		CallerID:       actor.UserID,
+		TenantID:       actor.TenantID,
+		SourceIDs:      sourceIDs,
+		Keyword:        r.URL.Query().Get("keyword"),
+		Status:         r.URL.Query().Get("status"),
+		ConnectorTypes: parseConnectorTypesQuery(r.URL.Query()["connector_type"]),
+		Page:           parseIntQuery(r, "page"),
+		PageSize:       parseIntQuery(r, "page_size"),
 	}
 	resp, err := h.sources.ListSources(r.Context(), req)
 	if err != nil {
@@ -101,6 +103,21 @@ func (h *Handler) listSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func parseConnectorTypesQuery(values []string) []connector.ConnectorType {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]connector.ConnectorType, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, connector.ConnectorType(part))
+			}
+		}
+	}
+	return out
 }
 
 func (h *Handler) getSource(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +181,6 @@ func (h *Handler) batchGetSourcesByDatasetIDs(w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"source_map": result})
 }
-
 
 type sourceAccessByDatasetBatchRequest struct {
 	DatasetIDs []string `json:"dataset_ids"`
@@ -561,4 +577,3 @@ func boolQueryDefault(r *http.Request, key string, fallback bool) bool {
 	}
 	return parsed
 }
-

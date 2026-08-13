@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -459,6 +460,13 @@ func TestListSourcesScansProjectedSourceFields(t *testing.T) {
 	}
 	if record.Source.SourceOptions["source_type"] != "local_fs" {
 		t.Fatalf("source JSON options were not scanned: %#v", record.Source.SourceOptions)
+	}
+}
+
+func TestNormalizeSourceListConnectorTypes(t *testing.T) {
+	got := normalizeSourceListConnectorTypes([]string{" Feishu ", "notion", "FEISHU", "", "notion"})
+	if want := []string{"feishu", "notion"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("connector types = %#v, want %#v", got, want)
 	}
 }
 

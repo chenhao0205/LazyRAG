@@ -61,6 +61,23 @@ func TestCreateSourceHandlerRequiresBindingsArray(t *testing.T) {
 	}
 }
 
+func TestListSourcesHandlerParsesCloudConnectorTypes(t *testing.T) {
+	engine := &serverSourceEngineStub{}
+	handler := NewHandler(WithSourceEngine(engine), WithAccessChecker(allowAccess{}))
+	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources?connector_type=feishu,notion&connector_type=feishu", nil)
+	setAPIContractActor(req)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !reflect.DeepEqual(engine.lastList.ConnectorTypes, []connector.ConnectorType{"feishu", "notion", "feishu"}) {
+		t.Fatalf("ConnectorTypes = %#v", engine.lastList.ConnectorTypes)
+	}
+}
+
 func TestCreateSourceHandlerRejectsLocalSourceForNonAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -910,6 +927,7 @@ type serverSourceEngineStub struct {
 	getByDatasetCalls    int
 	deleteByDatasetCalls int
 	lastCreate           sourceengine.CreateSourceRequest
+	lastList             sourceengine.ListSourcesRequest
 	lastSync             sourceengine.TriggerSourceSyncRequest
 	lastGetDatasetID     string
 	lastDeleteDatasetID  string
@@ -947,8 +965,13 @@ func (s *serverSourceEngineStub) CreateSource(_ context.Context, req sourceengin
 	}, nil
 }
 
-func (s *serverSourceEngineStub) ListSources(context.Context, sourceengine.ListSourcesRequest) (sourceengine.ListSourcesResponse, error) {
+func (s *serverSourceEngineStub) ListSources(_ context.Context, req sourceengine.ListSourcesRequest) (sourceengine.ListSourcesResponse, error) {
+	s.lastList = req
 	return sourceengine.ListSourcesResponse{}, nil
+}
+
+func (s *serverSourceEngineStub) IsBindingPathAccessible(context.Context, string, string) bool {
+	return true
 }
 
 func (s *serverSourceEngineStub) GetSource(context.Context, sourceengine.GetSourceRequest) (sourceengine.GetSourceResponse, error) {

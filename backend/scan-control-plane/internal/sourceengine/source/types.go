@@ -63,7 +63,7 @@ type CreateSourceRequest struct {
 	Bindings          []BindingInput `json:"bindings"`
 	IncludeExtensions []string       `json:"include_extensions,omitempty"`
 	ExcludeExtensions []string       `json:"exclude_extensions,omitempty"`
-	ChatEnabled            *bool                      `json:"chat_enabled,omitempty"`
+	ChatEnabled       *bool          `json:"chat_enabled,omitempty"`
 	SourceOptions     map[string]any `json:"source_options,omitempty"`
 }
 
@@ -74,7 +74,7 @@ type UpdateSourceRequest struct {
 	BindingsProvided  bool           `json:"-"`
 	IncludeExtensions []string       `json:"include_extensions,omitempty"`
 	ExcludeExtensions []string       `json:"exclude_extensions,omitempty"`
-	ChatEnabled            *bool                      `json:"chat_enabled,omitempty"`
+	ChatEnabled       *bool          `json:"chat_enabled,omitempty"`
 	SourceOptions     map[string]any `json:"source_options,omitempty"`
 }
 
@@ -91,18 +91,19 @@ type BindingInput struct {
 	SchedulePolicy    store.JSON              `json:"schedule_policy,omitempty"`
 	IncludeExtensions []string                `json:"include_extensions,omitempty"`
 	ExcludeExtensions []string                `json:"exclude_extensions,omitempty"`
-	ChatEnabled            *bool                      `json:"chat_enabled,omitempty"`
+	ChatEnabled       *bool                   `json:"chat_enabled,omitempty"`
 	Status            string                  `json:"status,omitempty"`
 }
 
 type ListSourcesRequest struct {
-	CallerID  string
-	TenantID  string
-	SourceIDs []string
-	Keyword   string
-	Status    string
-	Page      int
-	PageSize  int
+	CallerID       string
+	TenantID       string
+	SourceIDs      []string
+	Keyword        string
+	Status         string
+	ConnectorTypes []connector.ConnectorType
+	Page           int
+	PageSize       int
 }
 
 type GetSourceRequest struct {
@@ -140,7 +141,7 @@ type SourceResponse struct {
 	SourceOptions     map[string]any `json:"source_options,omitempty"`
 	IncludeExtensions []string       `json:"include_extensions,omitempty"`
 	ExcludeExtensions []string       `json:"exclude_extensions,omitempty"`
-	ChatEnabled            *bool                      `json:"chat_enabled,omitempty"`
+	ChatEnabled       *bool          `json:"chat_enabled,omitempty"`
 	ConfigVersion     int64          `json:"config_version"`
 	DeletedAt         *time.Time     `json:"deleted_at,omitempty"`
 	CreatedAt         time.Time      `json:"created_at"`
@@ -349,5 +350,3 @@ type ScheduleEngine interface {
 	TriggerInitialSync(ctx context.Context, binding store.Binding) ([]string, error)
 	EnqueueManualSync(ctx context.Context, req scheduleengine.ManualSyncRequest) (scheduleengine.SyncRunIntent, error)
 }
-
-
