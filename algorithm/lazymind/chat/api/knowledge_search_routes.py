@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
-from typing import List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ class KnowledgeSearchRequest(BaseModel):
     query: str = Field(...)
     kb_ids: List[str] = Field(...)
     top_k: int = Field(default=10)
+    llm_config: Dict[str, Any] = Field(default_factory=dict)
 
 
 class KnowledgeSearchHitResponse(BaseModel):
@@ -61,7 +62,9 @@ def require_internal_token(provided: Optional[str]) -> str:
 @router.post('/internal/knowledge:search', response_model=KnowledgeSearchResponse)
 async def search_knowledge(
     request: KnowledgeSearchRequest,
-    x_lazymind_internal_token: Optional[str] = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+    x_lazymind_internal_token: Annotated[
+        Optional[str], Header(alias=INTERNAL_TOKEN_HEADER)
+    ] = None,
 ):
     require_internal_token(x_lazymind_internal_token)
     try:
@@ -71,6 +74,7 @@ async def search_knowledge(
             query=request.query,
             kb_ids=request.kb_ids,
             top_k=request.top_k,
+            llm_config=request.llm_config,
         )
     except knowledge_search_service.KnowledgeSearchError as exc:
         status = 400 if exc.code == 'INVALID_ARGUMENT' else 503

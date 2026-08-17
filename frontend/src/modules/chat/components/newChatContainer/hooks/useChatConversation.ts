@@ -6,7 +6,7 @@ import {
   ChatConversationsResponseFinishReasonEnum,
 } from "@/api/generated/chatbot-client";
 import { allowedImageTypes } from "../../ImageUpload";
-import type { ChatFileList, ChatInputImperativeProps, SendMessageParams } from "../../ChatInput";
+import type { ChatFileList, ChatInputImperativeProps, SendMessageParams } from "../../ChatInput/types";
 import { RoleTypes } from "@/modules/chat/constants/common";
 import {
   CHAT_AUTO_ADVANCE_EVENT,
@@ -14,7 +14,6 @@ import {
   CHAT_RESUME_CONVERSATION_KEY,
   type ChatAutoAdvanceDetail,
 } from "@/modules/chat/constants/chat";
-import { useTaskCenterStore } from "@/modules/chat/store/taskCenter";
 import { streamManager } from "@/modules/chat/utils/StreamManager";
 import { ChatServiceApi } from "@/modules/chat/utils/request";
 import UIUtils from "@/modules/chat/utils/ui";
@@ -38,6 +37,22 @@ import { waitForRuntimeCapability } from "@/runtime/readiness";
 
 type UserEditApi = ReturnType<typeof useUserMessageEdit>;
 type RuntimeWaitingOperation = "chat" | "workflow";
+
+function appendStreamDelta(previous: string, incoming: string) {
+  if (!previous || !incoming) {
+    return previous + incoming;
+  }
+  if (incoming.startsWith(previous)) {
+    return incoming;
+  }
+  const maxOverlap = Math.min(previous.length, incoming.length);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (previous.endsWith(incoming.slice(0, size))) {
+      return previous + incoming.slice(size);
+    }
+  }
+  return previous + incoming;
+}
 
 interface UseChatConversationOptions {
   canChat: boolean;
@@ -311,42 +326,6 @@ export function useChatConversation({
       showFFmpegDependencyPrompt();
     }
 
-    if (result.task_created && result.task_created.task_id) {
-      const convId =
-        result.conversation_id || currentConversationIdRef.current || "";
-      const tc = result.task_created;
-      const taskStore = useTaskCenterStore.getState();
-      const existingTask = taskStore.getTasks(convId).find(
-        (task) => task.task_id === tc.task_id,
-      );
-      const terminal = existingTask && [
-        "succeeded", "failed", "interrupted", "canceled",
-      ].includes(existingTask.status);
-      taskStore.upsertTask(convId, {
-        task_id: tc.task_id,
-        trigger_history_id: tc.trigger_history_id || result.history_id,
-        seq_in_conversation: tc.seq_in_conversation,
-        title: tc.title,
-        agent_type: tc.agent_type,
-        mode: tc.mode,
-        ...(terminal ? {} : { status: tc.status || "pending" }),
-      });
-      if (!terminal) taskStore.subscribeTask(convId, tc.task_id);
-      if (tc.agent_type === "workflow_step" && tc.workflow_session_id) {
-        import("@/modules/chat/store/workflowPanel").then(({ useWorkflowStore }) => {
-          useWorkflowStore.getState().loadActiveSession(convId);
-        });
-      }
-    }
-
-    if (result.artifact_created?.artifact_id) {
-      const convId = result.conversation_id || currentConversationIdRef.current || "";
-      useTaskCenterStore.getState().upsertConversationArtifact(
-        convId,
-        result.artifact_created,
-      );
-    }
-
     const messageConversationId = result.conversation_id || "";
     const currentConversationIdAtStart = currentConversationIdRef.current;
     const isUsingTempId = currentConversationIdAtStart.startsWith("temp_");
@@ -493,6 +472,39 @@ export function useChatConversation({
       }
       let assistantMessage =
         newList.length > 0 ? newList[newList.length - 1] : null;
+      let assistantMessageIndex = newList.length - 1;
+      if (result.history_id) {
+        const existingAssistantIndex = newList.findIndex(
+          (item) =>
+            item?.role === RoleTypes.ASSISTANT &&
+            item?.history_id === result.history_id,
+        );
+        if (existingAssistantIndex >= 0) {
+          assistantMessageIndex = existingAssistantIndex;
+          assistantMessage = newList[existingAssistantIndex];
+        }
+      }
+
+
+      const incomingExternalSequence = Number(
+        result.external_event_sequence || 0,
+      );
+      const currentExternalSequence = Number(
+        assistantMessage?.external_event_sequence || 0,
+      );
+      const executionChanged =
+        !!result.execution &&
+        JSON.stringify(result.execution) !==
+          JSON.stringify(assistantMessage?.execution);
+      if (
+        incomingExternalSequence > 0 &&
+        currentExternalSequence >= incomingExternalSequence &&
+        (!result.history_id ||
+          result.history_id === assistantMessage?.history_id) &&
+        !executionChanged
+      ) {
+        return newList;
+      }
 
       const isLastAssistantCompleted =
         assistantMessage?.role === RoleTypes.ASSISTANT &&
@@ -513,11 +525,12 @@ export function useChatConversation({
           answers: [],
         };
         newList.push(assistantMessage);
+        assistantMessageIndex = newList.length - 1;
       }
 
       const previousRawDelta =
         assistantMessage.raw_delta || assistantMessage.delta || "";
-      const mergedRawDelta = previousRawDelta + (result.delta || "");
+      const mergedRawDelta = appendStreamDelta(previousRawDelta, result.delta || "");
       const splitResult = splitThinkingContent(
         mergedRawDelta,
         assistantMessage.reasoning_content || "",
@@ -539,7 +552,7 @@ export function useChatConversation({
             : assistantMessage.sources,
       };
 
-      newList[newList.length - 1] = assistantMessage;
+      newList[assistantMessageIndex] = assistantMessage;
       return newList;
     };
 
@@ -692,7 +705,13 @@ export function useChatConversation({
       error: (e) => onError(e),
       timeout: (e) => onTimeout(e),
     };
-    const sse = onOpenResumeSSE(conversationId, {});
+    const latestAssistant = messageListRef.current.findLast(
+      (item) => item?.role === RoleTypes.ASSISTANT,
+    );
+    const sse = onOpenResumeSSE(conversationId, {}, {
+      historyId: latestAssistant?.history_id,
+      afterSequence: Number(latestAssistant?.external_event_sequence || 0),
+    });
     sseRef.current = sse;
 
     streamManager.registerStream(conversationId, sse, callbacks);
@@ -959,7 +978,7 @@ export function useChatConversation({
           messageListRef.current,
         );
         disconnectConversationStream(previousConversationId, {
-          persistResumeKey: true,
+          persistResumeKey: false,
         });
       }
 
@@ -967,12 +986,6 @@ export function useChatConversation({
     }
 
     currentConversationIdRef.current = id;
-
-    if (id) {
-      import("@/modules/chat/store/workflowPanel").then(({ useWorkflowStore }) => {
-        useWorkflowStore.getState().loadActiveSession(id);
-      });
-    }
 
     streamManager.setActiveConversation(id || null);
     if (id) {

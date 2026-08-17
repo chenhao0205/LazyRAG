@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"lazymind/core/common"
 	"lazymind/core/common/orm"
 )
 
@@ -34,9 +36,10 @@ type repositoryError string
 func (e repositoryError) Error() string { return string(e) }
 
 type Repository struct {
-	db   *gorm.DB
-	mu   sync.RWMutex
-	subs map[string]map[chan Event]struct{}
+	db        *gorm.DB
+	mu        sync.RWMutex
+	commandMu sync.Mutex
+	subs      map[string]map[chan Event]struct{}
 }
 
 // ListWorkflowPackages returns active published Workflows visible to owner.
@@ -407,44 +410,61 @@ func (r *Repository) UpdateCommandResponse(ctx context.Context, owner, commandID
 }
 
 func (r *Repository) SetSessionStopped(ctx context.Context, owner, sessionID, commandID string, stop bool) (int64, error) {
-	if err := r.AuthorizeSession(ctx, sessionID, owner); err != nil {
-		return 0, err
-	}
-	var version int64
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	request, _ := json.Marshal(map[string]any{"session_id": sessionID, "stopped": stop})
+	command, _, err := r.Command(ctx, owner, sessionID, commandID, "workflow.v1", request, func(tx *gorm.DB) (int, json.RawMessage, error) {
 		var session orm.WorkflowSession
-		if err := tx.Where("id = ? AND create_user_id = ?", sessionID, owner).First(&session).Error; err != nil {
-			return err
+		if err := tx.Where("id = ?", sessionID).First(&session).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return 0, nil, ErrNotFound
+			}
+			return 0, nil, err
+		}
+		if session.CreateUserID != owner {
+			return 0, nil, ErrPermissionDenied
 		}
 		status := "active"
 		if stop {
 			status = "stopped"
+			if session.Status == "completed" || session.Status == "failed" {
+				return 0, nil, repositoryError("WORKFLOW_TERMINAL")
+			}
+			if session.Status == status {
+				response, _ := json.Marshal(map[string]any{"session_id": sessionID, "status": status, "state_version": session.StateVersion})
+				return http.StatusOK, response, nil
+			}
 			if err := tx.Model(&orm.WorkflowSessionStep{}).Where("session_id = ? AND status IN ?", sessionID,
 				[]string{"queued", "claimed", "running", "pending"}).Updates(map[string]any{
 				"status": "interrupted", "terminal_code": "WORKFLOW_STOPPED", "lease_expires_at": nil,
 				"updated_at": time.Now().UTC(),
 			}).Error; err != nil {
-				return err
+				return 0, nil, err
 			}
 			if err := tx.Model(&orm.WorkflowOutbox{}).Where("session_id = ? AND status IN ?", sessionID,
 				[]string{"pending", "claimed"}).Updates(map[string]any{"status": "cancelled", "updated_at": time.Now().UTC()}).Error; err != nil {
-				return err
+				return 0, nil, err
 			}
 		} else if session.Status != "stopped" {
-			return repositoryError("WORKFLOW_NOT_STOPPED")
+			return 0, nil, repositoryError("WORKFLOW_NOT_STOPPED")
 		}
-		version = session.StateVersion + 1
+		version := session.StateVersion + 1
 		if err := tx.Model(&orm.WorkflowSession{}).Where("id = ?", sessionID).Updates(map[string]any{
 			"status": status, "state_version": version, "updated_at": time.Now().UTC(),
 		}).Error; err != nil {
-			return err
+			return 0, nil, err
 		}
-		payload, _ := json.Marshal(map[string]any{"session_id": sessionID, "status": status, "state_version": version})
-		return tx.Create(&orm.WorkflowEvent{SessionID: sessionID, OwnerUserID: owner, ContractVersion: "workflow.v1",
-			EventType: "workflow.patch", EntityID: sessionID, StateVersion: version, CommandID: commandID,
-			PayloadJSON: payload, CreatedAt: time.Now().UTC()}).Error
+		response, _ := json.Marshal(map[string]any{"session_id": sessionID, "status": status, "state_version": version})
+		return http.StatusOK, response, nil
 	})
-	return version, err
+	if err != nil {
+		return 0, err
+	}
+	var response struct {
+		StateVersion int64 `json:"state_version"`
+	}
+	if json.Unmarshal(command.ResponseJSON, &response) != nil {
+		return 0, repositoryError("STORED_LIFECYCLE_RESPONSE_INVALID")
+	}
+	return response.StateVersion, nil
 }
 
 func (r *Repository) CreateHostSession(ctx context.Context, owner, sessionID, conversationID, originHost,
@@ -612,6 +632,20 @@ func (r *Repository) Consume(ctx context.Context, id, owner, sessionID string) (
 func requestHash(body []byte) string { sum := sha256.Sum256(body); return hex.EncodeToString(sum[:]) }
 
 func (r *Repository) Command(ctx context.Context, owner, sessionID, commandID, version string, request []byte, execute func(*gorm.DB) (int, json.RawMessage, error)) (Command, bool, error) {
+	if r.db.Dialector.Name() == "sqlite" {
+		// The delegated transition uses the shared Core DB directly. Keeping an
+		// outer SQLite transaction open while it executes makes that inner write
+		// contend with our own read snapshot and produces SQLITE_BUSY_SNAPSHOT.
+		// Serialize local commands, execute without an outer transaction, then
+		// persist the facade result in a short retryable transaction.
+		r.commandMu.Lock()
+		defer r.commandMu.Unlock()
+		return r.commandSQLite(ctx, owner, sessionID, commandID, version, request, execute)
+	}
+	return r.commandTransactional(ctx, owner, sessionID, commandID, version, request, execute)
+}
+
+func (r *Repository) commandTransactional(ctx context.Context, owner, sessionID, commandID, version string, request []byte, execute func(*gorm.DB) (int, json.RawMessage, error)) (Command, bool, error) {
 	var result Command
 	var committedEvent *Event
 	hash := requestHash(request)
@@ -656,6 +690,54 @@ func (r *Repository) Command(ctx context.Context, owner, sessionID, commandID, v
 		r.publish(*committedEvent)
 	}
 	return result, created, nil
+}
+
+func (r *Repository) commandSQLite(ctx context.Context, owner, sessionID, commandID, version string, request []byte, execute func(*gorm.DB) (int, json.RawMessage, error)) (Command, bool, error) {
+	hash := requestHash(request)
+	var existing Command
+	if err := r.db.WithContext(ctx).Where("command_id = ?", commandID).First(&existing).Error; err == nil {
+		if existing.OwnerUserID != owner {
+			return Command{}, false, ErrPermissionDenied
+		}
+		if existing.RequestHash != hash {
+			return Command{}, false, ErrIdempotencyConflict
+		}
+		return existing, false, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return Command{}, false, err
+	}
+
+	status, response, err := execute(r.db.WithContext(ctx))
+	if err != nil {
+		return Command{}, false, err
+	}
+	result := Command{CommandID: commandID, OwnerUserID: owner, SessionID: sessionID,
+		ContractVersion: version, RequestHash: hash, HTTPStatus: status,
+		ResponseJSON: response, CreatedAt: time.Now().UTC()}
+	var committedEvent *Event
+	err = common.TransactionWithSQLiteBusyRetry(ctx, r.db, func(tx *gorm.DB) error {
+		if err := tx.Create(&result).Error; err != nil {
+			return err
+		}
+		if status >= 400 {
+			return nil
+		}
+		var responseObject map[string]any
+		_ = json.Unmarshal(response, &responseObject)
+		stateVersion, _ := responseObject["state_version"].(float64)
+		committedEvent = &Event{SessionID: sessionID, OwnerUserID: owner,
+			ContractVersion: version, EventType: "workflow.patch", EntityID: sessionID,
+			StateVersion: int64(stateVersion), CommandID: commandID,
+			PayloadJSON: response, CreatedAt: time.Now().UTC()}
+		return tx.Create(committedEvent).Error
+	})
+	if err != nil {
+		return Command{}, false, err
+	}
+	if committedEvent != nil {
+		r.publish(*committedEvent)
+	}
+	return result, true, nil
 }
 
 func (r *Repository) AppendEvent(ctx context.Context, event *Event) error {

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+import lazyllm
+from lazyllm.common.globals import init_session
 
 from lazymind.chat.engine.tools.algo import search_kb
 from lazymind.chat.engine.tools.kb import _ensure_kb_search_runtime, _serialize_kb_result
+from lazymind.model_config import inject_model_config
 
 _DEFAULT_RETRIEVER_TOPK = 20
 _DEFAULT_RERANK_TOPK = 20
@@ -14,9 +18,13 @@ _DEFAULT_IMAGE_TOPK = 0
 
 class KnowledgeSearchError(Exception):
     def __init__(self, code: str, message: str, cause: Optional[BaseException] = None):
-        super().__init__(message)
+        super().__init__(code, message, cause)
         self.code = code
+        self.message = message
         self.cause = cause
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -30,7 +38,8 @@ class KnowledgeSearchHit:
     source_url: str = ''
 
 
-def search(user_id: str, query: str, kb_ids: List[str], top_k: int) -> List[KnowledgeSearchHit]:
+def search(user_id: str, query: str, kb_ids: List[str], top_k: int,
+           llm_config: Optional[Dict[str, Any]] = None) -> List[KnowledgeSearchHit]:
     user_id = (user_id or '').strip()
     query = (query or '').strip()
     kb_ids = [str(kb_id).strip() for kb_id in kb_ids or [] if str(kb_id).strip()]
@@ -49,13 +58,16 @@ def search(user_id: str, query: str, kb_ids: List[str], top_k: int) -> List[Know
     if top_k > 50:
         top_k = 50
 
+    init_session()
     try:
+        inject_model_config(llm_config)
         retrievers, reranker, image_retriever = _ensure_kb_search_runtime()
         raw = search_kb(
             {
                 'query': query,
                 'filters': {'kb_id': kb_ids},
                 'user_id': user_id,
+                'llm_config': llm_config or {},
             },
             retrievers=retrievers,
             reranker=reranker,
@@ -70,6 +82,8 @@ def search(user_id: str, query: str, kb_ids: List[str], top_k: int) -> List[Know
         raise
     except Exception as exc:
         raise KnowledgeSearchError('BACKEND_UNAVAILABLE', 'knowledge search backend unavailable', exc) from exc
+    finally:
+        lazyllm.globals.clear()
 
 
 def _hits_from_serialized(serialized: Any, allowed_kb_ids: List[str], limit: int) -> List[KnowledgeSearchHit]:

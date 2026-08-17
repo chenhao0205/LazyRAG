@@ -39,15 +39,16 @@ type WorkflowSession struct {
 
 func (WorkflowSession) TableName() string { return "plugin_sessions" }
 
-// WorkflowSessionStep tracks one step execution instance inside a plugin session.
-// Each record maps to exactly one sub_agent_tasks row (task_id == sub_agent_tasks.id).
+// WorkflowSessionStep is the authoritative attempt state inside a Workflow session.
+// Native LazyMind execution may use TaskID to reference a sub_agent_tasks adapter
+// record. Hosted execution uses the attempt ID directly and creates no SubAgent task.
 type WorkflowSessionStep struct {
 	ID        string `gorm:"column:id;type:varchar(36);primaryKey"`
 	SessionID string `gorm:"column:session_id;type:varchar(36);not null"`
 	StepID    string `gorm:"column:step_id;type:varchar(64);not null"`
 	Attempt   int    `gorm:"column:attempt;not null;default:1"`
 	TaskID    string `gorm:"column:task_id;type:varchar(36);not null"`
-	// Status mirrors sub_agent_tasks.status (synced by Go on each event).
+	// Status is owned by Workflow Runtime. Native execution mirrors accepted task events.
 	Status            string     `gorm:"column:status;type:varchar(16);not null;default:pending"`
 	Validity          string     `gorm:"column:validity;type:varchar(16);not null;default:effective"`
 	LeaseOwner        string     `gorm:"column:lease_owner;type:varchar(255);not null;default:''"`
@@ -102,7 +103,8 @@ type WorkflowSlotRevision struct {
 	// ContentSnapshot is kept for legacy fallback (pre-migration AI rows where
 	// artifact_seq was not yet populated, and pre-human_artifact_id human rows).
 	ContentSnapshot json.RawMessage `gorm:"column:content_snapshot;type:jsonb"`
-	// ChangeSource distinguishes AI-generated ('ai') from human-edited ('human') revisions.
+	// ChangeSource distinguishes AI-generated ('ai'), human-edited ('human'), and
+	// provider-confirmed ('provider_sync') revisions.
 	ChangeSource      string    `gorm:"column:change_source;type:varchar(16);not null;default:'ai'"`
 	Slot              string    `gorm:"column:slot;type:varchar(255);not null"`
 	StepID            string    `gorm:"column:step_id;type:varchar(64);not null"`
