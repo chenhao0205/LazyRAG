@@ -7,6 +7,7 @@ import (
 
 	"lazymind/core/capability"
 	"lazymind/core/capability/internal/coreadapter"
+	"lazymind/core/capability/internal/scanadapter"
 	mcpadapter "lazymind/core/capability/mcp"
 )
 
@@ -18,6 +19,8 @@ type Config struct {
 	KnowledgeSearchBaseURL    string
 	InternalServiceToken      string
 	KnowledgeSearchHTTPClient *http.Client
+	ScanBaseURL               string
+	ScanHTTPClient            *http.Client
 }
 
 func NewHandler(config Config) (http.Handler, error) {
@@ -46,8 +49,12 @@ func NewHandler(config Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	cloud, err := scanadapter.NewCloudDocumentReader(config.ScanBaseURL, config.ScanHTTPClient, 0)
+	if err != nil {
+		return nil, err
+	}
 	service, err := capability.NewService(capability.Dependencies{
-		Skills: skills, Knowledge: knowledge, Documents: documents, Search: search,
+		Skills: skills, Knowledge: knowledge, Documents: documents, Search: search, Cloud: cloud,
 	})
 	if err != nil {
 		return nil, err

@@ -88,6 +88,27 @@ func newServer(service *capability.Service) *mcp.Server {
 		result, err := service.SearchKnowledge(ctx, invocation(request), input)
 		return nil, result, err
 	})
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "cloud_document.list", Title: "List cloud document sources",
+		Description: "List Feishu and Notion sources visible to the authenticated LazyMind user.", Annotations: annotations,
+	}, func(ctx context.Context, request *mcp.CallToolRequest, input capability.ListCloudDocumentsInput) (*mcp.CallToolResult, capability.ListCloudDocumentsResult, error) {
+		result, err := service.ListCloudDocuments(ctx, invocation(request), input)
+		return nil, result, err
+	})
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "cloud_document.get", Title: "Get a cloud document source",
+		Description: "Get one authorized Feishu or Notion source and optional document metadata; it never reads provider file content.", Annotations: annotations,
+	}, func(ctx context.Context, request *mcp.CallToolRequest, input capability.GetCloudDocumentInput) (*mcp.CallToolResult, capability.GetCloudDocumentResult, error) {
+		result, err := service.GetCloudDocument(ctx, invocation(request), input)
+		return nil, result, err
+	})
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "cloud_document.search", Title: "Search cloud document metadata",
+		Description: "Search authorized Feishu or Notion source tree metadata. This is not document-body or semantic search.", Annotations: annotations,
+	}, func(ctx context.Context, request *mcp.CallToolRequest, input capability.SearchCloudDocumentsInput) (*mcp.CallToolResult, capability.SearchCloudDocumentsResult, error) {
+		result, err := service.SearchCloudDocuments(ctx, invocation(request), input)
+		return nil, result, err
+	})
 	return server
 }
 

@@ -177,3 +177,75 @@ type KnowledgeSearchHit struct {
 type SearchKnowledgeResult struct {
 	Hits []KnowledgeSearchHit `json:"hits"`
 }
+
+// CloudDocumentSource is Scan-backed metadata for an authorized Feishu or
+// Notion source. It deliberately contains no provider credentials or content.
+type CloudDocumentSource struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Status        string    `json:"status,omitempty"`
+	KnowledgeID   string    `json:"knowledge_id,omitempty"`
+	DocumentCount *int64    `json:"document_count,omitempty"`
+	CreatedAt     time.Time `json:"created_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+}
+
+type ListCloudDocumentsInput struct {
+	Keyword string      `json:"keyword,omitempty" jsonschema:"optional cloud source name keyword"`
+	Status  string      `json:"status,omitempty" jsonschema:"optional cloud source status"`
+	Page    PageRequest `json:"page,omitempty"`
+}
+type ListCloudDocumentsResult struct {
+	Items []CloudDocumentSource `json:"items"`
+	Page  PageInfo              `json:"page"`
+}
+
+type CloudDocumentMetadata struct {
+	ID          string    `json:"id"`
+	SourceID    string    `json:"source_id"`
+	ObjectKey   string    `json:"object_key,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	Name        string    `json:"name,omitempty"`
+	FileType    string    `json:"file_type,omitempty"`
+	SizeBytes   *int64    `json:"size_bytes,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+type GetCloudDocumentInput struct {
+	SourceID         string      `json:"source_id" jsonschema:"stable Feishu or Notion cloud source ID"`
+	IncludeDocuments bool        `json:"include_documents,omitempty" jsonschema:"include one page of source document metadata"`
+	DocumentsPage    PageRequest `json:"documents_page,omitempty"`
+}
+type GetCloudDocumentResult struct {
+	Source        CloudDocumentSource     `json:"source"`
+	Documents     []CloudDocumentMetadata `json:"documents,omitempty"`
+	DocumentsPage *PageInfo               `json:"documents_page,omitempty"`
+}
+
+type SearchCloudDocumentsInput struct {
+	SourceID          string      `json:"source_id" jsonschema:"stable Feishu or Notion cloud source ID"`
+	Query             string      `json:"query" jsonschema:"source tree metadata query, not document body search"`
+	Page              PageRequest `json:"page,omitempty"`
+	BindingID         string      `json:"binding_id,omitempty"`
+	TreeKey           string      `json:"tree_key,omitempty"`
+	StateFilter       []string    `json:"state_filter,omitempty"`
+	IncludeDocuments  bool        `json:"include_documents,omitempty"`
+	IncludeContainers bool        `json:"include_containers,omitempty"`
+}
+type CloudDocumentSearchHit struct {
+	Key         string `json:"key"`
+	DisplayName string `json:"display_name,omitempty"`
+	SearchName  string `json:"search_name,omitempty"`
+	SourceID    string `json:"source_id"`
+	TreeKey     string `json:"tree_key,omitempty"`
+	ObjectKey   string `json:"object_key,omitempty"`
+	ParentKey   string `json:"parent_key,omitempty"`
+	IsDocument  bool   `json:"is_document"`
+	IsContainer bool   `json:"is_container"`
+	HasChildren bool   `json:"has_children"`
+	Selectable  bool   `json:"selectable"`
+}
+type SearchCloudDocumentsResult struct {
+	Hits []CloudDocumentSearchHit `json:"hits"`
+	Page PageInfo                 `json:"page"`
+}

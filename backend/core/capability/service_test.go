@@ -18,6 +18,19 @@ type fakePorts struct {
 	searchResult      SearchKnowledgeResult
 }
 
+func (f *fakePorts) ListCloudDocuments(_ context.Context, call InvocationContext, _ CloudDocumentListQuery) (CloudDocumentListPage, error) {
+	f.call = call
+	return CloudDocumentListPage{}, nil
+}
+func (f *fakePorts) GetCloudDocument(_ context.Context, call InvocationContext, _ GetCloudDocumentInput) (GetCloudDocumentResult, error) {
+	f.call = call
+	return GetCloudDocumentResult{}, nil
+}
+func (f *fakePorts) SearchCloudDocuments(_ context.Context, call InvocationContext, _ SearchCloudDocumentsInput) (SearchCloudDocumentsResult, error) {
+	f.call = call
+	return SearchCloudDocumentsResult{}, nil
+}
+
 func (f *fakePorts) ListSkills(_ context.Context, call InvocationContext, query SkillListQuery) (SkillListPage, error) {
 	f.call, f.skillQuery = call, query
 	items := []SkillSummary{{ID: "skill-1", HeadRevisionID: "rev-1"}, {ID: "skill-2", HeadRevisionID: "rev-2"}}
@@ -64,10 +77,11 @@ func (f *fakePorts) SearchKnowledge(_ context.Context, call InvocationContext, i
 func TestServiceRequiresEveryPublishedCapability(t *testing.T) {
 	ports := &fakePorts{}
 	for name, deps := range map[string]Dependencies{
-		"skills":    {Knowledge: ports, Documents: ports, Search: ports},
-		"knowledge": {Skills: ports, Documents: ports, Search: ports},
-		"documents": {Skills: ports, Knowledge: ports, Search: ports},
-		"search":    {Skills: ports, Knowledge: ports, Documents: ports},
+		"skills":    {Knowledge: ports, Documents: ports, Search: ports, Cloud: ports},
+		"knowledge": {Skills: ports, Documents: ports, Search: ports, Cloud: ports},
+		"documents": {Skills: ports, Knowledge: ports, Search: ports, Cloud: ports},
+		"search":    {Skills: ports, Knowledge: ports, Documents: ports, Cloud: ports},
+		"cloud":     {Skills: ports, Knowledge: ports, Documents: ports, Search: ports},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := NewService(deps); err == nil {
@@ -186,7 +200,7 @@ func TestServiceRejectsUntrustedOrUnderprivilegedCaller(t *testing.T) {
 
 func mustService(t *testing.T, ports *fakePorts) *Service {
 	t.Helper()
-	service, err := NewService(Dependencies{Skills: ports, Knowledge: ports, Documents: ports, Search: ports})
+	service, err := NewService(Dependencies{Skills: ports, Knowledge: ports, Documents: ports, Search: ports, Cloud: ports})
 	if err != nil {
 		t.Fatal(err)
 	}

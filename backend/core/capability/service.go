@@ -30,6 +30,7 @@ type Dependencies struct {
 	Knowledge KnowledgeCatalog
 	Documents KnowledgeDocumentReader
 	Search    KnowledgeSearcher
+	Cloud     CloudDocumentReader
 }
 
 type Service struct {
@@ -37,6 +38,7 @@ type Service struct {
 	knowledge KnowledgeCatalog
 	documents KnowledgeDocumentReader
 	search    KnowledgeSearcher
+	cloud     CloudDocumentReader
 }
 
 func NewService(deps Dependencies) (*Service, error) {
@@ -49,9 +51,104 @@ func NewService(deps Dependencies) (*Service, error) {
 		return nil, NewError(Internal, "capability.new", "knowledge document reader is required", false, nil)
 	case deps.Search == nil:
 		return nil, NewError(Internal, "capability.new", "knowledge searcher is required", false, nil)
+	case deps.Cloud == nil:
+		return nil, NewError(Internal, "capability.new", "cloud document reader is required", false, nil)
 	default:
-		return &Service{skills: deps.Skills, knowledge: deps.Knowledge, documents: deps.Documents, search: deps.Search}, nil
+		return &Service{skills: deps.Skills, knowledge: deps.Knowledge, documents: deps.Documents, search: deps.Search, cloud: deps.Cloud}, nil
 	}
+}
+
+func (s *Service) ListCloudDocuments(ctx context.Context, call InvocationContext, input ListCloudDocumentsInput) (ListCloudDocumentsResult, error) {
+	const op = "cloud_document.list"
+	if err := validateCaller(call, op); err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	keyword, err := boundedOptional(input.Keyword, maxFilterBytes, op, "keyword")
+	if err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	status, err := boundedOptional(input.Status, maxFilterBytes, op, "status")
+	if err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	limit, err := normalizePageSize(input.Page.PageSize, op)
+	if err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	fp, _ := pageFingerprint(struct{ Keyword, Status string }{keyword, status})
+	offset, err := pageOffset(input.Page.PageToken, "cloud-documents", fp, op)
+	if err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	page, err := s.cloud.ListCloudDocuments(ctx, call, CloudDocumentListQuery{Keyword: keyword, Status: status, Offset: offset, Limit: limit})
+	if err != nil {
+		return ListCloudDocumentsResult{}, err
+	}
+	r := ListCloudDocumentsResult{Items: page.Items, Page: PageInfo{Total: page.Total}}
+	if r.Items == nil {
+		r.Items = []CloudDocumentSource{}
+	}
+	if offset+len(page.Items) < int(page.Total) {
+		r.Page.NextPageToken, err = encodePageToken("cloud-documents", fp, offset+len(page.Items))
+		if err != nil {
+			return ListCloudDocumentsResult{}, NewError(Internal, op, "cannot encode page token", false, err)
+		}
+	}
+	return r, ensureResultSize(op, r)
+}
+
+func (s *Service) GetCloudDocument(ctx context.Context, call InvocationContext, input GetCloudDocumentInput) (GetCloudDocumentResult, error) {
+	const op = "cloud_document.get"
+	if err := validateCaller(call, op); err != nil {
+		return GetCloudDocumentResult{}, err
+	}
+	id, err := boundedRequired(input.SourceID, maxIDBytes, op, "source_id")
+	if err != nil {
+		return GetCloudDocumentResult{}, err
+	}
+	input.SourceID = id
+	if input.IncludeDocuments {
+		input.DocumentsPage.PageSize, err = normalizePageSize(input.DocumentsPage.PageSize, op)
+		if err != nil {
+			return GetCloudDocumentResult{}, err
+		}
+	}
+	r, err := s.cloud.GetCloudDocument(ctx, call, input)
+	if err != nil {
+		return GetCloudDocumentResult{}, err
+	}
+	if r.Documents == nil {
+		r.Documents = []CloudDocumentMetadata{}
+	}
+	return r, ensureResultSize(op, r)
+}
+
+func (s *Service) SearchCloudDocuments(ctx context.Context, call InvocationContext, input SearchCloudDocumentsInput) (SearchCloudDocumentsResult, error) {
+	const op = "cloud_document.search"
+	if err := validateCaller(call, op); err != nil {
+		return SearchCloudDocumentsResult{}, err
+	}
+	var err error
+	input.SourceID, err = boundedRequired(input.SourceID, maxIDBytes, op, "source_id")
+	if err != nil {
+		return SearchCloudDocumentsResult{}, err
+	}
+	input.Query, err = boundedRequired(input.Query, maxQueryBytes, op, "query")
+	if err != nil {
+		return SearchCloudDocumentsResult{}, err
+	}
+	input.Page.PageSize, err = normalizePageSize(input.Page.PageSize, op)
+	if err != nil {
+		return SearchCloudDocumentsResult{}, err
+	}
+	r, err := s.cloud.SearchCloudDocuments(ctx, call, input)
+	if err != nil {
+		return SearchCloudDocumentsResult{}, err
+	}
+	if r.Hits == nil {
+		r.Hits = []CloudDocumentSearchHit{}
+	}
+	return r, ensureResultSize(op, r)
 }
 
 func (s *Service) ListSkills(ctx context.Context, call InvocationContext, input ListSkillsInput) (ListSkillsResult, error) {

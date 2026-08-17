@@ -20,13 +20,11 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/common/readonlyorm"
-	compatbootstrap "lazymind/core/compat/bootstrap"
 	"lazymind/core/currentmemory"
 	"lazymind/core/episode"
 	"lazymind/core/evalset"
 	"lazymind/core/externallease"
 	"lazymind/core/log"
-	"lazymind/core/mcpserver"
 	"lazymind/core/migrate"
 	"lazymind/core/modelprovider"
 	"lazymind/core/resourceupdate"
@@ -69,6 +67,8 @@ func buildCapabilityMCPHandler() (http.Handler, error) {
 		KnowledgeSearchBaseURL:    common.ChatServiceEndpoint(),
 		InternalServiceToken:      os.Getenv("LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN"),
 		KnowledgeSearchHTTPClient: &http.Client{Timeout: 60 * time.Second},
+		ScanBaseURL:               common.ScanControlPlaneEndpoint(),
+		ScanHTTPClient:            &http.Client{Timeout: 10 * time.Second},
 	})
 }
 
@@ -299,17 +299,6 @@ func main() {
 
 	// text/PrompttextInitialize（DB + Redis）。DB text ACL text；Redis textConversationtext/text/text。
 	store.Init(db.DB, readonlyDB.DB, store.MustStateFromEnv())
-	inboundRuntime, err := compatbootstrap.NewSkillRuntime(db.DB, readonlyDB.DB, inboundMCPObjectRoot())
-	if err != nil {
-		log.Logger.Fatal().Err(err).Msg("construct inbound MCP runtime failed")
-	}
-	inboundMCP, err := mcpserver.New(inboundRuntime, mcpserver.HeaderIdentityProvider{}, mcpserver.Options{
-		ServerName:    "lazymind",
-		ServerVersion: "0.1.0",
-	})
-	if err != nil {
-		log.Logger.Fatal().Err(err).Msg("construct inbound MCP server failed")
-	}
 	if err := workflow.SeedBuiltinWorkflows(context.Background(), store.DB()); err != nil {
 		log.Logger.Fatal().Err(err).Msg("seed built-in Workflows failed")
 	}
@@ -380,7 +369,6 @@ func main() {
 	r := mux.NewRouter()
 	r.UseEncodedPath()
 	registerCoreRoutes(r)
-	r.Handle("/mcp", inboundMCP.StreamableHTTPHandler(mcpserver.TransportOptions{}))
 
 	// Starttext OpenAPI spec，text doc_swag.go / swag init
 	openAPIJSON, err := buildOpenAPISpecFromRouter(r)
