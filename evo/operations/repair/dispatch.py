@@ -14,7 +14,7 @@ from .contracts import (
 from .workspace import WorkspacePaths
 
 
-EXTERNAL_TOOLS = ('workspace', 'shell', 'test', 'research')
+EXTERNAL_TOOLS = ('workspace', 'code', 'shell', 'test', 'research')
 
 
 class Capability(Protocol):

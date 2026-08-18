@@ -126,7 +126,7 @@ CMD ["python", "backend/core/doc/doc_server.py"]
 # is cached independently of any LazyMind / LazyLLM source changes.
 FROM ${DOCKER_MIRROR}python:3.11-slim AS opencode_download
 ARG GITHUB_PROXY=""
-ARG OPENCODE_VERSION=1.14.28
+ARG OPENCODE_VERSION=1.18.18
 RUN set -eu; \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*; \
@@ -136,7 +136,7 @@ RUN set -eu; \
       arm64) ARCH=arm64 ;; \
       *) echo "unsupported arch $arch" && exit 1 ;; \
     esac; \
-    curl -fL "${GITHUB_PROXY}https://github.com/sst/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${ARCH}.tar.gz" \
+    curl -fL "${GITHUB_PROXY}https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${ARCH}.tar.gz" \
       -o /tmp/opencode.tar.gz; \
     tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode; \
     chmod 0755 /usr/local/bin/opencode; \

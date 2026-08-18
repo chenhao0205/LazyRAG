@@ -204,11 +204,6 @@ class EventMemory:
             for key, value in self.repair_input.constraints.items()
             if str(key).lower() not in HIDDEN_CONSTRAINT_KEYS
         }
-        test_commands = constraints.get('test_commands')
-        if isinstance(test_commands, Mapping):
-            constraints['test_commands'] = {
-                str(level): 'configured' for level in test_commands
-            }
         pinned = json.dumps({
             'case_scope': self.repair_input.case_scope,
             'constraints': constraints,

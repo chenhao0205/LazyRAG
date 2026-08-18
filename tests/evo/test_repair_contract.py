@@ -3,9 +3,9 @@
 
 Run directly for a concise self-check:
 
-    ../.venv/bin/python tests/evo/test_repair_contract_check.py
+    PYTHONPATH=algorithm/lazyllm ../.venv/bin/python tests/evo/test_repair_contract.py
 
-The same checks are collected by pytest.  Values in the smoke run are temporary;
+The same checks are collected by pytest and CI. Values in the smoke run are temporary;
 only boundary fields, value types, tool arguments, and workspace layout are frozen.
 """
 
@@ -31,6 +31,7 @@ from evo.operations.repair.contracts import (  # noqa: E402
     REPAIR_TOOLS,
     RESULT_STATUSES,
     TEST_LEVELS,
+    CodeArguments,
     FinishArguments,
     ObservationStatus,
     RepairAction,
@@ -106,6 +107,7 @@ FROZEN_CONTRACTS: dict[type[Any], dict[str, Any]] = {
 
 FROZEN_ACTION_ARGUMENTS = {
     'workspace': ({'operation', 'path', 'content'}, {'operation'}),
+    'code': ({'operation', 'instruction'}, {'operation', 'instruction'}),
     'shell': ({'command', 'cwd', 'timeout_seconds'}, {'command'}),
     'test': ({'level'}, {'level'}),
     'research': ({'operation', 'query', 'urls'}, {'operation', 'query'}),
@@ -117,6 +119,10 @@ FROZEN_ARGUMENT_TYPES: dict[type[Any], dict[str, Any]] = {
         'operation': Literal['list', 'read', 'write', 'diff'],
         'path': str,
         'content': str,
+    },
+    CodeArguments: {
+        'operation': Literal['inspect', 'edit_work', 'edit_source'],
+        'instruction': str,
     },
     ShellArguments: {
         'command': list[str],
@@ -146,6 +152,14 @@ FROZEN_WORKSPACE_PATHS = {
 }
 
 EVENT_FIELDS = {'sequence', 'timestamp', 'event', 'call_id', 'workspace_hash', 'payload'}
+FROZEN_TEST_PLAN_FIELDS = {
+    'run_id', 'target_category', 'l1_case_ids', 'l2_case_ids', 'cases',
+    'baseline_judges', 'eval_policy', 'candidate_config', 'l0_commands',
+}
+FROZEN_REPAIR_OPERATION_INPUTS = {
+    'analysis', 'cases', 'baseline_judges', 'eval_policy',
+    'candidate_config', 'policy', 'approval',
+}
 
 
 class ContractCheckFailure(AssertionError):
@@ -211,8 +225,8 @@ def test_repair_frozen_schemas() -> None:
             f'expected {schema!r}, got {get_type_hints(contract)!r}',
         )
 
-    _require(REPAIR_TOOLS == ('workspace', 'shell', 'test', 'research', 'finish'), 'RepairTool values changed')
-    _require(EXTERNAL_TOOLS == ('workspace', 'shell', 'test', 'research'), 'external capability set changed')
+    _require(REPAIR_TOOLS == ('workspace', 'code', 'shell', 'test', 'research', 'finish'), 'RepairTool values changed')
+    _require(EXTERNAL_TOOLS == ('workspace', 'code', 'shell', 'test', 'research'), 'external capability set changed')
     _require(OBSERVATION_STATUSES == ('success', 'fail', 'error'), 'observation statuses changed')
     _require(RESULT_STATUSES == ('success', 'partial', 'failed'), 'result statuses changed')
     _require(TEST_LEVELS == ('L0', 'L1', 'L2'), 'test levels changed')
@@ -238,6 +252,9 @@ def test_repair_tool_boundary() -> None:
         {'call_id': 'sample-shell', 'tool': 'shell', 'arguments': {
             'command': [sys.executable, 'probe.py'], 'cwd': 'work', 'timeout_seconds': 30,
         }},
+        {'call_id': 'sample-code', 'tool': 'code', 'arguments': {
+            'operation': 'inspect', 'instruction': 'Locate the retrieval path.',
+        }},
         {'call_id': 'sample-test', 'tool': 'test', 'arguments': {'level': 'L1'}},
         {'call_id': 'sample-research', 'tool': 'research', 'arguments': {
             'operation': 'read', 'query': 'primary source', 'urls': ['https://example.com/reference'],
@@ -257,6 +274,18 @@ def test_repair_tool_boundary() -> None:
     _expect_contract_error('action_argument_fields_invalid', lambda: RepairAction(
         'missing-tool-argument', 'finish', {},
     ))
+
+
+def test_repair_operation_is_isolated() -> None:
+    from evo.operations.operation import repair_session_operation
+    from evo.operations.repair.testing import RepairTestPlan
+
+    _require(repair_session_operation.spec.execution == 'isolated', 'repair.session must remain isolated')
+    _require(
+        set(repair_session_operation.spec.inputs) == FROZEN_REPAIR_OPERATION_INPUTS,
+        'repair.session component inputs changed',
+    )
+    _require(_field_names(RepairTestPlan) == FROZEN_TEST_PLAN_FIELDS, 'RepairTestPlan fields changed')
 
 
 class _ScriptedAgent:
@@ -348,6 +377,9 @@ class _ContractStubFactory:
 
 def _scenario_actions() -> list[RepairAction]:
     return [
+        RepairAction('call-000', 'code', {
+            'operation': 'inspect', 'instruction': 'Locate the candidate code path.',
+        }),
         RepairAction('call-001', 'research', {'operation': 'search', 'query': 'repair contract'}),
         RepairAction('call-002', 'workspace', {
             'operation': 'write', 'path': 'work/probe.py', 'content': 'print("probe-ok")\n',
@@ -420,7 +452,7 @@ def test_repair_end_to_end_contract() -> None:
 
         _require(
             [action.tool for action in factory.actions]
-            == ['research', 'workspace', 'shell', 'workspace', 'test', 'test', 'test'],
+            == ['code', 'research', 'workspace', 'shell', 'workspace', 'test', 'test', 'test'],
             'dispatcher/capability action flow changed',
         )
         _require(
@@ -471,6 +503,7 @@ def test_repair_end_to_end_contract() -> None:
 CHECKS = (
     ('固定数据结构', test_repair_frozen_schemas),
     ('组件调用参数', test_repair_tool_boundary),
+    ('Runtime 隔离模式', test_repair_operation_is_isolated),
     ('主干流转与 /tmp 布局', test_repair_end_to_end_contract),
 )
 

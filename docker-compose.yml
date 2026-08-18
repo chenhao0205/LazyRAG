@@ -797,7 +797,7 @@ services:
       target: evo
       args:
         <<: *mirror-args
-        OPENCODE_VERSION: 1.14.28
+        OPENCODE_VERSION: 1.18.18
     expose:
       - "8047"
     environment:

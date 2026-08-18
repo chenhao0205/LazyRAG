@@ -22,6 +22,7 @@ from evo.artifact_runtime import (
     operation,
     partitioned,
     record_process,
+    record_event,
     scalar,
 )
 
@@ -37,9 +38,12 @@ from .eval.judge import judge_case
 from .public_contracts import RepairPatch, build_eval_summary_root, dump_contract, require_mapping as _mapping
 from .repair.capabilities import DefaultCapabilityFactory
 from .repair.contracts import RepairInput
-from .repair.opencode import OpenCodeAdapter
+from .repair.decision import DecisionModelAdapter
 from .repair.session import RepairSession
+from .repair.testing import build_test_plan
+from .repair.workspace import DEFAULT_RUNTIME_ROOT
 from evo.llm import LazyLLMClient
+from evo.repair_model import opencode_settings
 
 
 @operation(
@@ -196,6 +200,10 @@ async def analysis_summary_operation(ctx: OperationContext, classifications: obj
     op_id='repair.session',
     inputs={
         'analysis': one(A.ANALYSIS_SUMMARY),
+        'cases': all_items(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
+        'baseline_judges': all_items(A.EVAL_JUDGE_RESULT, over=A.EVAL_CASE_REQUESTS),
+        'eval_policy': one(A.EVAL_POLICY),
+        'candidate_config': one(A.ABTEST_CANDIDATE_CONFIG),
         'policy': one(A.REPAIR_POLICY),
         'approval': one(A.APPROVAL_ANALYSIS),
     },
@@ -203,19 +211,44 @@ async def analysis_summary_operation(ctx: OperationContext, classifications: obj
     timeout=7200.0,
 )
 @record_process
-async def repair_session_operation(ctx: OperationContext, analysis: object, policy: object, approval: object
-                                   ) -> OperationResult:
+async def repair_session_operation(
+    ctx: OperationContext,
+    analysis: object,
+    cases: object,
+    baseline_judges: object,
+    eval_policy: object,
+    candidate_config: object,
+    policy: object,
+    approval: object,
+) -> OperationResult:
     del approval
     policy_value = _mapping(policy, 'policy')
-    repair_input = _repair_input(ctx.run_id, _mapping(analysis, 'analysis'), policy_value)
+    analysis_value = _mapping(analysis, 'analysis')
+    repair_input = _repair_input(ctx.run_id, analysis_value, policy_value)
+    test_plan = build_test_plan(
+        ctx.run_id,
+        analysis_value,
+        _partition_mapping(cases, 'cases'),
+        _partition_mapping(baseline_judges, 'baseline_judges'),
+        _mapping(eval_policy, 'eval_policy'),
+        _mapping(candidate_config, 'candidate_config'),
+    )
     llm_config = policy_value.get('llm_config')
     client = LazyLLMClient(
         llm_config=llm_config if isinstance(llm_config, Mapping) else None,
         model='evo_llm',
     )
     session = RepairSession(
-        OpenCodeAdapter(client, int(policy_value.get('model_timeout_seconds') or 120)),
-        DefaultCapabilityFactory(),
+        DecisionModelAdapter(client, int(policy_value.get('model_timeout_seconds') or 120)),
+        DefaultCapabilityFactory(
+            opencode_settings(
+                llm_config.get('evo_llm') if isinstance(llm_config, Mapping) else None,
+            ),
+            test_plan=test_plan,
+            code_timeout_seconds=_repair_code_timeout(policy_value),
+            event_sink=_repair_event_sink,
+        ),
+        runtime_root=_repair_runtime_root(),
     )
     result = await asyncio.to_thread(session.run, repair_input)
     if result.status != 'success':
@@ -376,6 +409,20 @@ def _partition_values(value: object, name: str) -> tuple[Mapping[str, Any], ...]
     return values
 
 
+def _partition_mapping(value: object, name: str) -> dict[str, Mapping[str, Any]]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f'{name} must be a partition mapping')
+    result = {
+        str(case_id): _mapping(item, f'{name}[{case_id}]')
+        for case_id, item in value.items()
+    }
+    if not result:
+        raise ValueError(f'{name} has no successful cases')
+    if isinstance(value, AggregateValue) and value.failures:
+        raise ValueError(f'{name} contains failed cases: {sorted(value.failures)}')
+    return result
+
+
 def _failure_summary(value: object) -> dict[str, object]:
     failures = [] if not isinstance(value, AggregateValue) else [
         {
@@ -412,8 +459,7 @@ def _repair_input(run_id: str, analysis: Mapping[str, Any], policy: Mapping[str,
     budget = policy.get('repair_budget')
     configured_constraints = policy.get('constraints')
     constraints = dict(configured_constraints) if isinstance(configured_constraints, Mapping) else {}
-    if 'test_commands' in policy:
-        constraints['test_commands'] = policy['test_commands']
+    constraints['max_patch_bytes'] = _positive_int(policy.get('max_patch_bytes'), 65536)
     return RepairInput(
         run_id=run_id,
         objective=json.dumps(dict(group), ensure_ascii=False, sort_keys=True, default=str),
@@ -446,6 +492,40 @@ def _verified_patch(run_id: str, patch_ref: str) -> dict[str, Any]:
         'workspace_ref': str(workspace_ref),
         'diff': diff,
     })
+
+
+def _repair_code_timeout(policy: Mapping[str, Any]) -> float:
+    raw = policy.get('opencode_timeout_s') or os.getenv('LAZYMIND_EVO_CODE_TIMEOUT_S') or 900
+    if isinstance(raw, bool):
+        return 900.0
+    try:
+        return min(7200.0, max(30.0, float(raw)))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def _repair_runtime_root() -> Path:
+    base = str(os.getenv('LAZYMIND_EVO_BASE_DIR') or '').strip()
+    return Path(base) / 'work/repair' if base else DEFAULT_RUNTIME_ROOT
+
+
+def _positive_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > 0 else default
+
+
+def _repair_event_sink(event_type: str, status: str, message: str, data: Mapping[str, object]) -> None:
+    record_event(
+        event_type,
+        message,
+        status=status,  # type: ignore[arg-type]
+        data=data,
+    )
 
 
 __all__ = [

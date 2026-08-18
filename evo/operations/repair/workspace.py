@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -30,6 +31,13 @@ class WorkspacePaths:
     source: Path
     work: Path
     context: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CodeCheckpoint:
+    git_dir: Path
+    work_tree: Path
+    revision: str
 
 
 def initialize_workspace(repair_input: RepairInput, base: Path = DEFAULT_RUNTIME_ROOT) -> WorkspacePaths:
@@ -101,10 +109,48 @@ def write_patch(source_ref: str, candidate: Path, destination: Path) -> Path:
     return destination
 
 
+def patch_size(source_ref: str, candidate: Path) -> int:
+    return len(_patch_text(source_ref, candidate).encode('utf-8'))
+
+
 def artifact_path(directory: Path, call_id: str) -> Path:
     """Return a runtime-owned filename without treating model output as a path."""
     digest = hashlib.sha256(str(call_id).encode('utf-8')).hexdigest()[:24]
     return directory / f'{digest}.json'
+
+
+def create_code_checkpoint(paths: WorkspacePaths, call_id: str) -> CodeCheckpoint:
+    git_dir = paths.control / 'code-checkpoints/git'
+    if not git_dir.is_dir():
+        git_dir.parent.mkdir(parents=True, exist_ok=True)
+        _git(git_dir, paths.sandbox, 'init')
+        _git(git_dir, paths.sandbox, 'config', 'user.email', 'repair@localhost')
+        _git(git_dir, paths.sandbox, 'config', 'user.name', 'Repair Runtime')
+    exclude = git_dir / 'info/exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text('context/\n', encoding='utf-8')
+    _git(git_dir, paths.sandbox, 'add', '-A', '--', 'source', 'work')
+    message = hashlib.sha256(str(call_id).encode('utf-8')).hexdigest()[:24]
+    _git(git_dir, paths.sandbox, 'commit', '--allow-empty', '-m', f'checkpoint:{message}')
+    revision = _git(git_dir, paths.sandbox, 'rev-parse', 'HEAD')
+    return CodeCheckpoint(git_dir, paths.sandbox, revision)
+
+
+def code_changes(checkpoint: CodeCheckpoint) -> list[str]:
+    tracked = _git(
+        checkpoint.git_dir, checkpoint.work_tree,
+        'diff', '--name-only', checkpoint.revision, '--', 'source', 'work',
+    ).splitlines()
+    untracked = _git(
+        checkpoint.git_dir, checkpoint.work_tree,
+        'ls-files', '--others', '--exclude-standard', '--', 'source', 'work',
+    ).splitlines()
+    return sorted(dict.fromkeys(path for path in (*tracked, *untracked) if path))
+
+
+def rollback_code_checkpoint(checkpoint: CodeCheckpoint) -> None:
+    _git(checkpoint.git_dir, checkpoint.work_tree, 'reset', '--hard', checkpoint.revision)
+    _git(checkpoint.git_dir, checkpoint.work_tree, 'clean', '-fd', '--', 'source', 'work')
 
 
 def _patch_text(source_ref: str, candidate: Path) -> str:
@@ -197,7 +243,25 @@ def _text_lines(path: Path | None) -> list[str]:
         return [f'<binary sha256={digest}>\n']
 
 
+def _git(git_dir: Path, work_tree: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ['git', f'--git-dir={git_dir}', f'--work-tree={work_tree}', *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode:
+        raise RepairContractError(
+            'workspace_checkpoint_failed',
+            (completed.stderr or completed.stdout or 'git failed').strip(),
+        )
+    return completed.stdout.strip()
+
+
 __all__ = [
-    'WorkspacePaths', 'artifact_path', 'changed_paths', 'diff_summary', 'initialize_workspace',
-    'path_in_scope', 'safe_path', 'workspace_hash', 'write_context', 'write_json', 'write_patch',
+    'CodeCheckpoint', 'WorkspacePaths', 'artifact_path', 'changed_paths', 'code_changes',
+    'create_code_checkpoint', 'diff_summary', 'initialize_workspace', 'path_in_scope',
+    'patch_size', 'rollback_code_checkpoint', 'safe_path', 'workspace_hash', 'write_context', 'write_json',
+    'write_patch',
 ]

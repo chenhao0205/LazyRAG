@@ -17,7 +17,7 @@ from .contracts import (
 )
 from .dispatch import CapabilityDispatcher, CapabilityFactory
 from .memory import EventMemory
-from .opencode import DecisionAgent
+from .decision import DecisionAgent
 from .validation import check_completion, record_finish_evidence, validation_evidence
 from .workspace import (
     DEFAULT_RUNTIME_ROOT,

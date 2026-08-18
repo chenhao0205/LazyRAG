@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal, Mapping, TypeAlias, TypedDict, cast, get_args
 
 
-RepairTool: TypeAlias = Literal['workspace', 'shell', 'test', 'research', 'finish']
+RepairTool: TypeAlias = Literal['workspace', 'code', 'shell', 'test', 'research', 'finish']
 ObservationStatus: TypeAlias = Literal['success', 'fail', 'error']
 ResultStatus: TypeAlias = Literal['success', 'partial', 'failed']
 TestLevel: TypeAlias = Literal['L0', 'L1', 'L2']
@@ -15,6 +15,7 @@ RESULT_STATUSES = cast(tuple[ResultStatus, ...], get_args(ResultStatus))
 TEST_LEVELS = cast(tuple[TestLevel, ...], get_args(TestLevel))
 ACTION_ARGUMENT_FIELDS = {
     'workspace': ({'operation', 'path', 'content'}, {'operation'}),
+    'code': ({'operation', 'instruction'}, {'operation', 'instruction'}),
     'shell': ({'command', 'cwd', 'timeout_seconds'}, {'command'}),
     'test': ({'level'}, {'level'}),
     'research': ({'operation', 'query', 'urls'}, {'operation', 'query'}),
@@ -32,6 +33,11 @@ class ShellArguments(TypedDict, total=False):
     command: list[str]
     cwd: Literal['source', 'work']
     timeout_seconds: int
+
+
+class CodeArguments(TypedDict):
+    operation: Literal['inspect', 'edit_work', 'edit_source']
+    instruction: str
 
 
 class TestArguments(TypedDict):
@@ -207,6 +213,12 @@ def _arguments(tool: RepairTool, value: object) -> dict[str, Any]:
     if unexpected or missing:
         detail = f'unexpected={sorted(unexpected)}, missing={sorted(missing)}'
         raise RepairContractError('action_argument_fields_invalid', detail)
+    if tool == 'code':
+        operation = str(result['operation'] or '').strip()
+        if operation not in {'inspect', 'edit_work', 'edit_source'}:
+            raise RepairContractError('code_operation_invalid', operation)
+        result['operation'] = operation
+        result['instruction'] = _text(result['instruction'], 'code instruction')
     if tool == 'finish':
         result['reason'] = _text(result['reason'], 'finish reason')
     return result
@@ -225,7 +237,7 @@ def _strings(value: object, field: str) -> list[str]:
 
 
 __all__ = [
-    'FinishArguments', 'ObservationStatus', 'RepairAction', 'RepairAgentError',
+    'CodeArguments', 'FinishArguments', 'ObservationStatus', 'RepairAction', 'RepairAgentError',
     'RepairCapabilityError', 'RepairContractError', 'RepairError', 'RepairInput',
     'RepairObservation', 'RepairResult', 'RepairTool', 'RepairView', 'ResearchArguments',
     'ShellArguments', 'TestArguments', 'TestLevel', 'WorkspaceArguments', 'contract_dict',

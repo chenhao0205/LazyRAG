@@ -5,14 +5,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable, Mapping
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+from . import demo_runtime
 from .contracts import (
     RepairAction,
     RepairCapabilityError,
@@ -22,11 +25,24 @@ from .contracts import (
     RepairTool,
 )
 from .dispatch import Capability
-from .workspace import WorkspacePaths, artifact_path, diff_summary, safe_path, workspace_hash, write_json
+from .opencode import OpenCodeCapability, OpenCodeEventSink, terminate_process
+from .testing import RepairTestCapability, RepairTestPlan
+from .workspace import (
+    WorkspacePaths,
+    artifact_path,
+    code_changes,
+    create_code_checkpoint,
+    diff_summary,
+    rollback_code_checkpoint,
+    safe_path,
+    workspace_hash,
+    write_json,
+)
 
 
 SearchProvider = Callable[[str], list[dict[str, str]]]
 ReadProvider = Callable[[str], dict[str, str]]
+MAX_COMMAND_OUTPUT_CHARS = 256 * 1024
 
 
 class DefaultCapabilityFactory:
@@ -34,11 +50,20 @@ class DefaultCapabilityFactory:
 
     def __init__(
         self,
+        code_settings: Mapping[str, str],
+        *,
         search: SearchProvider | None = None,
         read: ReadProvider | None = None,
+        test_plan: RepairTestPlan | None = None,
+        code_timeout_seconds: float = 900,
+        event_sink: OpenCodeEventSink | None = None,
     ) -> None:
+        self.code_settings = dict(code_settings)
         self.search = search or search_web
         self.read = read or read_web
+        self.test_plan = test_plan
+        self.code_timeout_seconds = code_timeout_seconds
+        self.event_sink = event_sink
 
     def __call__(
         self,
@@ -47,8 +72,18 @@ class DefaultCapabilityFactory:
     ) -> Mapping[RepairTool, Capability]:
         return {
             'workspace': WorkspaceCapability(repair_input, paths),
+            'code': OpenCodeCapability(
+                repair_input,
+                paths,
+                self.code_settings,
+                timeout_seconds=self.code_timeout_seconds,
+                event_sink=self.event_sink,
+            ),
             'shell': ShellCapability(paths),
-            'test': TestCapability(repair_input, paths),
+            'test': (
+                RepairTestCapability(self.test_plan, paths)
+                if self.test_plan is not None else _test_unavailable
+            ),
             'research': ResearchCapability(paths, self.search, self.read),
         }
 
@@ -69,7 +104,7 @@ class WorkspaceCapability:
             elif operation == 'read':
                 summary = target.read_text(encoding='utf-8')[:50_000]
             elif operation == 'write':
-                if area not in {'source', 'work'} or not isinstance(action.arguments.get('content'), str):
+                if area != 'work' or not isinstance(action.arguments.get('content'), str):
                     raise RepairContractError('workspace_write_invalid', path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(action.arguments['content'], encoding='utf-8')
@@ -89,64 +124,73 @@ class ShellCapability:
         command = action.arguments.get('command')
         if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
             raise RepairContractError('shell_command_invalid')
-        cwd = _choice(action.arguments.get('cwd', 'work'), {'source', 'work'})
+        cwd = _choice(action.arguments.get('cwd', 'work'), {'work'})
         timeout = action.arguments.get('timeout_seconds', 300)
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 0 < timeout <= 7200:
             raise RepairContractError('shell_timeout_invalid')
+        requested = list(command)
+        normalized = _demo_command(command, self.paths)
+        checkpoint = create_code_checkpoint(self.paths, action.call_id)
+        started = time.monotonic()
+        process: subprocess.Popen[str] | None = None
+        timed_out = False
+        stdout = ''
+        stderr = ''
+        stdout_truncated = False
+        stderr_truncated = False
         try:
-            completed = subprocess.run(
-                _sandboxed(command, self.paths),
-                cwd=safe_path(self.paths, cwd),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env={**os.environ, 'REPAIR_SOURCE': str(self.paths.source), 'REPAIR_WORK': str(self.paths.work)},
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RepairCapabilityError('shell_failed', str(exc)) from exc
-        status = 'success' if completed.returncode == 0 else 'fail'
-        result = write_json(artifact_path(self.paths.logs, action.call_id), {
-            'kind': 'shell', 'command': command, 'return_code': completed.returncode,
-            'stdout': completed.stdout[-50_000:], 'stderr': completed.stderr[-50_000:],
-        })
-        summary = completed.stdout or completed.stderr or f'exit code {completed.returncode}'
-        return _observation(action, self.paths, status, summary[-4000:], [str(result)])
-
-
-class TestCapability:
-    def __init__(self, repair_input: RepairInput, paths: WorkspacePaths) -> None:
-        self.repair_input = repair_input
-        self.paths = paths
-
-    def __call__(self, action: RepairAction) -> RepairObservation:
-        level = _choice(action.arguments.get('level'), {'L0', 'L1', 'L2'})
-        configured = self.repair_input.constraints.get('test_commands')
-        commands = configured.get(level) if isinstance(configured, Mapping) else None
-        normalized = _commands(commands)
-        outputs = []
-        return_code = 0
-        for command in normalized:
-            try:
-                completed = subprocess.run(
-                    _sandboxed(command, self.paths), cwd=self.paths.source, capture_output=True,
-                    text=True, timeout=7200, check=False,
+            with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                process = subprocess.Popen(
+                    _demo_sandboxed(normalized, self.paths),
+                    cwd=safe_path(self.paths, cwd),
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                    env=_command_env(self.paths),
                 )
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise RepairCapabilityError('test_failed', str(exc)) from exc
-            outputs.append({'command': command, 'stdout': completed.stdout, 'stderr': completed.stderr})
-            if completed.returncode:
-                return_code = completed.returncode
-                break
-        current_hash = workspace_hash(self.paths.source)
-        status = 'success' if return_code == 0 else 'fail'
-        evidence = write_json(artifact_path(self.paths.evidence, action.call_id), {
-            'kind': 'test', 'call_id': action.call_id, 'level': level, 'status': status,
-            'workspace_hash': current_hash, 'return_code': return_code, 'outputs': outputs,
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    terminate_process(process, grace_seconds=2.0)
+                stdout, stdout_truncated = _read_output(stdout_file)
+                stderr, stderr_truncated = _read_output(stderr_file)
+        except OSError as exc:
+            rollback_code_checkpoint(checkpoint)
+            raise RepairCapabilityError('shell_failed', str(exc)) from exc
+        changes = code_changes(checkpoint)
+        if changes:
+            rollback_code_checkpoint(checkpoint)
+            raise RepairCapabilityError('shell_workspace_modified', ','.join(changes[:20]))
+        output: dict[str, Any] | None = None
+        if not timed_out and process is not None and process.returncode == 0:
+            try:
+                parsed = json.loads(stdout)
+                output = dict(parsed) if isinstance(parsed, Mapping) else None
+            except json.JSONDecodeError:
+                output = None
+        status = 'success' if output is not None else 'fail'
+        return_code = None if process is None else process.returncode
+        result = write_json(artifact_path(self.paths.logs, action.call_id), {
+            'kind': 'demo',
+            'command': requested,
+            'return_code': return_code,
+            'timed_out': timed_out,
+            'duration_seconds': round(time.monotonic() - started, 3),
+            'stdout': stdout,
+            'stderr': stderr,
+            'stdout_truncated': stdout_truncated,
+            'stderr_truncated': stderr_truncated,
+            'output': output,
         })
-        return RepairObservation(
-            action.call_id, status, f'{level} {status}', [str(evidence)], current_hash,
+        summary = (
+            json.dumps(output, ensure_ascii=False)
+            if output is not None
+            else 'demo_timeout'
+            if timed_out
+            else stderr or stdout or f'exit code {return_code}'
         )
+        return _observation(action, self.paths, status, summary[-4000:], [str(result)])
 
 
 class ResearchCapability:
@@ -231,26 +275,53 @@ def _location(value: str) -> tuple[str, str]:
     return area, PurePosixPath(*remaining).as_posix() if remaining else ''
 
 
-def _commands(value: object) -> list[list[str]]:
-    if isinstance(value, list) and value and all(isinstance(item, str) and item for item in value):
-        return [value]
-    if (
-        isinstance(value, list) and value
-        and all(isinstance(command, list) and command and all(isinstance(item, str) for item in command)
-                for command in value)
-    ):
-        return value
-    raise RepairContractError('test_commands_invalid')
+def _demo_command(command: list[str], paths: WorkspacePaths) -> list[str]:
+    if len(command) != 4 or Path(command[0]).name not in {'python', 'python3', Path(sys.executable).name}:
+        raise RepairContractError('demo_command_invalid')
+    if command[1].replace('\\', '/') != 'demo/run_demo.py' or command[2] != '--input':
+        raise RepairContractError('demo_command_invalid')
+    script = safe_path(paths, 'work', 'demo/run_demo.py')
+    input_path = safe_path(paths, 'work', command[3])
+    if not script.is_file() or not input_path.is_file() or input_path.suffix != '.json':
+        raise RepairContractError('demo_command_invalid')
+    return [
+        sys.executable, '-I', str(Path(demo_runtime.__file__).resolve()),
+        str(script), str(input_path), str(paths.source), str(MAX_COMMAND_OUTPUT_CHARS),
+    ]
 
 
-def _sandboxed(command: list[str], paths: WorkspacePaths) -> list[str]:
+def _read_output(stream: Any) -> tuple[str, bool]:
+    stream.seek(0)
+    value = stream.read(MAX_COMMAND_OUTPUT_CHARS + 1)
+    truncated = len(value) >= MAX_COMMAND_OUTPUT_CHARS
+    return value[:MAX_COMMAND_OUTPUT_CHARS].decode('utf-8', errors='replace'), truncated
+
+
+def _command_env(paths: WorkspacePaths) -> dict[str, str]:
+    allowed = (
+        'PATH', 'LANG', 'LC_ALL', 'TZ',
+        'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    )
+    environment = {key: value for key in allowed if (value := os.environ.get(key))}
+    environment.update({
+        'HOME': str(paths.work),
+        'TMPDIR': str(paths.work),
+        'PYTHONPATH': str(paths.source),
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'REPAIR_SOURCE': str(paths.source),
+        'REPAIR_WORK': str(paths.work),
+    })
+    return environment
+
+
+def _demo_sandboxed(command: list[str], paths: WorkspacePaths) -> list[str]:
     enabled = os.getenv('LAZYRAG_REPAIR_SANDBOX_EXEC') == '1'
     binary = shutil.which('sandbox-exec') if enabled and sys.platform == 'darwin' else None
     if not binary:
         return command
     profile = (
         '(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) '
-        '(allow network*) (allow file-read*) '
+        '(allow file-read*) '
         f'(deny file-read* (subpath "{paths.control}")) '
         f'(allow file-write* (subpath "{paths.sandbox}"))'
     )
@@ -271,7 +342,12 @@ def _required(value: object, name: str) -> str:
     return result
 
 
+def _test_unavailable(action: RepairAction) -> RepairObservation:
+    raise RepairCapabilityError('test_plan_unavailable', str(action.arguments.get('level') or ''))
+
+
 __all__ = [
-    'DefaultCapabilityFactory', 'ReadProvider', 'ResearchCapability', 'SearchProvider',
-    'ShellCapability', 'TestCapability', 'WorkspaceCapability', 'read_web', 'search_web',
+    'DefaultCapabilityFactory', 'ReadProvider', 'ResearchCapability',
+    'SearchProvider', 'ShellCapability', 'WorkspaceCapability',
+    'read_web', 'search_web',
 ]
