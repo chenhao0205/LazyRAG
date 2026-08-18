@@ -157,6 +157,9 @@ func (h *Handler) listSourceDocuments(w http.ResponseWriter, r *http.Request) {
 		Page:          parseIntQuery(r, "page"),
 		PageSize:      parseIntQuery(r, "page_size"),
 	}
+	for _, connectorType := range parseConnectorTypesQuery(r.URL.Query()["connector_type"]) {
+		req.ConnectorTypes = append(req.ConnectorTypes, string(connectorType))
+	}
 	if boolQueryDefault(r, "refresh_state", true) {
 		if err := h.refreshSourceState(r.Context(), req.SourceID, req.BindingID); err != nil {
 			writeError(w, err)

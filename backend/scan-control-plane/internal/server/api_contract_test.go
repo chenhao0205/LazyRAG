@@ -304,7 +304,7 @@ func TestDocumentHandlerPassesFiltersAndPagination(t *testing.T) {
 
 	documents := &serverDocumentQueryStub{}
 	handler := NewHandler(WithSourceDocumentQuery(documents), WithAccessChecker(allowAccess{}))
-	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources/source-1/documents?binding_id=binding-1&state_filter=NEW&state_filter=MODIFIED&parse_status=PENDING&page=2&page_size=30", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/scan/sources/source-1/documents?binding_id=binding-1&connector_type=feishu,notion&state_filter=NEW&state_filter=MODIFIED&parse_status=PENDING&page=2&page_size=30", nil)
 	setAPIContractActor(req)
 	w := httptest.NewRecorder()
 
@@ -313,7 +313,7 @@ func TestDocumentHandlerPassesFiltersAndPagination(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected OK, got %d body=%s", w.Code, w.Body.String())
 	}
-	if got := documents.lastReq; got.Page != 2 || got.PageSize != 30 || len(got.StateFilter) != 2 || got.StateFilter[1] != "MODIFIED" || len(got.ParseStatuses) != 1 || got.ParseStatuses[0] != "PENDING" {
+	if got := documents.lastReq; got.Page != 2 || got.PageSize != 30 || len(got.ConnectorTypes) != 2 || got.ConnectorTypes[0] != "feishu" || got.ConnectorTypes[1] != "notion" || len(got.StateFilter) != 2 || got.StateFilter[1] != "MODIFIED" || len(got.ParseStatuses) != 1 || got.ParseStatuses[0] != "PENDING" {
 		t.Fatalf("document query filters were not propagated: %+v", got)
 	}
 }

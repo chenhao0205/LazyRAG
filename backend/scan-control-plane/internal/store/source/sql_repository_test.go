@@ -71,6 +71,25 @@ func TestListDocumentsScansJoinedProjectionInOneRowsScan(t *testing.T) {
 	}
 }
 
+func TestListDocumentsFiltersConnectorTypes(t *testing.T) {
+	now := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
+	db := openStoreFakeDB(t, []storeFakeQuery{
+		{wantSQL: []string{"source_bindings sb_filter", "sb_filter.connector_type IN"}, columns: []string{"count"}, rows: [][]driver.Value{{int64(1)}}},
+		{wantSQL: []string{"source_bindings sb_filter", "sb_filter.connector_type IN"}, columns: storeFakeColumns(57), rows: [][]driver.Value{documentWithStateRowValues(now, false)}},
+	})
+	repo := NewSQLRepository(db)
+
+	items, total, err := repo.ListDocuments(context.Background(), SourceDocumentListRequest{
+		SourceID: "source-1", ConnectorTypes: []string{"feishu", "notion"}, Page: 1, PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("list cloud documents: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("unexpected filtered result: total=%d items=%d", total, len(items))
+	}
+}
+
 func TestApplyCheckpointFinishDoesNotAdvanceCursorOnFailure(t *testing.T) {
 	t.Parallel()
 

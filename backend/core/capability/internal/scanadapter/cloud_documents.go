@@ -77,6 +77,10 @@ func (a *CloudDocumentReader) GetCloudDocument(ctx context.Context, call capabil
 	q.Set("page", "1")
 	q.Set("page_size", strconv.Itoa(in.DocumentsPage.PageSize))
 	q.Set("refresh_state", "false")
+	// Keep document metadata within the CloudDocument boundary even when a
+	// source has both cloud and non-cloud bindings. Scan applies this filter to
+	// each document's binding, so Feishu and Notion bindings are both retained.
+	q.Set("connector_type", cloudConnectors)
 	u.RawQuery = q.Encode()
 	var out listDocuments
 	if err = a.json(ctx, call, "cloud_document.get", http.MethodGet, u, nil, &out); err != nil {

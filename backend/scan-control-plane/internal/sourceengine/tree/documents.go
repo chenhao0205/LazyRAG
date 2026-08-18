@@ -166,13 +166,14 @@ func firstNonEmptyString(values ...string) string {
 
 func storeSourceDocumentListRequest(req SourceDocumentListRequest) store.SourceDocumentListRequest {
 	return store.SourceDocumentListRequest{
-		SourceID:      req.SourceID,
-		BindingID:     req.BindingID,
-		Keyword:       req.Keyword,
-		StateFilter:   req.StateFilter,
-		ParseStatuses: req.ParseStatuses,
-		Page:          req.Page,
-		PageSize:      req.PageSize,
+		SourceID:       req.SourceID,
+		BindingID:      req.BindingID,
+		ConnectorTypes: req.ConnectorTypes,
+		Keyword:        req.Keyword,
+		StateFilter:    req.StateFilter,
+		ParseStatuses:  req.ParseStatuses,
+		Page:           req.Page,
+		PageSize:       req.PageSize,
 	}
 }
 

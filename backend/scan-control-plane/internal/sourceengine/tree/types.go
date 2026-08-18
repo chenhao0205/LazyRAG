@@ -132,13 +132,14 @@ type SourceTreeSearchRequest struct {
 }
 
 type SourceDocumentListRequest struct {
-	SourceID      string
-	BindingID     string
-	Keyword       string
-	StateFilter   []string
-	ParseStatuses []string
-	Page          int
-	PageSize      int
+	SourceID       string
+	BindingID      string
+	ConnectorTypes []string
+	Keyword        string
+	StateFilter    []string
+	ParseStatuses  []string
+	Page           int
+	PageSize       int
 }
 
 type SourceDocumentItem struct {

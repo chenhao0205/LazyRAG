@@ -228,6 +228,15 @@ func documentListBaseQuery(db *gorm.DB, req SourceDocumentListRequest) *gorm.DB 
 		Where("? = '' OR s.binding_id = ?", req.BindingID, req.BindingID).
 		Where("s.document_list_visible = true").
 		Where("LOWER(o.search_name || ' ' || o.display_name) LIKE LOWER(?)", "%"+req.Keyword+"%")
+	if connectorTypes := normalizeSourceListConnectorTypes(req.ConnectorTypes); len(connectorTypes) > 0 {
+		query = query.Where(`EXISTS (
+			SELECT 1 FROM source_bindings sb_filter
+			WHERE sb_filter.source_id = s.source_id
+			  AND sb_filter.binding_id = s.binding_id
+			  AND sb_filter.status <> ?
+			  AND sb_filter.connector_type IN ?
+		)`, "DELETING", connectorTypes)
+	}
 	if len(req.StateFilter) > 0 {
 		query = query.Where("s.source_state IN ?", req.StateFilter)
 	}
