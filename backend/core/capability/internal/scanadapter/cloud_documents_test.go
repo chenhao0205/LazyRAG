@@ -17,6 +17,7 @@ func cloudCall() capability.InvocationContext {
 }
 
 func TestCloudReaderScopesListGetAndSearchToCloudConnectors(t *testing.T) {
+	documentRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-User-ID") != "user" || r.Header.Get("X-Tenant-ID") != "tenant" {
 			t.Fatalf("identity headers missing: %#v", r.Header)
@@ -38,6 +39,7 @@ func TestCloudReaderScopesListGetAndSearchToCloudConnectors(t *testing.T) {
 			}
 			_, _ = io.WriteString(w, `{"items":[{"key":"x","source_id":"cloud","is_document":true}],"next_cursor":""}`)
 		case r.URL.Path == "/api/scan/sources/cloud/documents":
+			documentRequests++
 			if r.URL.Query().Get("connector_type") != cloudConnectors {
 				t.Fatalf("document connector filter=%q", r.URL.Query().Get("connector_type"))
 			}
@@ -61,6 +63,12 @@ func TestCloudReaderScopesListGetAndSearchToCloudConnectors(t *testing.T) {
 	}
 	if r, err := reader.GetCloudDocument(context.Background(), cloudCall(), capability.GetCloudDocumentInput{SourceID: "cloud", IncludeDocuments: true, DocumentsPage: capability.PageRequest{PageSize: 20}}); err != nil || len(r.Documents) != 1 || r.Documents[0].ID != "feishu-doc" {
 		t.Fatalf("get=%#v err=%v", r, err)
+	}
+	if _, err := reader.GetCloudDocument(context.Background(), cloudCall(), capability.GetCloudDocumentInput{SourceID: "cloud"}); err != nil {
+		t.Fatalf("metadata-only get: %v", err)
+	}
+	if documentRequests != 1 {
+		t.Fatalf("metadata-only get queried documents %d times, want 1 total", documentRequests)
 	}
 	if r, err := reader.SearchCloudDocuments(context.Background(), cloudCall(), capability.SearchCloudDocumentsInput{SourceID: "cloud", Query: "fixture", Page: capability.PageRequest{PageSize: 20}}); err != nil || len(r.Hits) != 1 {
 		t.Fatalf("search=%#v err=%v", r, err)
