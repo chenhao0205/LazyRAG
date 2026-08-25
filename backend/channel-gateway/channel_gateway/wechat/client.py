@@ -4,7 +4,7 @@ import hmac
 import os
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlparse, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives import padding

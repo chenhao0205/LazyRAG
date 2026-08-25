@@ -10,7 +10,6 @@ import mimetypes
 import os
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from channel_gateway.common.domain.channel import (
@@ -543,11 +542,11 @@ class WeChatRuntime:
         text = _message_text(message)
         attachments, attachment_metadata, remaining_download_bytes = (
             self._attachments_from_items(
-            message.get('item_list') or [],
-            source='message',
-            budget=_MAX_INBOUND_ATTACHMENTS,
-            remaining_download_bytes=_MAX_TOTAL_INBOUND_DOWNLOAD_BYTES,
-        )
+                message.get('item_list') or [],
+                source='message',
+                budget=_MAX_INBOUND_ATTACHMENTS,
+                remaining_download_bytes=_MAX_TOTAL_INBOUND_DOWNLOAD_BYTES,
+            )
         )
         references, reference_attachments, _remaining_download_bytes = self._references(
             message,
@@ -697,11 +696,11 @@ class WeChatRuntime:
             if inline and isinstance(ref_item, dict):
                 ref_attachments, metadata, remaining_download_bytes = (
                     self._attachments_from_items(
-                    [ref_item],
-                    source='ref_msg',
-                    budget=budget - len(attachments),
-                    remaining_download_bytes=remaining_download_bytes,
-                )
+                        [ref_item],
+                        source='ref_msg',
+                        budget=budget - len(attachments),
+                        remaining_download_bytes=remaining_download_bytes,
+                    )
                 )
                 attachments.extend(ref_attachments)
                 if metadata:
@@ -814,6 +813,7 @@ class WeChatRuntime:
                 _logger.warning('wechat_inbound_media_budget_exhausted type=%s', item_type)
                 continue
             effective_limit = min(max_bytes, remaining_download_bytes)
+
             def _consume_download_bytes(chunk_size: int) -> None:
                 nonlocal remaining_download_bytes
                 remaining_download_bytes = max(
