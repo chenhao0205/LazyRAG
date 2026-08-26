@@ -1,5 +1,4 @@
 import datetime as dt
-from collections.abc import Callable
 from typing import Any, Protocol
 
 from channel_gateway.common.ports.providers import RuntimeLease
@@ -34,15 +33,11 @@ class WeChatReceiverClient(Protocol):
 
     def download_media(
         self,
-        media: dict[str, Any],
         *,
-        image_aeskey: str = '',
+        media: dict[str, Any],
+        aes_key_hint: str = '',
         max_bytes: int,
-        max_download_bytes: int,
-        fallback_aes_keys: tuple[str, ...] = (),
-        validate_plaintext: Callable[[bytes], bool] | None = None,
-        on_download_bytes: Callable[[int], None] | None = None,
-    ) -> tuple[bytes, str]:
+    ) -> bytes:
         ...
 
 
