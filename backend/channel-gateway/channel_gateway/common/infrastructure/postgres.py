@@ -1565,35 +1565,6 @@ class GatewayStore:
             )
         return inserted
 
-    def find_inbound_by_provider_message_id(
-        self,
-        *,
-        provider: str,
-        account_id: str,
-        recipient_id: str,
-        message_id: str,
-    ) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT text, provider_context
-                FROM channel_inbox
-                WHERE provider = %s
-                  AND account_id = %s
-                  AND recipient_id = %s
-                  AND provider_context -> 'wechat_message_ids' ? %s
-                ORDER BY ingest_sequence DESC
-                LIMIT 1
-                """,
-                (provider, account_id, recipient_id, message_id),
-            ).fetchone()
-        if not row:
-            return None
-        return {
-            'text': str(row['text']),
-            'provider_context': self._dict(row['provider_context']),
-        }
-
     def welcome_pending(self, account_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
