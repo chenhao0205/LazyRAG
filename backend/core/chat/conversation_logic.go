@@ -602,6 +602,9 @@ func checkInput(raw map[string]any) bool {
 		if _, hasURI := m["uri"]; hasURI {
 			return true
 		}
+		if _, hasBase64 := m["input_base64"]; hasBase64 {
+			return true
+		}
 	}
 	return false
 }
@@ -995,6 +998,7 @@ func buildChatRequestBody(ctx context.Context, db *gorm.DB, convID, sessionID, q
 			mode = m
 		}
 	}
+	materializeInputBase64Attachments(raw)
 	currentFilePaths := filePathsForUpstreamChat(raw)
 	filesMap := filesPerTurnMap(histories, currentFilePaths, currentSeq)
 	body := map[string]any{

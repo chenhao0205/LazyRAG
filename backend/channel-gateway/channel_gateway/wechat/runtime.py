@@ -1,27 +1,29 @@
 from __future__ import annotations
 
+import base64
+from collections import OrderedDict
 import hashlib
 import json
 import logging
 import math
+import mimetypes
 import os
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from channel_gateway.common.domain.channel import (
     InboundEnvelope,
     ReceiverCheckpoint,
 )
+from channel_gateway.common.domain.chat import (
+    ChannelAttachment,
+    ChannelExecutionContext,
+)
 from channel_gateway.common.ports.providers import (
     ReceiverRepository,
     RuntimeCredentialStore,
     RuntimeLease,
-)
-from channel_gateway.common.domain.chat import (
-    ChannelAttachment,
-    ChannelExecutionContext,
 )
 from channel_gateway.wechat.domain import (
     WeChatAddressFactory,
@@ -34,6 +36,13 @@ from channel_gateway.wechat.ports import WeChatReceiverClient
 _logger = logging.getLogger(__name__)
 _MIN_POLL_TIMEOUT_MS = 5_000
 _MAX_POLL_TIMEOUT_MS = 60_000
+_MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_INBOUND_FILE_BYTES = 100 * 1024 * 1024
+_MAX_TOTAL_INBOUND_DOWNLOAD_BYTES = 100 * 1024 * 1024
+_MAX_INBOUND_ATTACHMENTS = 10
+_FILE_KEY_CACHE_SIZE = 128
+_ATTACHMENT_ONLY_PROMPT = '请分析附件内容。'
+_REF_SHAPE_DEBUG_ENV = 'WECHAT_REF_SHAPE_DEBUG'
 
 
 @dataclass(slots=True)
@@ -59,6 +68,100 @@ def _message_key(message: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+def _message_item_ids(message: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for candidate in (message.get('message_id'), message.get('msg_id')):
+        value = str(candidate or '').strip()
+        if value:
+            values.append(value)
+    for item in message.get('item_list') or []:
+        if isinstance(item, dict):
+            value = str(item.get('msg_id') or '').strip()
+            if value:
+                values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def _reference_message_id(
+    ref: dict[str, Any],
+    ref_item: dict[str, Any] | None,
+) -> str:
+    for candidate in (
+        ref_item.get('msg_id') if ref_item else None,
+        ref.get('msg_id'),
+        ref.get('message_id'),
+    ):
+        value = str(candidate or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _message_type_name(value: Any) -> str:
+    return {1: 'text', 2: 'image', 4: 'file'}.get(value, 'unknown')
+
+
+def _has_inline_reference_media(item: dict[str, Any] | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get('type') == 2:
+        return isinstance(item.get('image_item'), dict)
+    if item.get('type') == 4:
+        return isinstance(item.get('file_item'), dict)
+    return False
+
+
+def _ref_shape_logging_enabled() -> bool:
+    return str(os.getenv(_REF_SHAPE_DEBUG_ENV) or '').strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+
+
+def _shape_keys(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return sorted(str(key) for key in value.keys())
+
+
+def _log_inbound_message_shape(message: dict[str, Any]) -> None:
+    """Temporary E2E diagnostics: log field names only, never field values."""
+    if not _ref_shape_logging_enabled():
+        return
+    _logger.info(
+        'wechat_e2e_inbound_shape message_keys=%s item_list_type=%s',
+        _shape_keys(message),
+        type(message.get('item_list')).__name__,
+    )
+    items = message.get('item_list')
+    if not isinstance(items, list):
+        return
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            _logger.info(
+                'wechat_e2e_inbound_item_shape index=%s item_type=<non-dict> '
+                'python_type=%s', index, type(item).__name__,
+            )
+            continue
+        ref = item.get('ref_msg')
+        ref_item = ref.get('message_item') if isinstance(ref, dict) else None
+        _logger.info(
+            'wechat_e2e_inbound_item_shape index=%s item_type=%s item_keys=%s '
+            'text_item_keys=%s image_item_keys=%s file_item_keys=%s '
+            'video_item_keys=%s voice_item_keys=%s ref_msg_keys=%s '
+            'message_item_keys=%s',
+            index,
+            item.get('type'),
+            _shape_keys(item),
+            _shape_keys(item.get('text_item')),
+            _shape_keys(item.get('image_item')),
+            _shape_keys(item.get('file_item')),
+            _shape_keys(item.get('video_item')),
+            _shape_keys(item.get('voice_item')),
+            _shape_keys(ref),
+            _shape_keys(ref_item),
+        )
+
+
 def _message_text(message: dict[str, Any]) -> str:
     values: list[str] = []
     for item in message.get('item_list') or []:
@@ -70,7 +173,87 @@ def _message_text(message: dict[str, Any]) -> str:
                 text = str(text_item['text']).strip()
                 if text:
                     values.append(text)
+        if item.get('type') == 3:
+            voice_item = item.get('voice_item') or {}
+            if isinstance(voice_item, dict) and voice_item.get('text'):
+                text = str(voice_item['text']).strip()
+                if text:
+                    values.append(text)
     return '\n'.join(values)
+
+
+def _item_text(item: dict[str, Any]) -> str:
+    if item.get('type') != 1:
+        return ''
+    text_item = item.get('text_item') or {}
+    if not isinstance(text_item, dict):
+        return ''
+    return str(text_item.get('text') or '').strip()
+
+
+def _parse_reference(
+    ref: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Normalize the public, non-sensitive reference fields from iLink."""
+    title = str(ref.get('title') or '').strip()
+    ref_item = ref.get('message_item')
+    if not isinstance(ref_item, dict):
+        ref_item = None
+    parts: list[str] = []
+    for value in (title, _item_text(ref_item) if ref_item else ''):
+        if value and value not in parts:
+            parts.append(value)
+    record: dict[str, Any] = {
+        'has_title': bool(title),
+        'title_length': len(title),
+        'has_message_item': ref_item is not None,
+    }
+    if ref_item is not None:
+        record['item_type'] = ref_item.get('type')
+    if parts:
+        record['text'] = '\n'.join(parts)
+    return record, ref_item
+
+
+def _log_reference_shape(
+    ref: dict[str, Any],
+    ref_item: dict[str, Any] | None,
+) -> None:
+    """Emit debug-only payload shape diagnostics without logging content/secrets."""
+    _logger.debug(
+        'wechat_ref_msg_shape has_ref_msg=true has_title=%s title_length=%s '
+        'has_message_item=%s message_item_type=%s has_text_item=%s '
+        'has_image_item=%s has_file_item=%s has_video_item=%s '
+        'has_voice_item=%s',
+        bool(str(ref.get('title') or '').strip()),
+        len(str(ref.get('title') or '').strip()),
+        ref_item is not None,
+        ref_item.get('type') if ref_item else None,
+        bool(ref_item and isinstance(ref_item.get('text_item'), dict)),
+        bool(ref_item and isinstance(ref_item.get('image_item'), dict)),
+        bool(ref_item and isinstance(ref_item.get('file_item'), dict)),
+        bool(ref_item and isinstance(ref_item.get('video_item'), dict)),
+        bool(ref_item and isinstance(ref_item.get('voice_item'), dict)),
+    )
+
+
+def _image_data_url(content: bytes) -> str | None:
+    if content.startswith(b'\x89PNG\r\n\x1a\n'):
+        media_type = 'image/png'
+    elif content.startswith((b'GIF87a', b'GIF89a')):
+        media_type = 'image/gif'
+    elif content.startswith(b'RIFF') and content[8:12] == b'WEBP':
+        media_type = 'image/webp'
+    elif content.startswith(b'\xff\xd8\xff'):
+        media_type = 'image/jpeg'
+    else:
+        return None
+    return f'data:{media_type};base64,{base64.b64encode(content).decode("ascii")}'
+
+
+def _file_data_url(content: bytes, filename: str) -> str:
+    media_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    return f'data:{media_type};base64,{base64.b64encode(content).decode("ascii")}'
 
 
 class WeChatRuntime:
@@ -93,6 +276,8 @@ class WeChatRuntime:
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
         self._workers: dict[str, _AccountWorker] = {}
+        self._file_aes_keys: OrderedDict[tuple[str, int], str] = OrderedDict()
+        self._file_key_lock = threading.Lock()
 
     def reconcile_accounts(
         self,
@@ -345,86 +530,70 @@ class WeChatRuntime:
         credentials: dict[str, str],
         message: dict[str, Any],
     ) -> InboundEnvelope | None:
+        _log_inbound_message_shape(message)
         if message.get('message_type') not in (None, 1):
             return None
         sender_id = str(message.get('from_user_id') or '')
         if sender_id != credentials['authorized_user_id']:
             return None
-        context_token = str(message.get('context_token') or '')
-        if not sender_id or not context_token:
-            return None
         account_id = str(account['id'])
         message_key = _message_key(message)
-        attachments: list[ChannelAttachment] = []
-        media_failed = False
-        media_bytes = 0
-        for index, item in enumerate((message.get('item_list') or [])[:10]):
-            if not isinstance(item, dict) or item.get('type') not in (2, 4):
-                continue
-            kind = 'image' if item.get('type') == 2 else 'file'
-            payload = item.get(f'{kind}_item') or {}
-            media = payload.get('media') if isinstance(payload, dict) else None
-            if not isinstance(media, dict):
-                media_failed = True
-                continue
-            try:
-                content = self._client.download_media(
-                    media=media,
-                    aes_key_hint=(
-                        str(payload.get('aeskey') or '')
-                        if kind == 'image'
-                        else ''
-                    ),
-                    max_bytes=(
-                        self._config.max_inbound_media_bytes
-                        - media_bytes
-                    ),
-                )
-                media_bytes += len(content)
-                path = self._save_media(
-                    owner_user_id=str(account['owner_user_id']),
-                    message_key=message_key,
-                    index=index,
-                    kind=kind,
-                    filename=str(payload.get('file_name') or ''),
-                    content=content,
-                )
-            except (OSError, WeChatError):
-                media_failed = True
-                _logger.exception(
-                    'wechat_inbound_media_failed account_id=%s message_key=%s index=%s',
-                    account_id,
-                    message_key,
-                    index,
-                )
-                continue
-            attachment = ChannelAttachment.from_dict({
-                'input_type': kind,
-                'uri': path,
-            })
-            if attachment is not None:
-                attachments.append(attachment)
-
+        context_token = str(message.get('context_token') or '')
         text = _message_text(message)
-        if not text and attachments:
-            text = (
-                '请处理用户发送的图片和文档。'
-                if len(attachments) > 1
-                else '请处理用户发送的图片。'
-                if attachments[0].input_type == 'image'
-                else '请处理用户发送的文档。'
+        attachments, attachment_metadata, remaining_download_bytes = (
+            self._attachments_from_items(
+                message.get('item_list') or [],
+                source='message',
+                budget=_MAX_INBOUND_ATTACHMENTS,
+                remaining_download_bytes=_MAX_TOTAL_INBOUND_DOWNLOAD_BYTES,
             )
-        if not text and media_failed:
-            text = '微信图片或文档读取失败，请重新发送。'
-        if not text:
+        )
+        references, reference_attachments, _remaining_download_bytes = self._references(
+            message,
+            account_id=account_id,
+            recipient_id=sender_id,
+            budget=_MAX_INBOUND_ATTACHMENTS - len(attachments),
+            remaining_download_bytes=remaining_download_bytes,
+        )
+        attachments = attachments + reference_attachments
+        quoted_text = '\n'.join(
+            item['text'] for item in references if item.get('text')
+        )
+        if references:
+            fallback_quote = (
+                '当前引用消息无法解析，请重新引用或重新发送。'
+                if any(item.get('resolved') is False for item in references)
+                else '（包含引用附件）'
+            )
+            text = (
+                f'[引用消息]\n{quoted_text or fallback_quote}\n[/引用消息]\n\n'
+                f'[当前消息]\n{text or "请结合引用消息处理。"}\n[/当前消息]'
+            )
+        if not text and attachments:
+            text = _ATTACHMENT_ONLY_PROMPT
+        if not sender_id or not context_token or not text:
             return None
         address_hash = self._addresses.direct(
             account_id,
             sender_id,
         ).route_hash
-        execution = ChannelExecutionContext(
-            attachments=tuple(attachments),
-        )
+        execution = ChannelExecutionContext(attachments=attachments)
+        provider_context: dict[str, Any] = {
+            'context_token': context_token,
+            'session_id': str(message.get('session_id') or ''),
+            'wechat_message_ids': _message_item_ids(message),
+            'channel_execution': execution.to_dict(),
+        }
+        if attachment_metadata:
+            provider_context['wechat_attachments'] = attachment_metadata
+        if references:
+            provider_context['wechat_ref_msg'] = references
+        if attachments:
+            provider_context['command_action'] = {
+                'schema_version': '1',
+                'command': 'chat',
+                'parameters': {'message': text},
+            }
         return InboundEnvelope(
             provider='wechat',
             account_id=account_id,
@@ -434,85 +603,348 @@ class WeChatRuntime:
             owner_user_id=str(account['owner_user_id']),
             recipient_id=sender_id,
             text=text,
-            provider_context={
-                'context_token': context_token,
-                'session_id': str(message.get('session_id') or ''),
-                'channel_error': (
-                    '微信图片或文档读取失败，请重新发送。'
-                    if media_failed
-                    else ''
-                ),
-            },
-            sensitive_context=(
-                {'channel_execution': execution.to_dict()}
-                if attachments
-                else {}
-            ),
+            provider_context=provider_context,
         )
 
-    def _save_media(
+    def _references(
+        self,
+        message: dict[str, Any],
+        *,
+        account_id: str,
+        recipient_id: str,
+        budget: int,
+        remaining_download_bytes: int,
+    ) -> tuple[list[dict[str, Any]], tuple[ChannelAttachment, ...], int]:
+        references: list[dict[str, Any]] = []
+        attachments: list[ChannelAttachment] = []
+        ref_sources: list[dict[str, Any]] = []
+        for item in message.get('item_list') or []:
+            if not isinstance(item, dict):
+                continue
+            ref = item.get('ref_msg')
+            if not isinstance(ref, dict):
+                continue
+            ref_sources.append(ref)
+        # Some iLink payload variants expose the reference beside item_list.
+        # Prefer item-level references, which are associated with their message
+        # item, and use the top-level shape only as a compatibility fallback.
+        if not ref_sources and isinstance(message.get('ref_msg'), dict):
+            ref_sources.append(message['ref_msg'])
+
+        for ref in ref_sources:
+            record, ref_item = _parse_reference(ref)
+            _log_reference_shape(ref, ref_item)
+            message_id = _reference_message_id(ref, ref_item)
+            inline = bool(record.get('text')) or _has_inline_reference_media(ref_item)
+            if inline:
+                record.update({
+                    'resolved': True,
+                    'message_id': message_id,
+                    'source': 'inline',
+                    'type': _message_type_name(
+                        ref_item.get('type') if ref_item else None,
+                    ),
+                })
+            elif message_id:
+                resolved = self._resolve_persisted_reference(
+                    account_id=account_id,
+                    recipient_id=recipient_id,
+                    message_id=message_id,
+                )
+                if resolved is None:
+                    record.update({
+                        'resolved': False,
+                        'message_id': message_id,
+                        'reason': 'message_not_found',
+                    })
+                else:
+                    resolved_text = str(resolved.get('text') or '').strip()
+                    resolved_context = resolved.get('provider_context')
+                    execution = ChannelExecutionContext.from_provider_context(
+                        resolved_context if isinstance(resolved_context, dict) else None,
+                    )
+                    resolved_attachments = execution.attachments
+                    record = {
+                        'resolved': True,
+                        'message_id': message_id,
+                        'source': 'db',
+                        'type': _message_type_name(
+                            ref_item.get('type') if ref_item else None,
+                        ),
+                    }
+                    if resolved_text:
+                        record['text'] = resolved_text
+                    if resolved_attachments:
+                        record['attachments'] = [
+                            {'source': 'db', 'input_type': attachment.input_type}
+                            for attachment in resolved_attachments
+                        ]
+                        attachments.extend(
+                            resolved_attachments[:max(0, budget - len(attachments))]
+                        )
+            elif (
+                not record.get('has_title')
+                and (ref_item is None or ref_item.get('type') is None)
+            ):
+                continue
+            else:
+                record.update({
+                    'resolved': False,
+                    'message_id': '',
+                    'reason': 'message_id_missing',
+                })
+            if inline and isinstance(ref_item, dict):
+                ref_attachments, metadata, remaining_download_bytes = (
+                    self._attachments_from_items(
+                        [ref_item],
+                        source='ref_msg',
+                        budget=budget - len(attachments),
+                        remaining_download_bytes=remaining_download_bytes,
+                    )
+                )
+                attachments.extend(ref_attachments)
+                if metadata:
+                    record['attachments'] = metadata
+            _logger.info(
+                'wechat_reference_resolver resolved=%s source=%s message_id=%s '
+                'reference_type=%s reason=%s',
+                record.get('resolved') is True,
+                record.get('source') or 'unresolved',
+                message_id,
+                record.get('type') or _message_type_name(
+                    ref_item.get('type') if ref_item else None,
+                ),
+                record.get('reason') or '',
+            )
+            if (
+                record.get('text')
+                or record.get('attachments')
+                or record.get('resolved') is False
+            ):
+                references.append(record)
+        return references, tuple(attachments), remaining_download_bytes
+
+    def _resolve_persisted_reference(
         self,
         *,
-        owner_user_id: str,
-        message_key: str,
-        index: int,
-        kind: str,
-        filename: str,
-        content: bytes,
-    ) -> str:
-        root = Path(self._config.upload_root).resolve()
-        owner = hashlib.sha256(
-            owner_user_id.encode('utf-8')
-        ).hexdigest()[:32]
-        directory = (root / 'channels' / 'wechat' / owner / message_key).resolve()
-        if root not in directory.parents:
-            raise OSError('Invalid WeChat media directory')
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        name = self._safe_filename(filename)
-        if not name:
-            name = (
-                f'image-{index}{self._image_extension(content)}'
-                if kind == 'image'
-                else f'document-{index}.bin'
-            )
-        target = (directory / name).resolve()
-        if directory not in target.parents:
-            raise OSError('Invalid WeChat media filename')
-        if target.exists() and target.read_bytes() == content:
-            return str(target)
-        temporary = directory / f'.{name}.{os.getpid()}.tmp'
+        account_id: str,
+        recipient_id: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        lookup = getattr(self._store, 'find_inbound_by_provider_message_id', None)
+        if not callable(lookup):
+            return None
         try:
-            with temporary.open('wb') as handle:
-                os.chmod(temporary, 0o600)
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return str(target)
+            result = lookup(
+                provider='wechat',
+                account_id=account_id,
+                recipient_id=recipient_id,
+                message_id=message_id,
+            )
+        except Exception:
+            _logger.exception(
+                'wechat_reference_resolver_lookup_failed message_id=%s',
+                message_id,
+            )
+            return None
+        return result if isinstance(result, dict) else None
+
+    def _attachments_from_items(
+        self,
+        items: list[Any],
+        *,
+        source: str,
+        budget: int,
+        remaining_download_bytes: int,
+    ) -> tuple[tuple[ChannelAttachment, ...], list[dict[str, Any]], int]:
+        attachments: list[ChannelAttachment] = []
+        metadata: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict) or len(attachments) >= budget:
+                continue
+            item_type = item.get('type')
+            if item_type == 2:
+                image = item.get('image_item')
+                input_type = 'image'
+                filename = ''
+                max_bytes = _MAX_INBOUND_IMAGE_BYTES
+                image_aeskey = (
+                    str(image.get('aeskey') or '')
+                    if isinstance(image, dict)
+                    else ''
+                )
+                media = image.get('media') if isinstance(image, dict) else None
+            elif item_type == 4:
+                file_item = item.get('file_item')
+                input_type = 'file'
+                filename = (
+                    str(file_item.get('file_name') or '').strip()
+                    if isinstance(file_item, dict)
+                    else ''
+                )
+                max_bytes = _MAX_INBOUND_FILE_BYTES
+                image_aeskey = ''
+                media = (
+                    file_item.get('media') if isinstance(file_item, dict) else None
+                )
+                integrity, metadata_error = self._file_integrity(file_item)
+                if integrity is None:
+                    _logger.warning(
+                        'wechat_inbound_file_metadata_invalid reason=%s',
+                        metadata_error,
+                    )
+                    continue
+                if integrity[1] > remaining_download_bytes:
+                    _logger.warning(
+                        'wechat_inbound_media_budget_declared_exceeded '
+                        'type=file declared=%s remaining=%s',
+                        integrity[1],
+                        remaining_download_bytes,
+                    )
+                    continue
+            else:
+                continue
+            if item_type == 2:
+                integrity = None
+            if not isinstance(media, dict):
+                _logger.warning('wechat_inbound_media_missing type=%s', item_type)
+                continue
+            if remaining_download_bytes <= 0:
+                _logger.warning('wechat_inbound_media_budget_exhausted type=%s', item_type)
+                continue
+            effective_limit = min(max_bytes, remaining_download_bytes)
+
+            def _consume_download_bytes(chunk_size: int) -> None:
+                nonlocal remaining_download_bytes
+                remaining_download_bytes = max(
+                    0,
+                    remaining_download_bytes - chunk_size,
+                )
+
+            try:
+                fallback_aes_keys = self._file_aes_key_candidates(integrity)
+                content, used_aes_key = self._client.download_media(
+                    media,
+                    image_aeskey=image_aeskey,
+                    max_bytes=effective_limit,
+                    max_download_bytes=effective_limit,
+                    fallback_aes_keys=fallback_aes_keys,
+                    validate_plaintext=(
+                        lambda value, integrity=integrity:
+                        self._file_matches_integrity(value, integrity)
+                    ) if integrity is not None else None,
+                    on_download_bytes=_consume_download_bytes,
+                )
+            except WeChatError as exc:
+                _logger.warning(
+                    'wechat_inbound_media_download_failed type=%s error=%s',
+                    item_type,
+                    exc,
+                )
+                continue
+            if item_type == 4 and integrity is not None:
+                self._remember_file_aes_key(integrity, used_aes_key)
+            if not content:
+                _logger.warning('wechat_inbound_media_empty type=%s', item_type)
+                continue
+            encoded = (
+                _image_data_url(content)
+                if input_type == 'image'
+                else _file_data_url(content, filename)
+            )
+            if not encoded:
+                _logger.warning('wechat_inbound_image_type_unsupported')
+                continue
+            attachment = ChannelAttachment.from_dict({
+                'input_type': input_type,
+                'input_base64': encoded,
+            })
+            if attachment is None:
+                continue
+            attachments.append(attachment)
+            entry: dict[str, Any] = {
+                'source': source,
+                'input_type': input_type,
+            }
+            if filename:
+                entry['filename'] = filename
+            for key in ('len', 'md5'):
+                if item_type == 4 and isinstance(file_item, dict):
+                    value = file_item.get(key)
+                    if value is not None:
+                        entry[key] = str(value)
+            metadata.append(entry)
+        return tuple(attachments), metadata, remaining_download_bytes
+
+    def _file_aes_key_candidates(
+        self,
+        integrity: tuple[str, int] | None,
+    ) -> tuple[str, ...]:
+        if integrity is None:
+            return ()
+        with self._file_key_lock:
+            cached = self._file_aes_keys.get(integrity)
+            if not cached:
+                return ()
+            self._file_aes_keys.move_to_end(integrity)
+            return (cached,)
+
+    def _remember_file_aes_key(
+        self,
+        integrity: tuple[str, int],
+        aes_key: str,
+    ) -> None:
+        if not aes_key:
+            return
+        with self._file_key_lock:
+            self._file_aes_keys[integrity] = aes_key
+            self._file_aes_keys.move_to_end(integrity)
+            while len(self._file_aes_keys) > _FILE_KEY_CACHE_SIZE:
+                self._file_aes_keys.popitem(last=False)
 
     @staticmethod
-    def _safe_filename(value: str) -> str:
-        name = Path(value.replace('\\', '/')).name.strip()
-        name = ''.join(
-            character
-            for character in name
-            if character.isprintable() and character not in {'/', '\\', '\x00'}
-        )
-        return name[:180]
+    def _file_integrity(
+        file_item: Any,
+    ) -> tuple[tuple[str, int] | None, str]:
+        if not isinstance(file_item, dict):
+            return None, 'file_item_missing'
+        raw_md5 = file_item.get('md5')
+        raw_length = file_item.get('len')
+        if raw_length is None or not str(raw_length).strip():
+            return None, 'len_missing'
+        if raw_md5 is None or not str(raw_md5).strip():
+            return None, 'md5_missing'
+        expected_md5 = str(raw_md5).strip().lower()
+        try:
+            expected_length = int(str(raw_length).strip())
+        except (TypeError, ValueError):
+            return None, 'len_invalid'
+        if expected_length < 0:
+            return None, 'len_negative'
+        if len(expected_md5) != 32 or any(
+            char not in '0123456789abcdef' for char in expected_md5
+        ):
+            return None, 'md5_invalid'
+        return (expected_md5, expected_length), ''
 
     @staticmethod
-    def _image_extension(content: bytes) -> str:
-        if content.startswith(b'\x89PNG\r\n\x1a\n'):
-            return '.png'
-        if content.startswith(b'\xff\xd8\xff'):
-            return '.jpg'
-        if content.startswith((b'GIF87a', b'GIF89a')):
-            return '.gif'
-        if len(content) >= 12 and content[:4] == b'RIFF' and content[8:12] == b'WEBP':
-            return '.webp'
-        return '.img'
+    def _file_matches_integrity(
+        content: bytes,
+        integrity: tuple[str, int],
+    ) -> bool:
+        expected_md5, expected_length = integrity
+        if len(content) != expected_length:
+            _logger.warning(
+                'wechat_inbound_file_length_mismatch expected=%s actual=%s',
+                expected_length,
+                len(content),
+            )
+            return False
+        actual_md5 = hashlib.md5(content, usedforsecurity=False).hexdigest()
+        if actual_md5 != expected_md5:
+            _logger.warning('wechat_inbound_file_md5_mismatch')
+            return False
+        return True
 
     def _notify_start(
         self,

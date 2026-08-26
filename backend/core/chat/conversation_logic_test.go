@@ -2,9 +2,12 @@ package chat
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1232,6 +1235,181 @@ func TestBuildChatRequestBodyMergesInputURIsIntoFiles(t *testing.T) {
 	if currentFiles[0] != "/var/lib/lazymind/uploads/tmp/u1/a.png" || currentFiles[1] != "/var/lib/lazymind/uploads/tmp/u1/b.pdf" {
 		t.Fatalf("unexpected files order/content: %#v", currentFiles)
 	}
+}
+
+func TestBuildChatRequestBodyMaterializesInputBase64ImagesIntoFiles(t *testing.T) {
+	uploadRoot := t.TempDir()
+	t.Setenv("LAZYMIND_UPLOAD_ROOT", uploadRoot)
+	jpeg := []byte{0xff, 0xd8, 0xff, 0xd9}
+	png := []byte{'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'}
+	raw := map[string]any{
+		"input": []any{
+			map[string]any{"input_type": "text", "text": "describe these"},
+			map[string]any{"input_type": "image", "input_base64": imageDataURL("image/jpeg", jpeg)},
+			map[string]any{"input_type": "image", "input_base64": imageDataURL("image/png", png)},
+		},
+	}
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "sid", "describe these", nil, raw, nil, "", 1)
+
+	files := body["files"].(map[string][]string)["1"]
+	if len(files) != 2 {
+		t.Fatalf("expected two materialized image files in final Chat request, got %#v", files)
+	}
+	for _, path := range files {
+		rel, err := filepath.Rel(uploadRoot, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("materialized path escapes controlled upload root: %q", path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("materialized file %q missing: %v", path, err)
+		}
+	}
+	input := raw["input"].([]any)
+	if text := input[0].(map[string]any)["text"]; text != "describe these" {
+		t.Fatalf("text input was not preserved: %#v", input[0])
+	}
+	for _, item := range input[1:] {
+		entry := item.(map[string]any)
+		if _, ok := entry["input_base64"]; ok || strings.TrimSpace(entry["uri"].(string)) == "" {
+			t.Fatalf("expected base64 input to be replaced with a uri: %#v", entry)
+		}
+	}
+}
+
+func TestBuildChatRequestBodyKeepsURIAndBase64AttachmentsInSameTurnAndHistory(t *testing.T) {
+	uploadRoot := t.TempDir()
+	t.Setenv("LAZYMIND_UPLOAD_ROOT", uploadRoot)
+	gif := []byte("GIF89a")
+	raw := map[string]any{"input": []any{
+		map[string]any{"input_type": "image", "uri": "/var/lib/lazymind/uploads/tmp/u1/existing.png"},
+		map[string]any{"input_type": "image", "input_base64": imageDataURL("image/gif", gif)},
+	}}
+	histories := []orm.ChatHistory{{Seq: 7, Ext: buildChatHistoryExt(map[string]any{
+		"input": []any{map[string]any{"input_type": "image", "uri": "/var/lib/lazymind/uploads/tmp/u1/history.webp"}},
+	}, "")}}
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "sid", "q", histories, raw, nil, "", 8)
+	files := body["files"].(map[string][]string)
+	if len(files["8"]) != 2 || files["8"][0] != "/var/lib/lazymind/uploads/tmp/u1/existing.png" {
+		t.Fatalf("current URI and base64 attachments did not share files_per_turn: %#v", files)
+	}
+	if len(files["7"]) != 1 || files["7"][0] != "/var/lib/lazymind/uploads/tmp/u1/history.webp" {
+		t.Fatalf("historical URI attachment behavior changed: %#v", files)
+	}
+}
+
+func TestBuildChatRequestBodyMaterializesFileBase64IntoFinalChatFiles(t *testing.T) {
+	uploadRoot := t.TempDir()
+	t.Setenv("LAZYMIND_UPLOAD_ROOT", uploadRoot)
+	txt := []byte("LazyMind 微信附件 E2E 测试\n测试口令：LAZYMIND-WECHAT-824\n")
+	markdown := []byte("# 微信附件\n\ncontent\n")
+	pdf := []byte("%PDF-1.7\n")
+	raw := map[string]any{"input": []any{
+		map[string]any{"input_type": "text", "text": "请读取这些文件"},
+		map[string]any{"input_type": "file", "input_base64": imageDataURL("text/plain", txt)},
+		map[string]any{"input_type": "file", "input_base64": imageDataURL("text/markdown", markdown)},
+		map[string]any{"input_type": "file", "input_base64": imageDataURL("application/pdf", pdf)},
+	}}
+	body := buildChatRequestBody(context.TODO(), nil, "conv-file", "sid", "请读取这些文件", nil, raw, nil, "", 12)
+	files := body["files"].(map[string][]string)["12"]
+	if len(files) != 3 {
+		t.Fatalf("expected three materialized files in final Chat request, got %#v", files)
+	}
+	want := []struct {
+		extension string
+		content   []byte
+	}{{".txt", txt}, {".md", markdown}, {".pdf", pdf}}
+	for i, expected := range want {
+		if ext := filepath.Ext(files[i]); ext != expected.extension {
+			t.Fatalf("file %d extension=%q, want %q", i, ext, expected.extension)
+		}
+		got, err := os.ReadFile(files[i])
+		if err != nil || string(got) != string(expected.content) {
+			t.Fatalf("file %d content mismatch: got=%q err=%v", i, string(got), err)
+		}
+	}
+	input := raw["input"].([]any)
+	if input[0].(map[string]any)["text"] != "请读取这些文件" {
+		t.Fatalf("text input was not preserved: %#v", input[0])
+	}
+	for _, item := range input[1:] {
+		entry := item.(map[string]any)
+		if _, present := entry["input_base64"]; present || strings.TrimSpace(entry["uri"].(string)) == "" {
+			t.Fatalf("expected file input to be replaced with uri: %#v", entry)
+		}
+	}
+}
+
+func TestFileBase64HistoryUsesExistingFilesPerTurnAndSafeGenericFallback(t *testing.T) {
+	uploadRoot := t.TempDir()
+	t.Setenv("LAZYMIND_UPLOAD_ROOT", uploadRoot)
+	raw := map[string]any{"input": []any{
+		map[string]any{
+			"input_type": "file", "filename": "../../escape.sh",
+			"input_base64": imageDataURL("application/octet-stream", []byte("safe generic file")),
+		},
+	}}
+	firstBody := buildChatRequestBody(context.TODO(), nil, "conv-file", "sid", "上传文件", nil, raw, nil, "", 12)
+	materialized := firstBody["files"].(map[string][]string)["12"]
+	if len(materialized) != 1 || filepath.Ext(materialized[0]) != ".bin" {
+		t.Fatalf("generic file did not use controlled fallback: %#v", materialized)
+	}
+	rel, err := filepath.Rel(uploadRoot, materialized[0])
+	if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("generic file escaped upload root: %q", materialized[0])
+	}
+	histories := []orm.ChatHistory{
+		{Seq: 10, Ext: buildChatHistoryExt(map[string]any{"input": []any{
+			map[string]any{"input_type": "image", "uri": "/var/lib/lazymind/uploads/tmp/old.png"},
+		}}, "")},
+		{Seq: 12, Ext: buildChatHistoryExt(raw, "上传文件")},
+	}
+	nextBody := buildChatRequestBody(context.TODO(), nil, "conv-file", "sid", "读取刚刚的文件", histories, map[string]any{
+		"input": []any{map[string]any{"input_type": "text", "text": "读取刚刚的文件"}},
+	}, nil, "", 13)
+	files := nextBody["files"].(map[string][]string)
+	if files["10"][0] != "/var/lib/lazymind/uploads/tmp/old.png" || len(files["12"]) != 1 || files["12"][0] != materialized[0] {
+		t.Fatalf("materialized FILE did not retain existing history semantics: %#v", files)
+	}
+}
+
+func TestMaterializeInputBase64ImagesRejectsInvalidUnsupportedAndOversize(t *testing.T) {
+	t.Setenv("LAZYMIND_UPLOAD_ROOT", t.TempDir())
+	webp := append([]byte("RIFF\x00\x00\x00\x00WEBP"), []byte("data")...)
+	raw := map[string]any{"input": []any{
+		map[string]any{"input_type": "image", "input_base64": "data:image/jpeg;base64,not_base64"},
+		map[string]any{"input_type": "image", "input_base64": imageDataURL("image/bmp", []byte("BM"))},
+		map[string]any{"input_type": "image", "input_base64": "data:image/jpeg;base64," + strings.Repeat("A", base64.StdEncoding.EncodedLen(maxInputBase64AttachmentBytes+1))},
+		map[string]any{"input_type": "image", "input_base64": imageDataURL("image/webp", webp)},
+		map[string]any{"input_type": "file", "input_base64": "data:text/plain;base64,not_base64"},
+		map[string]any{"input_type": "file", "input_base64": "data:;base64,Zm9v"},
+	}}
+	materializeInputBase64Attachments(raw)
+	input := raw["input"].([]any)
+	for i := 0; i < 3; i++ {
+		entry := input[i].(map[string]any)
+		if _, ok := entry["uri"]; ok {
+			t.Fatalf("rejected image %d unexpectedly received uri: %#v", i, entry)
+		}
+		if _, ok := entry["input_base64"]; ok {
+			t.Fatalf("rejected image %d retained untrusted base64", i)
+		}
+	}
+	if path, _ := input[3].(map[string]any)["uri"].(string); path == "" {
+		t.Fatalf("valid WebP was not materialized: %#v", input[3])
+	}
+	for _, i := range []int{4, 5} {
+		entry := input[i].(map[string]any)
+		if _, ok := entry["uri"]; ok {
+			t.Fatalf("rejected file %d unexpectedly received uri: %#v", i, entry)
+		}
+		if _, ok := entry["input_base64"]; ok {
+			t.Fatalf("rejected file %d retained untrusted base64", i)
+		}
+	}
+}
+
+func imageDataURL(mimeType string, data []byte) string {
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 func TestBuildChatRequestBodyFilesMergeDedupesAndSkipsHTTP(t *testing.T) {

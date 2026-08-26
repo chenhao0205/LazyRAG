@@ -225,6 +225,39 @@ class SQLiteGatewayStore(GatewayStore):
     def _connect(self) -> _SQLiteConnection:
         return _SQLiteConnection(self._path)
 
+    def find_inbound_by_provider_message_id(
+        self,
+        *,
+        provider: str,
+        account_id: str,
+        recipient_id: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT inbox.text, inbox.provider_context
+                FROM channel_inbox AS inbox
+                JOIN json_each(
+                    inbox.provider_context,
+                    '$.wechat_message_ids'
+                ) AS message_ids
+                WHERE inbox.provider = %s
+                  AND inbox.account_id = %s
+                  AND inbox.recipient_id = %s
+                  AND message_ids.value = %s
+                ORDER BY inbox.ingest_sequence DESC
+                LIMIT 1
+                """,
+                (provider, account_id, recipient_id, message_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            'text': str(row['text']),
+            'provider_context': self._dict(row['provider_context']),
+        }
+
     def initialize(self) -> None:
         statements = (
             """

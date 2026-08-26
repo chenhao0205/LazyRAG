@@ -165,6 +165,17 @@ class ReceiverRepository(IngestionRepository, Protocol):
     ) -> None:
         ...
 
+    def find_inbound_by_provider_message_id(
+        self,
+        *,
+        provider: str,
+        account_id: str,
+        recipient_id: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        """Return a persisted normalized inbound record for provider lookup."""
+        ...
+
 
 class AccountRuntime(Protocol):
     def reconcile_accounts(

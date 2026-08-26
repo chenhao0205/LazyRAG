@@ -2,8 +2,9 @@ import base64
 import hashlib
 import hmac
 import os
+from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -16,7 +17,7 @@ ILINK_CLIENT_VERSION = (2 << 16) | (4 << 8) | 6
 QR_BOT_TYPE = '3'
 BOT_AGENT = 'lazymind-channel-gateway'
 ILINK_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
-_MAX_MEDIA_BYTES = 100 * 1024 * 1024
+ILINK_CDN_HOST = 'novac2c.cdn.weixin.qq.com'
 
 
 class WeChatClient:
@@ -142,51 +143,138 @@ class WeChatClient:
 
     def download_media(
         self,
-        *,
         media: dict[str, Any],
-        aes_key_hint: str = '',
-        max_bytes: int = _MAX_MEDIA_BYTES,
-    ) -> bytes:
+        *,
+        image_aeskey: str = '',
+        max_bytes: int,
+        max_download_bytes: int,
+        fallback_aes_keys: tuple[str, ...] = (),
+        validate_plaintext: Callable[[bytes], bool] | None = None,
+        on_download_bytes: Callable[[int], None] | None = None,
+    ) -> tuple[bytes, str]:
+        """Download and decrypt one inbound iLink CDN media object."""
+        if not isinstance(media, dict) or max_bytes <= 0:
+            raise WeChatError('WeChat media is invalid')
         full_url = str(media.get('full_url') or '').strip()
-        encrypted_query = str(
+        encrypted_query_param = str(
             media.get('encrypt_query_param') or ''
         ).strip()
-        url = full_url or (
-            f'{ILINK_CDN_BASE_URL}/download'
-            f'?encrypted_query_param={quote(encrypted_query, safe="")}'
-        )
-        if not (full_url or encrypted_query) or not self._valid_media_url(url):
-            raise WeChatError('WeChat media URL is invalid')
+        if full_url:
+            parsed_url = urlsplit(full_url)
+            if (
+                parsed_url.scheme != 'https'
+                or parsed_url.hostname != ILINK_CDN_HOST
+            ):
+                raise WeChatError('WeChat media URL is not an iLink CDN URL')
+            download_url = full_url
+        elif encrypted_query_param:
+            download_url = (
+                f'{ILINK_CDN_BASE_URL}/download?encrypted_query_param='
+                f'{quote(encrypted_query_param, safe="")}'
+            )
+        else:
+            raise WeChatError('WeChat media has no download reference')
+
         try:
-            with httpx.stream('GET', url, timeout=60.0) as response:
-                if response.status_code != 200:
-                    raise WeChatError(
-                        f'WeChat CDN returned HTTP {response.status_code}'
-                    )
-                content = bytearray()
-                for chunk in response.iter_bytes():
-                    content.extend(chunk)
-                    if len(content) > max_bytes + algorithms.AES.block_size:
+            ciphertext = self._download_ciphertext(
+                download_url,
+                max_bytes=max_bytes,
+                max_download_bytes=max_download_bytes,
+                on_download_bytes=on_download_bytes,
+            )
+        except httpx.HTTPError as exc:
+            raise WeChatError('Cannot download WeChat media') from exc
+        current_key = image_aeskey or str(media.get('aes_key') or '')
+        candidates = (current_key, *fallback_aes_keys)
+        for encoded_key in candidates:
+            try:
+                plaintext = self._decrypt_media(ciphertext, encoded_key)
+            except WeChatError:
+                continue
+            if (
+                not plaintext
+                or len(plaintext) > max_bytes
+                or (
+                    validate_plaintext is not None
+                    and not validate_plaintext(plaintext)
+                )
+            ):
+                continue
+            return plaintext, encoded_key
+        raise WeChatError(
+            'WeChat media decryption or integrity validation failed'
+            if not fallback_aes_keys
+            else (
+                'WeChat media decryption or integrity validation failed '
+                'with current and cached keys'
+            )
+        )
+
+    @staticmethod
+    def _download_ciphertext(
+        download_url: str,
+        *,
+        max_bytes: int,
+        max_download_bytes: int,
+        on_download_bytes: Callable[[int], None] | None,
+    ) -> bytes:
+        if max_download_bytes <= 0:
+            raise WeChatError('WeChat media download budget is exhausted')
+        block_size = algorithms.AES.block_size // 8
+        max_ciphertext_bytes = min(
+            ((max_bytes // block_size) + 1) * block_size,
+            max_download_bytes,
+        )
+        received = bytearray()
+        try:
+            with httpx.stream('GET', download_url, timeout=60.0) as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes(
+                    chunk_size=min(64 * 1024, max_download_bytes),
+                ):
+                    received.extend(chunk)
+                    if on_download_bytes is not None:
+                        on_download_bytes(len(chunk))
+                    if len(received) > max_ciphertext_bytes:
                         raise WeChatError('WeChat media exceeds the size limit')
         except httpx.HTTPError as exc:
             raise WeChatError('Cannot download WeChat media') from exc
-        if not content:
-            raise WeChatError('WeChat media is empty')
-        key = self._decode_aes_key(
-            aes_key_hint or str(media.get('aes_key') or '')
-        )
-        if key is None:
-            return bytes(content)
+        if not received or len(received) % block_size:
+            raise WeChatError('WeChat media ciphertext is invalid')
+        return bytes(received)
+
+    @classmethod
+    def _decrypt_media(cls, ciphertext: bytes, encoded_key: str) -> bytes:
+        key = cls._decode_media_key(encoded_key)
+        decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
         try:
-            decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
-            padded = decryptor.update(bytes(content)) + decryptor.finalize()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
             unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
-            plaintext = unpadder.update(padded) + unpadder.finalize()
+            return unpadder.update(padded) + unpadder.finalize()
         except ValueError as exc:
-            raise WeChatError('Cannot decrypt WeChat media') from exc
-        if not plaintext or len(plaintext) > max_bytes:
-            raise WeChatError('WeChat media is empty or exceeds the size limit')
-        return plaintext
+            raise WeChatError('WeChat media decryption failed') from exc
+
+    @staticmethod
+    def _decode_media_key(value: str) -> bytes:
+        raw_value = value.strip()
+        if len(raw_value) == 32 and all(
+            char in '0123456789abcdefABCDEF' for char in raw_value
+        ):
+            return bytes.fromhex(raw_value)
+        try:
+            decoded = base64.b64decode(raw_value, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise WeChatError('WeChat media AES key is invalid') from exc
+        if len(decoded) == 16:
+            return decoded
+        if len(decoded) == 32:
+            try:
+                hex_value = decoded.decode('ascii')
+            except UnicodeDecodeError as exc:
+                raise WeChatError('WeChat media AES key is invalid') from exc
+            if all(char in '0123456789abcdefABCDEF' for char in hex_value):
+                return bytes.fromhex(hex_value)
+        raise WeChatError('WeChat media AES key is invalid')
 
     def send_text(
         self,
