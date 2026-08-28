@@ -8,6 +8,7 @@ export * from "./shared/diff";
 export * from "./shared/abtest";
 export * from "./shared/abtestComparison";
 export * from "./shared/threadHistory";
+export * from "./shared/datasetWorkflowStatus";
 export * from "./shared/threadEvents";
 export * from "./shared/checkpoint";
 export * from "./shared/eventDisplay";

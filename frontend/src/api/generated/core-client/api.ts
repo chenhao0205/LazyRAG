@@ -686,7 +686,10 @@ export interface CreateEvalSetByImportResponse {
 }
 export interface CreateEvalSetItemRequest {
     'case_id': string;
+    'difficulty': string;
+    'forbidden_claims': string;
     'generate_reason': string;
+    'grading_guidance': string;
     'ground_truth': string;
     'is_deleted'?: boolean;
     'key_points': string;
@@ -1036,7 +1039,10 @@ export interface EvalSetItemResponse {
     'created_by': string;
     'created_by_name': string;
     'eval_set_id': string;
+    'difficulty': string;
+    'forbidden_claims': string;
     'generate_reason': string;
+    'grading_guidance': string;
     'ground_truth': string;
     'id': string;
     'is_deleted': boolean;
@@ -1129,7 +1135,10 @@ export interface ImportInvalidPreviewRow {
 }
 export interface ImportNormalizedRow {
     'case_id': string;
+    'difficulty': string;
+    'forbidden_claims': string;
     'generate_reason': string;
+    'grading_guidance': string;
     'ground_truth': string;
     'is_deleted': boolean;
     'key_points': string;
@@ -2417,7 +2426,10 @@ export interface UpdateDatasetMemberRequestUpdateMask {
 }
 export interface UpdateEvalSetItemRequest {
     'case_id'?: string;
+    'difficulty'?: string;
+    'forbidden_claims'?: string;
     'generate_reason'?: string;
+    'grading_guidance'?: string;
     'ground_truth'?: string;
     'is_deleted'?: boolean;
     'key_points'?: string;
@@ -35613,6 +35625,4 @@ export class WriterApi extends BaseAPI {
         return WriterApiFp(this.configuration).apiCorePluginSessionsSessionIdSlotsSlotIdItemsIdxListIndexSyncWriterDocumentPost(requestParameters.sessionId, requestParameters.slotId, requestParameters.listIndex, requestParameters.writerDocumentSyncOpenAPIRequest, options).then((request) => request(this.axios, this.basePath));
     }
 }
-
-
 

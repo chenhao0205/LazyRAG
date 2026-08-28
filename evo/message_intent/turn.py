@@ -406,6 +406,7 @@ def _flow_observation(snapshot: FlowSnapshot) -> dict[str, Any]:
                 'approval_ref': _ref_data(stage.approval_ref),
                 'progress': _jsonable(stage.progress),
                 'failures': _jsonable(stage.failures),
+                'error': _jsonable(stage.error),
             }
             for stage in snapshot.stages
         ],
@@ -424,6 +425,7 @@ def _flow_observation(snapshot: FlowSnapshot) -> dict[str, Any]:
             ],
             'progress': _jsonable(snapshot.progress),
             'failures': _jsonable(snapshot.failures),
+            'error': _jsonable(snapshot.runtime.error),
         },
     }
 

@@ -176,7 +176,8 @@ def _stage_status(index: int, frontier: int | None, active: int | None, approval
         return 'failed'
     if approval == frontier:
         return 'awaiting_approval'
-    if runtime.status in {'pausing', 'paused'}:
+    # Live flow status applies to the current stage even with no in-flight attempt.
+    if runtime.status in {'running', 'pausing', 'paused'}:
         return runtime.status
     return 'pending'
 

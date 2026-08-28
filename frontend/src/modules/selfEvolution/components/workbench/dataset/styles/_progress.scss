@@ -1,0 +1,241 @@
+/* Materials funnel */
+@use "./tokens" as *;
+
+.dataset-funnel-list {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  gap: 7px;
+}
+
+.dataset-funnel-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 75px;
+  gap: 8px;
+  align-items: center;
+  color: #607994;
+  font-size: 11px;
+}
+
+.dataset-funnel-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf2f8;
+}
+
+.dataset-funnel-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #c8dbf2;
+
+  &.is-effective {
+    background: #79ace8;
+  }
+
+  &.is-selected {
+    background: #286fc1;
+  }
+}
+
+.dataset-funnel-value {
+  color: #385a7d;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dataset-conversion-note {
+  margin-top: 8px;
+  color: #8295aa;
+  font-size: 10px;
+  text-align: right;
+}
+
+/* Shared 3-ring stage progress (topics + cases), matching the v2 demo. */
+.dataset-stage-progress {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-auto-flow: column;
+  align-items: start;
+  justify-content: center;
+  gap: 2px;
+  padding-top: 2px;
+}
+
+.dataset-stage-progress-link {
+  width: 12px;
+  height: 1px;
+  margin-top: 33px;
+  background: #d7e2ee;
+}
+
+.dataset-stage-progress-step {
+  display: grid;
+  width: 74px;
+  min-width: 0;
+  justify-items: center;
+  text-align: center;
+
+  b {
+    margin-top: 8px;
+    color: #315574;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  small {
+    display: grid;
+    width: 100%;
+    min-height: 32px;
+    margin-top: 4px;
+    color: #7188a4;
+    font-size: 10px;
+    line-height: 1.45;
+
+    span {
+      display: block;
+    }
+
+    &.is-done {
+      color: $ds-green;
+    }
+
+    &.is-running {
+      color: $ds-amber;
+    }
+
+    &.is-stale {
+      color: $ds-purple;
+    }
+
+    &.is-failed {
+      color: $ds-red;
+    }
+
+    &.is-partial {
+      color: $ds-amber;
+    }
+  }
+}
+
+.dataset-progress-ring {
+  --dataset-progress: 0deg;
+  --dataset-progress-color: #93a5b8;
+  display: grid;
+  width: 66px;
+  height: 66px;
+  place-items: center;
+  border-radius: 50%;
+  background: conic-gradient(var(--dataset-progress-color) var(--dataset-progress), #e8eef5 0);
+
+  &::before {
+    grid-area: 1 / 1;
+    width: 54px;
+    height: 54px;
+    content: "";
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  strong {
+    z-index: 1;
+    grid-area: 1 / 1;
+    color: #294f73;
+    font-size: 13px;
+  }
+
+  &.is-done {
+    --dataset-progress-color: #2fa46f;
+  }
+
+  &.is-running {
+    --dataset-progress-color: #dda93d;
+  }
+
+  &.is-paused {
+    border-color: #cbb6e6;
+    background: #f7f1ff;
+    color: $ds-purple;
+  }
+
+  &.is-stale {
+    --dataset-progress-color: #8d67bf;
+  }
+
+  &.is-failed {
+    --dataset-progress-color: #c65349;
+  }
+
+  &.is-partial {
+    --dataset-progress-color: #dda93d;
+  }
+
+  &.is-pending {
+    --dataset-progress-color: #9aaabc;
+  }
+}
+
+/* Generation plan lanes */
+.dataset-lane-rows {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  gap: 8px;
+}
+
+.dataset-lane-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+  color: #607994;
+  font-size: 10px;
+
+  strong {
+    color: #385a7d;
+    text-align: right;
+  }
+}
+
+.dataset-lane-track {
+  display: flex;
+  height: 16px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf2f8;
+}
+
+.dataset-lane-segment {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  overflow: hidden;
+  color: #fff;
+  font-size: 9px;
+  white-space: nowrap;
+
+  &.is-precision {
+    background: #4d8fd8;
+
+    &.is-easy {
+      background: #72a9e5;
+    }
+
+    &.is-hard {
+      background: #2e70bb;
+    }
+  }
+
+  &.is-reasoning {
+    background: #58adb3;
+
+    &.is-easy {
+      background: #86c9cb;
+    }
+
+    &.is-hard {
+      background: #34858e;
+    }
+  }
+}

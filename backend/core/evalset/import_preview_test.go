@@ -75,8 +75,8 @@ func TestDownloadJSONImportTemplate(t *testing.T) {
 			t.Fatalf("expected json template field %q, got %#v", field, rows[0])
 		}
 	}
-	if _, ok := rows[0]["case_id"]; ok {
-		t.Fatalf("json template must not include case_id: %#v", rows[0])
+	if _, ok := rows[0]["case_id"]; !ok {
+		t.Fatalf("json template must include case_id: %#v", rows[0])
 	}
 }
 
@@ -128,7 +128,7 @@ func TestCSVImportPreviewMissingQuestionFailsWithoutToken(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	rec, req := multipartImportRequest(t, "missing-question.csv", "", "question,ground_truth,question_type\n,answer,1\n", "user_1")
+	rec, req := multipartImportRequest(t, "missing-question.csv", "", "question,ground_truth,question_type,grading_guidance\n,answer,precision,guide\n", "user_1")
 	PreviewEvalSetImport(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -151,7 +151,7 @@ func TestCSVImportPreviewSkipsEmptyRows(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := "question,ground_truth,question_type\n,,\nq,a,1\n   ,   ,   \n"
+	body := "question,ground_truth,question_type,grading_guidance\n,,,\nq,a,precision,guide\n   ,   ,   ,   \n"
 	rec, req := multipartImportRequest(t, "empty-rows.csv", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -169,7 +169,7 @@ func TestCSVImportPreviewPartialRowsWritesOnlyInvalidOriginalRowsToCSV(t *testin
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := "case_id,question,ground_truth,question_type\ncase_good,q,a,1\ncase_bad,,bad answer,2\n"
+	body := "case_id,question,ground_truth,question_type,grading_guidance\ncase_good,q,a,precision,guide\ncase_bad,,bad answer,reasoning,guide\n"
 	rec, req := multipartImportRequest(t, "partial.csv", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -214,10 +214,10 @@ func TestCSVImportPreviewPartialRowsWritesOnlyInvalidOriginalRowsToCSV(t *testin
 	if len(records) != 2 {
 		t.Fatalf("expected header plus one invalid row, got %#v", records)
 	}
-	if got := strings.Join(records[0], ","); got != "case_id,question,ground_truth,question_type" {
+	if got := strings.Join(records[0], ","); got != "case_id,question,ground_truth,question_type,grading_guidance" {
 		t.Fatalf("unexpected invalid csv header: %#v", records[0])
 	}
-	if got := strings.Join(records[1], ","); got != "case_bad,,bad answer,2" {
+	if got := strings.Join(records[1], ","); got != "case_bad,,bad answer,reasoning,guide" {
 		t.Fatalf("unexpected invalid csv row: %#v", records[1])
 	}
 }
@@ -226,7 +226,7 @@ func TestCSVImportPreviewAcceptsBOM(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	rec, req := multipartImportRequest(t, "bom.csv", "", "\ufeffquestion,ground_truth,question_type\nq,a,1\n", "user_1")
+	rec, req := multipartImportRequest(t, "bom.csv", "", "\ufeffquestion,ground_truth,question_type,grading_guidance\nq,a,precision,guide\n", "user_1")
 	PreviewEvalSetImport(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -243,7 +243,7 @@ func TestCSVImportPreviewConvertsGB18030ToUTF8(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte("question,ground_truth,question_type\n问题,标准答案,事实问答\n"))
+	body, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte("question,ground_truth,question_type,grading_guidance\n问题,标准答案,precision,评分说明\n"))
 	if err != nil {
 		t.Fatalf("encode gb18030 csv: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestJSONImportPreviewArraySuccess(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := `[{"case_id":"case_1","question":"q","ground_truth":"a","question_type":"1","is_deleted":false}]`
+	body := `[{"case_id":"case_1","question":"q","ground_truth":"a","question_type":"precision","grading_guidance":"guide","is_deleted":false}]`
 	rec, req := multipartImportRequest(t, "items.json", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -282,7 +282,7 @@ func TestJSONImportPreviewItemsSuccess(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := `{"items":[{"question":"q","ground_truth":"a","question_type":"1"}]}`
+	body := `{"items":[{"question":"q","ground_truth":"a","question_type":"precision","grading_guidance":"guide"}]}`
 	rec, req := multipartImportRequest(t, "items.json", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -300,7 +300,7 @@ func TestJSONImportPreviewMissingGroundTruth(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := `[{"question":"q","question_type":"1"}]`
+	body := `[{"question":"q","question_type":"precision","grading_guidance":"guide"}]`
 	rec, req := multipartImportRequest(t, "missing-ground-truth.json", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -323,7 +323,7 @@ func TestXLSXImportPreviewSuccess(t *testing.T) {
 
 	content := xlsxImportContent(t, [][]string{
 		importTemplateFields,
-		{"case_1", "reason", "answer", "false", "points", "question", "type", "chunk_1", "context", "doc", "doc_1"},
+		{"case_1", "question", "precision", "medium", "answer", "guide", "points", "[]", "context", "doc", "doc_1", "chunk_1", "reason", "false"},
 	})
 	rec, req := multipartImportRequestBytes(t, "items.xlsx", "xlsx", content, "user_1")
 	PreviewEvalSetImport(rec, req)
@@ -345,7 +345,7 @@ func TestSuccessfulImportPreviewWritesNormalizedTempAndRecordOnly(t *testing.T) 
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	body := "case_id,generate_reason,ground_truth,is_deleted,key_points,question,question_type,reference_chunk_ids,reference_context,reference_doc,reference_doc_ids\ncase_001,,标准答案,false,,问题,1,,,,\n"
+	body := "case_id,question,question_type,difficulty,ground_truth,grading_guidance,key_points,forbidden_claims,reference_context,reference_doc,reference_doc_ids,reference_chunk_ids,generate_reason,is_deleted\ncase_001,问题,precision,,标准答案,评分说明,[] ,[] ,,,,,,false\n"
 	rec, req := multipartImportRequest(t, "3.csv", "", body, "user_1")
 	PreviewEvalSetImport(rec, req)
 
@@ -379,7 +379,7 @@ func TestSuccessfulImportPreviewWritesNormalizedTempAndRecordOnly(t *testing.T) 
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("decode temp rows: %v; raw=%s", err, string(raw))
 	}
-	if len(rows) != 1 || rows[0].Question != "问题" || rows[0].GroundTruth != "标准答案" || rows[0].QuestionType != "1" {
+	if len(rows) != 1 || rows[0].Question != "问题" || rows[0].GroundTruth != "标准答案" || rows[0].QuestionType != "precision" || rows[0].GradingGuidance != "评分说明" {
 		t.Fatalf("unexpected temp rows: %#v", rows)
 	}
 	if strings.Contains(string(raw), "case_id,generate_reason") {

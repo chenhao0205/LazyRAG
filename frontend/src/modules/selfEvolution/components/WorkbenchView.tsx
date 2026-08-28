@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { CloseOutlined, DownOutlined, EyeOutlined, FileTextOutlined } from "@ant-design/icons";
@@ -11,7 +11,7 @@ import {
 import { FinalResultCard } from "./workbench/FinalResultCard";
 import { CutoverDecisionCard } from "./workbench/CutoverDecisionCard";
 import { ProcessActivitySection } from "./workbench/ProcessActivitySection";
-import { DatasetStreamingTable } from "./workbench/DatasetStreamingTable";
+import { DatasetStageActionButton, DatasetStageActionProvider } from "./workbench/dataset/stageAction";
 import { EvalStreamingTable } from "./workbench/EvalStreamingTable";
 import { AbtestStreamingTable } from "./workbench/AbtestStreamingTable";
 import { AnalysisStreamingTable } from "./workbench/AnalysisStreamingTable";
@@ -27,6 +27,11 @@ export type {
 } from "./workbench/types";
 
 const { Paragraph, Text, Title } = Typography;
+const DatasetWorkspace = lazy(() =>
+  import("./workbench/dataset/DatasetWorkspace").then(({ DatasetWorkspace: component }) => ({
+    default: component,
+  })),
+);
 
 export function SelfEvolutionWorkbenchView({
   processDashboard,
@@ -79,9 +84,15 @@ export function SelfEvolutionWorkbenchView({
   onSend,
   onConfirmIntentCheckpoint,
   onContinueCheckpoint,
+  canContinueDatasetStage = false,
+  datasetStageStatuses,
+  datasetSuggestedTab,
+  onDatasetStepsSnapshot,
   onOpenArtifact,
   onOpenObservation,
   onOpenCaseArtifact,
+  onDatasetWriteApplied,
+  datasetExecutionResumeToken,
   onWorkbenchTabChange,
   onCloseArtifactPanel,
   canViewStageArtifact = false,
@@ -90,8 +101,6 @@ export function SelfEvolutionWorkbenchView({
   onRetryThreadHistoryList,
   onCancelCreateSession,
   onConfirmCreateSession,
-  streamingDatasetRows = [],
-  streamingDatasetProgress = { current: 0, total: 0 },
   streamingEvalRows = [],
   streamingEvalProgress = { current: 0, total: 0 },
   streamingAbtestRows = [],
@@ -259,26 +268,34 @@ export function SelfEvolutionWorkbenchView({
       !shouldShowCutoverCard &&
       (!isAutoMode || requiresManualCheckpointAction(checkpointDecisionPrompt)),
   );
+  // Keep the Dataset advance control in the existing composer checkpoint slot.
+  // It is shown disabled outside an approval boundary so its placement can be
+  // reviewed without competing with the Dataset header actions.
+  const showDatasetContinuePreview = displayStage === "dataset" && !shouldShowCutoverCard;
+  const canContinueFromComposer = hasComposerCheckpoint || canContinueDatasetStage;
   const renderMainComposer = () => (
     <div className="self-evolution-main-composer">
-      {hasComposerCheckpoint && (
+      {(hasComposerCheckpoint || showDatasetContinuePreview) && (
         <div className="self-evolution-composer-checkpoint">
-          <span>{checkpointDecisionDesc}</span>
+          <span>
+            {canContinueFromComposer
+              ? checkpointDecisionDesc
+              : "当前阶段完成后，可在这里手动进入下一步。"}
+          </span>
           <button
             type="button"
-            disabled={!checkpointDecisionPrompt?.command || isSendingMessage}
+            disabled={!canContinueFromComposer || isSendingMessage}
             onClick={(event) => {
               event.stopPropagation();
-              if (checkpointDecisionPrompt?.command) {
-                if (isIntentConfirmation) {
-                  onConfirmIntentCheckpoint();
-                } else {
-                  onContinueCheckpoint();
-                }
+              if (!canContinueFromComposer) return;
+              if (isIntentConfirmation) {
+                onConfirmIntentCheckpoint();
+              } else {
+                onContinueCheckpoint();
               }
             }}
           >
-            {checkpointDecisionPrompt?.command || t("selfEvolutionRun.continueExecution")}
+            {checkpointDecisionPrompt?.command || "进入下一步"}
           </button>
         </div>
       )}
@@ -327,6 +344,7 @@ export function SelfEvolutionWorkbenchView({
         >
           <div className="self-evolution-workbench-main-scroll">
             {hasThreadRestoreError ? renderThreadRestoreNotice() : (
+              <DatasetStageActionProvider>
               <div className="self-evolution-process-board" aria-label={t("selfEvolutionRun.evoFlowProgressAria")}>
                 <div className="self-evolution-process-live">
                   <div className="self-evolution-process-live-main">
@@ -338,7 +356,8 @@ export function SelfEvolutionWorkbenchView({
                       </span>
                     </div>
                   </div>
-                  {shouldShowStageActionButtons &&
+                  {shouldShowStageDetail && displayStage === "dataset" && <DatasetStageActionButton />}
+                  {shouldShowStageActionButtons && displayStage !== "dataset" &&
                     (canViewStageArtifact || displayStage === "eval" || displayStage === "abtest") && (
                     <div className="self-evolution-process-observation-actions" aria-label={t("selfEvolutionRun.observationEntryAria")}>
                       {canViewStageArtifact && viewStageArtifactKind ? (
@@ -392,11 +411,16 @@ export function SelfEvolutionWorkbenchView({
                 )}
 
                 {shouldShowStageDetail && displayStage === "dataset" ? (
-                  <DatasetStreamingTable
-                    rows={streamingDatasetRows}
-                    current={streamingDatasetProgress.current}
-                    total={streamingDatasetProgress.total}
-                  />
+                  <Suspense fallback={<div className="dataset-skeleton-lines"><span /><span /><span /></div>}>
+                    <DatasetWorkspace
+                      threadId={routeThreadId}
+                      stageStatuses={datasetStageStatuses}
+                      suggestedTab={datasetSuggestedTab}
+                      onStepsSnapshot={onDatasetStepsSnapshot}
+                      onWriteApplied={onDatasetWriteApplied}
+                      executionResumeToken={datasetExecutionResumeToken}
+                    />
+                  </Suspense>
                 ) : shouldShowStageDetail && displayStage === "eval" ? (
                   <EvalStreamingTable
                     rows={streamingEvalRows}
@@ -431,6 +455,7 @@ export function SelfEvolutionWorkbenchView({
                 ) : null}
 
               </div>
+              </DatasetStageActionProvider>
             )}
           </div>
         </main>

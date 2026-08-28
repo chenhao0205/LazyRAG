@@ -84,13 +84,18 @@ class DatasetCase(Contract):
     answer: Any
     difficulty: StrictStr
     difficulty_rationale: StrictStr
+    forbidden_claims: list[StrictStr]
+    generate_reason: StrictStr
     grading_guidance: StrictStr
+    ground_truth: Any
+    is_deleted: bool
+    key_points: list[Any]
     original_id: StrictStr
     question: StrictStr
     question_type: StrictStr
     reasoning_steps: list[StrictStr]
     reference_chunk_ids: list[StrictStr]
-    reference_context: list[StrictStr]
+    reference_context: list[Any]
     reference_doc: list[StrictStr]
     reference_doc_ids: list[StrictStr]
     source_message_id: StrictStr

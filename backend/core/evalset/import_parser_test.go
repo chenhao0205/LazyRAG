@@ -98,6 +98,61 @@ func TestImportTemplateFields(t *testing.T) {
 	}
 }
 
+func TestDatasetImportContractKeepsAllEvoFields(t *testing.T) {
+	data := []byte("case_id,question,question_type,difficulty,ground_truth,grading_guidance,key_points,forbidden_claims,reference_context,reference_doc,reference_doc_ids,reference_chunk_ids,generate_reason,is_deleted\n" +
+		"case_1,Q,precision,medium,A,Guide,[],[],Context,Doc,doc_1,chunk_1,Imported,false\n")
+
+	result, err := parseCSVImportRows(data)
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	if len(result.rows) != 1 || len(result.invalidRows) != 0 {
+		t.Fatalf("unexpected parse result: %#v", result)
+	}
+	row := result.rows[0]
+	if row.Difficulty != "medium" || row.GradingGuidance != "Guide" || row.ForbiddenClaims != "[]" {
+		t.Fatalf("evo fields were not preserved: %#v", row)
+	}
+}
+
+func TestDatasetImportRequiresGuidanceAndSupportedQuestionType(t *testing.T) {
+	data := []byte("question,question_type,ground_truth,grading_guidance\nQ,legacy,A,\n")
+
+	result, err := parseCSVImportRows(data)
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	if len(result.invalidRows) != 1 {
+		t.Fatalf("expected one invalid row: %#v", result)
+	}
+	columns := map[string]bool{}
+	for _, detail := range result.invalidRows[0].errors {
+		columns[detail.Column] = true
+	}
+	if !columns["grading_guidance"] || !columns["question_type"] {
+		t.Fatalf("expected guidance and question type errors: %#v", result.invalidRows[0].errors)
+	}
+}
+
+func TestDatasetJSONImportAcceptsStructuredAndListFields(t *testing.T) {
+	data := []byte(`[{"question":"Q","question_type":"precision","ground_truth":"A","grading_guidance":"G","key_points":[{"statement":"point"}],"forbidden_claims":["wrong"],"reference_context":[{"chunk_id":"chunk-1","text":"context"}],"reference_doc_ids":["doc-1"],"reference_chunk_ids":["chunk-1"]}]`)
+
+	result, err := parseJSONImportRows(data)
+	if err != nil {
+		t.Fatalf("parse json: %v", err)
+	}
+	if len(result.rows) != 1 || len(result.invalidRows) != 0 {
+		t.Fatalf("unexpected parse result: %#v", result)
+	}
+	row := result.rows[0]
+	if row.KeyPoints != `[{"statement":"point"}]` || row.ForbiddenClaims != `["wrong"]` || row.ReferenceContext != `[{"chunk_id":"chunk-1","text":"context"}]` {
+		t.Fatalf("structured fields were not preserved: %#v", row)
+	}
+	if row.ReferenceDocIDs != "doc-1" || row.ReferenceChunkIDs != "chunk-1" {
+		t.Fatalf("list fields were not normalized: %#v", row)
+	}
+}
+
 // TestCsvValuesByHeader maps a CSV record to values indexed by header names.
 func TestCsvValuesByHeader(t *testing.T) {
 	header := []string{"question", "ground_truth", "", "question_type"}

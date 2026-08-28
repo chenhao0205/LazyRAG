@@ -7,6 +7,7 @@ import type {
 } from "../shared";
 import {
   datasetItemFields,
+  questionTypeOptions,
   requiredDatasetItemFields,
 } from "../shared";
 import { parseBooleanLike, splitListField } from "./datasetValidation";
@@ -16,10 +17,12 @@ export type DatasetImportMessages = {
   fileUnsupported: string;
   jsonFormatInvalid: string;
   deletedFieldInvalid: string;
+  questionTypeInvalid: string;
   required: {
     question: string;
     question_type: string;
     ground_truth: string;
+    grading_guidance: string;
   };
 };
 
@@ -27,8 +30,11 @@ const fieldAliases: Record<DatasetItemField, string[]> = {
   case_id: ["case id", "caseid", "case_id", "编号"],
   question: ["question", "query", "问题", "用户问题"],
   question_type: ["question_type", "question type", "问题类型"],
+  difficulty: ["difficulty", "难度"],
   ground_truth: ["ground_truth", "ground truth", "answer", "标准答案", "答案"],
+  grading_guidance: ["grading_guidance", "grading guidance", "评分说明"],
   key_points: ["key_points", "key points", "答案要点"],
+  forbidden_claims: ["forbidden_claims", "forbidden claims", "错误结论"],
   reference_context: ["reference_context", "reference context", "参考上下文"],
   reference_doc: ["reference_doc", "reference doc", "参考文档"],
   reference_doc_ids: ["reference_doc_ids", "reference doc ids", "参考文档id"],
@@ -157,6 +163,12 @@ export function buildImportPreview(
         errors.push(messages.required[field]);
       }
     });
+    if (
+      normalized.question_type &&
+      !questionTypeOptions.includes(normalized.question_type)
+    ) {
+      errors.push(messages.questionTypeInvalid);
+    }
 
     return {
       rowIndex: index + 1,
@@ -176,17 +188,23 @@ export function createTemplateRows(sample: {
   question: string;
   question_type: string;
   ground_truth: string;
+  grading_guidance: string;
   key_points: string;
+  forbidden_claims: string;
   reference_context: string;
   reference_doc: string;
   generate_reason: string;
 }) {
   return [
     {
+      case_id: "",
       question: sample.question,
       question_type: sample.question_type,
+      difficulty: "",
       ground_truth: sample.ground_truth,
+      grading_guidance: sample.grading_guidance,
       key_points: sample.key_points,
+      forbidden_claims: sample.forbidden_claims,
       reference_context: sample.reference_context,
       reference_doc: sample.reference_doc,
       reference_doc_ids: "doc_001",

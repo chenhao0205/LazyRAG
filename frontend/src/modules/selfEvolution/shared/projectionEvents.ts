@@ -47,7 +47,7 @@ export function enrichProjectionEventPayload(
   projectionEventType: string,
 ): Record<string, unknown> {
   const enriched: Record<string, unknown> = { ...payload };
-  const caseRecord = getNestedRecordField(payload, ["case"]);
+  const partition = getNestedRecordField(payload, ["partition"]);
   const artifactRecord = getNestedRecordField(payload, ["artifact"]);
   const progressRecord = getNestedRecordField(payload, ["progress"]);
   const summaryRecord = getNestedRecordField(payload, ["summary"]);
@@ -58,13 +58,13 @@ export function enrichProjectionEventPayload(
   dataRecord.flow_kind = projectionEventType;
   dataRecord.operation_run_id = projectionEventType;
 
-  const caseId = getStringField(caseRecord, ["id"]) || getStringField(payload, ["case_id"]);
+  const caseId = getStringField(partition, ["id"]) || getStringField(payload, ["case_id"]);
   if (caseId) {
     dataRecord.case_id = caseId;
   }
-  if (caseRecord) {
+  if (partition) {
     for (const field of ["question", "answer", "question_type", "difficulty", "source"] as const) {
-      const value = getStringField(caseRecord, [field]);
+      const value = getStringField(partition, [field]);
       if (value) {
         dataRecord[field] = value;
       }

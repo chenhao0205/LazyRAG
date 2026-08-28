@@ -138,35 +138,18 @@ func TestCreateImportWorkerCreatesEvalSetAndUploadItems(t *testing.T) {
 	assertImportTempRemoved(t, "import_tmp_create_worker")
 }
 
-func TestCreateImportWorkerAllowsZeroValidRows(t *testing.T) {
+func TestCreateImportRejectsZeroValidRows(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 	seedImportPreviewRows(t, db, "import_tmp_zero_valid", "user_1", importFileTypeCSV, []ImportNormalizedRow{}, true)
 
 	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"empty valid cases","dataset_ids":["dataset_1"],"import_token":"import_tmp_zero_valid"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	resp := decodeOKData[CreateEvalSetByImportResponse](t, rec)
-	job := runImportWorkerUntilDone(t, db, resp.TaskID, string(asyncjob.StatusSucceeded))
-	if job.ProgressTotal != 0 || job.ProgressCurrent != 0 {
-		t.Fatalf("expected zero progress for zero valid rows, got %#v", job)
-	}
-
-	var evalSet orm.EvalSet
-	if err := db.First(&evalSet, "id = ?", resp.EvalSetID).Error; err != nil {
-		t.Fatalf("query eval set: %v", err)
-	}
-	if evalSet.ItemCount != 0 || evalSet.Name != "empty valid cases" {
-		t.Fatalf("unexpected eval set: %#v", evalSet)
-	}
-	var itemCount int64
-	if err := db.Model(&orm.EvalSetItem{}).Where("eval_set_id = ?", resp.EvalSetID).Count(&itemCount).Error; err != nil {
-		t.Fatalf("count items: %v", err)
-	}
-	if itemCount != 0 {
-		t.Fatalf("expected zero imported items, got %d", itemCount)
+	if !strings.Contains(rec.Body.String(), "no valid import rows") {
+		t.Fatalf("expected zero-valid-row error, got %s", rec.Body.String())
 	}
 }
 

@@ -9,6 +9,21 @@ from sse_starlette.sse import EventSourceResponse
 from .projections import ProjectionService
 
 
+def _execution_event_frame(event: dict[str, object]) -> dict[str, str]:
+    """Serialize one projection event into the public SSE contract.
+
+    ``event_type`` is ProjectionService's private construction/sorting field.
+    The standard SSE ``event`` field is its sole public representation.
+    """
+    event_type = str(event['event_type'])
+    payload = {key: value for key, value in event.items() if key != 'event_type'}
+    return {
+        'id': str(event['event_id']),
+        'event': event_type,
+        'data': json.dumps(payload, ensure_ascii=False),
+    }
+
+
 async def execution_stream(projections: ProjectionService, thread_id: str, step_id: str, request: Request
                            ) -> EventSourceResponse:
     cursor = request.headers.get('last-event-id', '').strip()
@@ -23,12 +38,7 @@ async def execution_stream(projections: ProjectionService, thread_id: str, step_
                 snapshot = await projections.events(thread_id, step_id, cursor)
             for event in snapshot['items']:
                 cursor = str(event['event_id'])
-                payload = dict(event, type=event['event_type'])
-                yield {
-                    'id': cursor,
-                    'event': event['event_type'],
-                    'data': json.dumps(payload, ensure_ascii=False),
-                }
+                yield _execution_event_frame(event)
             if snapshot['terminal']:
                 done = {
                     key: snapshot.get(key)

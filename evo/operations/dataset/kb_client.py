@@ -4,12 +4,15 @@ import hashlib
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from .layout_types import LAYOUT_TYPE_NAMES, PARSER_LAYOUT_TYPES_BY_ALGORITHM, canonical_layout_type
+
 _DOCUMENTS: dict[tuple[str, ...], Any] = {}
-DOCS_PAGE_SIZE = 100
-CHUNK_PAGE_SIZE = 200
+DOCS_PAGE_SIZE = 500
+CHUNK_PAGE_SIZE = 1000
+DOC_ID_BATCH_SIZE = 100
 
 
 class KnowledgeBaseClient:
@@ -22,34 +25,113 @@ class KnowledgeBaseClient:
         http_get_json: Callable[[str], dict[str, Any]] | None = None,
         document: Any | None = None,
         document_factory: Callable[[], Any] | None = None,
+        parser_layout_profiles: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.base_url = base_url
         self._http_get_json = http_get_json
         self._document = document
         self._document_factory = document_factory
+        self._parser_layout_profiles = dict(parser_layout_profiles or PARSER_LAYOUT_TYPES_BY_ALGORITHM)
+        self._embedding_fields: dict[str, list[str]] = {}
+        self._loaded_collections: set[str] = set()
 
     def list_documents(self, kb_id: str) -> list[dict[str, Any]]:
         return self._list_documents_from_doc_server(kb_id)
 
-    def count_valid_chunks(
+    def parser_capabilities(self, kb_ids: list[str]) -> dict[str, dict[str, list[dict[str, str]]]]:
+        if not isinstance(kb_ids, list) or not kb_ids or any(not isinstance(item, str) or not item for item in kb_ids):
+            raise ValueError('kb_ids must be a non-empty list')
+        if len(set(kb_ids)) != len(kb_ids):
+            raise ValueError('kb_ids must not contain duplicates')
+        groups_by_algorithm: dict[str, list[dict[str, str]]] = {}
+        result: dict[str, dict[str, list[dict[str, str]]]] = {}
+        for kb_id in kb_ids:
+            kb = self._get_json(f'{self._doc_server_base_url()}/v1/kbs/{quote(kb_id, safe="")}')
+            if _int(kb.get('code')) != 200:
+                raise RuntimeError(f'parser capabilities request failed: {kb.get("msg") or kb}')
+            data = kb.get('data')
+            algo_ids = data.get('algo_ids') if isinstance(data, Mapping) else None
+            if not isinstance(algo_ids, list) or not algo_ids or any(not isinstance(item, str) or not item for item in algo_ids):
+                raise RuntimeError('parser capabilities response is invalid')
+            split_rules: dict[str, str] = {}
+            layout_types: dict[str, str] = {}
+            for algo_id in algo_ids:
+                groups = groups_by_algorithm.get(algo_id)
+                if groups is None:
+                    payload = self._get_json(f'{self._doc_server_base_url()}/v1/algo/{quote(algo_id, safe="")}/groups')
+                    if _int(payload.get('code')) != 200:
+                        raise RuntimeError(f'parser capabilities request failed: {payload.get("msg") or payload}')
+                    groups = _scannable_groups(payload.get('data'))
+                    groups_by_algorithm[algo_id] = groups
+                for item in groups:
+                    split_rules.setdefault(item['id'], item['name'])
+                profile = self._parser_layout_profiles.get(algo_id)
+                if profile is None:
+                    raise RuntimeError(f'parser capabilities profile is unavailable: {algo_id}')
+                for identifier in profile:
+                    name = LAYOUT_TYPE_NAMES.get(identifier)
+                    if name is None:
+                        raise RuntimeError(f'parser capabilities profile is invalid: {algo_id}')
+                    layout_types.setdefault(identifier, name)
+            result[kb_id] = {
+                'split_rules': [{'id': key, 'name': split_rules[key]} for key in sorted(split_rules)],
+                'layout_types': [{'id': key, 'name': layout_types[key]} for key in sorted(layout_types)],
+            }
+        return result
+
+    def list_groups(self, kb_id: str) -> list[str]:
+        """Return active Node Group names without scanning Chunk payloads."""
+        groups = getattr(self._get_document(), 'active_node_groups', {})
+        if callable(groups):
+            groups = groups()
+        if not isinstance(groups, Mapping):
+            return []
+        return [str(name) for name in groups if str(name).strip()]
+
+    def scan_valid_chunks(
         self,
         kb_id: str,
         doc_ids: list[str],
         groups: list[str],
         allowed_types: list[str],
-        max_scan_chunks: int,
+        max_scan_chunks: int | None,
+        *,
+        excluded_chunk_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         capacities = {group: {doc_id: 0 for doc_id in doc_ids} for group in groups}
+        nodes: dict[tuple[str, str], list[Any]] = {
+            (doc_id, group): [] for doc_id in doc_ids for group in groups
+        }
         filtered: Counter[str] = Counter()
         invalid: Counter[str] = Counter()
+        excluded_ids = excluded_chunk_ids or set()
+        manual_exclusions: list[dict[str, str]] = []
+        observed_types: list[str] = []
+        seen_chunk_ids: set[str] = set()
         scanned = 0
 
         for doc_id, group, batch in self._iter_raw_chunks(kb_id, doc_ids, groups):
             scanned += len(batch)
-            if scanned > max_scan_chunks:
+            if max_scan_chunks is not None and scanned > max_scan_chunks:
                 raise ValueError(f'max_scan_chunks exceeded: {scanned} > {max_scan_chunks}')
             embedding_candidates = []
             for node in batch:
+                node_type = _node_type(node)
+                if node_type not in observed_types:
+                    observed_types.append(node_type)
+                chunk_id = _node_uid(node)
+                if chunk_id in seen_chunk_ids:
+                    raise ValueError(f'duplicate chunk_id: {chunk_id}')
+                seen_chunk_ids.add(chunk_id)
+                if chunk_id in excluded_ids:
+                    manual_exclusions.append({
+                        'kb_id': kb_id,
+                        'doc_id': doc_id,
+                        'chunk_id': chunk_id,
+                        'group': group,
+                        'type': node_type,
+                    })
+                    continue
                 reason = _content_ineligible_reason(node, allowed_types)
                 if reason.startswith('filtered_type:'):
                     filtered[reason.partition(':')[2]] += 1
@@ -60,13 +142,17 @@ class KnowledgeBaseClient:
             self._try_attach_stored_embeddings(
                 self._get_document(), embedding_candidates, kb_id, doc_id, group,
             )
+            effective_nodes = nodes[doc_id, group]
             for node in embedding_candidates:
                 reason = _embedding_ineligible_reason(node)
                 if reason:
                     invalid[reason] += 1
                 else:
                     capacities[group][doc_id] += 1
+                    effective_nodes.append(node)
 
+        for values in nodes.values():
+            values.sort(key=lambda item: (getattr(item, 'number', 0), _node_uid(item)))
         effective = sum(sum(items.values()) for items in capacities.values())
         return {
             'scanned_count': scanned,
@@ -74,7 +160,27 @@ class KnowledgeBaseClient:
             'capacities': capacities,
             'filtered_count_by_type': dict(filtered),
             'invalid_count_by_reason': dict(invalid),
+            'manual_exclusions': manual_exclusions,
+            'observed_types': observed_types,
+            'nodes': nodes,
         }
+
+    def count_valid_chunks(
+        self,
+        kb_id: str,
+        doc_ids: list[str],
+        groups: list[str],
+        allowed_types: list[str],
+        max_scan_chunks: int,
+        *,
+        excluded_chunk_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        result = dict(self.scan_valid_chunks(
+            kb_id, doc_ids, groups, allowed_types, max_scan_chunks,
+            excluded_chunk_ids=excluded_chunk_ids,
+        ))
+        result.pop('nodes')
+        return result
 
     def fetch_valid_chunks(
         self,
@@ -85,20 +191,46 @@ class KnowledgeBaseClient:
         limit: int,
         *,
         order_by: str,
+        excluded_chunk_ids: set[str] | None = None,
     ) -> list[Any]:
         if order_by != 'stable_chunk_id_hash':
             raise ValueError('order_by must be stable_chunk_id_hash')
         if limit <= 0:
             return []
-
-        nodes = []
-        document = self._get_document()
-        for _, _, batch in self._iter_raw_chunks(kb_id, [doc_id], [group]):
-            candidates = [node for node in batch if not _content_ineligible_reason(node, allowed_types)]
-            self._try_attach_stored_embeddings(document, candidates, kb_id, doc_id, group)
-            nodes.extend(node for node in candidates if not _embedding_ineligible_reason(node))
-        nodes.sort(key=lambda node: hashlib.sha256(_node_uid(node).encode()).hexdigest())
+        scanned = self.scan_valid_chunks(
+            kb_id, [doc_id], [group], allowed_types, max_scan_chunks=None,
+            excluded_chunk_ids=excluded_chunk_ids,
+        )
+        nodes = list(scanned['nodes'][doc_id, group])
+        nodes.sort(key=lambda item: hashlib.sha256(_node_uid(item).encode()).hexdigest())
         return nodes[:limit]
+
+    def lookup_chunks(
+        self,
+        kb_id: str,
+        chunk_ids: list[str],
+        groups: list[str] | None = None,
+    ) -> dict[str, dict[str, str]]:
+        wanted = [chunk_id for chunk_id in dict.fromkeys(chunk_ids) if chunk_id]
+        if not wanted:
+            return {}
+        document = self._get_document()
+        found: dict[str, dict[str, str]] = {}
+        for group in groups or ['block', 'line']:
+            try:
+                nodes, _ = document.get_nodes(uids=wanted, group=group, kb_id=kb_id, return_total=True)
+            except Exception as exc:
+                raise RuntimeError(f'failed to lookup chunks: kb_id={kb_id} group={group}') from exc
+            for node in nodes or []:
+                chunk_id = _node_uid(node)
+                if not chunk_id or chunk_id in found:
+                    continue
+                found[chunk_id] = {
+                    'kb_id': kb_id,
+                    'doc_id': _node_doc_id(node),
+                    'text': str(getattr(node, 'text', '') or ''),
+                }
+        return found
 
     def iter_chunks(
         self,
@@ -157,13 +289,14 @@ class KnowledgeBaseClient:
         groups: list[str],
     ) -> Iterator[tuple[str, str, list[Any]]]:
         document = self._get_document()
-        for doc_id in doc_ids:
-            for group in groups:
+        for group in groups:
+            for start in range(0, len(doc_ids), DOC_ID_BATCH_SIZE):
+                batch_ids = doc_ids[start:start + DOC_ID_BATCH_SIZE]
                 offset = 0
                 while True:
                     try:
                         nodes, total = document.get_nodes(
-                            doc_ids=[doc_id],
+                            doc_ids=batch_ids,
                             group=group,
                             kb_id=kb_id,
                             limit=CHUNK_PAGE_SIZE,
@@ -173,12 +306,18 @@ class KnowledgeBaseClient:
                         )
                     except Exception as exc:
                         raise RuntimeError(
-                            f'failed to read chunks: kb_id={kb_id} doc_id={doc_id} group={group}'
+                            f'failed to read chunks: kb_id={kb_id} doc_ids={batch_ids} group={group}'
                         ) from exc
                     batch = list(nodes or [])
                     if not batch:
                         break
-                    yield doc_id, group, batch
+                    by_doc: dict[str, list[Any]] = {doc_id: [] for doc_id in batch_ids}
+                    for node in batch:
+                        doc_id = _node_doc_id(node, batch_ids)
+                        by_doc.setdefault(doc_id, []).append(node)
+                    for doc_id in batch_ids:
+                        if by_doc[doc_id]:
+                            yield doc_id, group, by_doc[doc_id]
                     offset += len(batch)
                     if offset >= int(total or offset):
                         break
@@ -206,8 +345,8 @@ class KnowledgeBaseClient:
                 f'group={group} chunk_ids={missing}'
             )
 
-    @staticmethod
     def _attach_stored_embeddings(
+        self,
         document: Any,
         nodes: list[Any],
         *,
@@ -215,11 +354,7 @@ class KnowledgeBaseClient:
         doc_id: str,
         group: str,
     ) -> None:
-        '''Read vectors explicitly because the LazyLLM UID lookup omits vector output fields.
-
-        The installed LazyLLM version passes `output_fields=None` for UID lookups.
-        Milvus then returns only the UID even though `embedding_embed_main` exists.
-        '''
+        # LazyLLM UID lookups omit vector output fields, so read embeddings from Milvus explicitly.
         missing = [node for node in nodes if not _has_embedding(node)]
         if not missing:
             return
@@ -232,14 +367,7 @@ class KnowledgeBaseClient:
                 return
             collection = store._gen_collection_name(group)
             with vector_store._client_context() as client:
-                if not client.has_collection(collection):
-                    return
-                client.load_collection(collection)
-                fields = [
-                    field.get('name')
-                    for field in client.describe_collection(collection_name=collection).get('fields', [])
-                    if str(field.get('name') or '').startswith('embedding_')
-                ]
+                fields = self._embedding_output_fields(client, collection)
                 if not fields:
                     return
                 rows = client.query(
@@ -264,9 +392,28 @@ class KnowledgeBaseClient:
                 f'failed to read stored embeddings: kb_id={kb_id} doc_id={doc_id} group={group}'
             ) from exc
 
-    @classmethod
+    def _embedding_output_fields(self, client: Any, collection: str) -> list[str]:
+        fields = self._embedding_fields.get(collection)
+        if fields is not None:
+            if fields and collection not in self._loaded_collections:
+                client.load_collection(collection)
+                self._loaded_collections.add(collection)
+            return fields
+        if not client.has_collection(collection):
+            self._embedding_fields[collection] = []
+            return []
+        client.load_collection(collection)
+        self._loaded_collections.add(collection)
+        fields = [
+            field.get('name')
+            for field in client.describe_collection(collection_name=collection).get('fields', [])
+            if str(field.get('name') or '').startswith('embedding_')
+        ]
+        self._embedding_fields[collection] = fields
+        return fields
+
     def _try_attach_stored_embeddings(
-        cls,
+        self,
         document: Any,
         nodes: list[Any],
         kb_id: str,
@@ -274,7 +421,7 @@ class KnowledgeBaseClient:
         group: str,
     ) -> None:
         try:
-            cls._attach_stored_embeddings(document, nodes, kb_id=kb_id, doc_id=doc_id, group=group)
+            self._attach_stored_embeddings(document, nodes, kb_id=kb_id, doc_id=doc_id, group=group)
         except RuntimeError:
             return
 
@@ -359,6 +506,27 @@ def _int(value: Any) -> int:
         return 0
 
 
+def _scannable_groups(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise RuntimeError('parser capabilities response is invalid')
+    result = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise RuntimeError('parser capabilities response is invalid')
+        if item.get('active') is not True:
+            continue
+        if str(item.get('type') or '').strip().lower() not in {'chunk', 'code'}:
+            continue
+        identifier = item.get('name')
+        name = item.get('display_name') or identifier
+        if not isinstance(identifier, str) or not identifier or not isinstance(name, str) or not name or identifier in seen:
+            raise RuntimeError('parser capabilities response is invalid')
+        seen.add(identifier)
+        result.append({'id': identifier, 'name': name})
+    return result
+
+
 def _has_embedding(node: Any) -> bool:
     value = getattr(node, 'embedding', None)
     return isinstance(value, Mapping) and any(bool(vector) for vector in value.values())
@@ -368,14 +536,29 @@ def _node_uid(node: Any) -> str:
     return str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
 
 
+def _node_doc_id(node: Any, fallback_ids: list[str] | None = None) -> str:
+    metadata = getattr(node, 'global_metadata', None) or {}
+    doc_id = str(metadata.get('docid') or '')
+    if doc_id:
+        return doc_id
+    fallback_ids = fallback_ids or []
+    if len(fallback_ids) == 1:
+        return fallback_ids[0]
+    raise RuntimeError('chunk is missing docid')
+
+
 def _content_ineligible_reason(node: Any, allowed_types: list[str]) -> str:
-    metadata = getattr(node, 'metadata', {}) or {}
-    node_type = str(metadata.get('type') or metadata.get('node_type') or 'unknown').strip().lower()
+    node_type = _node_type(node)
     if node_type not in allowed_types:
         return f'filtered_type:{node_type}'
     if not str(getattr(node, 'text', '') or '').strip():
         return 'empty_text'
     return ''
+
+
+def _node_type(node: Any) -> str:
+    metadata = getattr(node, 'metadata', {}) or {}
+    return canonical_layout_type(metadata.get('type') or metadata.get('node_type'))
 
 
 def _embedding_ineligible_reason(node: Any) -> str:

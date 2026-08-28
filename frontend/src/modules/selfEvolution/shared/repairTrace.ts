@@ -285,12 +285,12 @@ function getRepairTraceLifecycle(event: NormalizedThreadEvent): RepairTraceLifec
 }
 
 function getRepairTraceCaseId(event: NormalizedThreadEvent): string | undefined {
-  const caseRecord = getNestedRecordField(event.payload, ["case"]);
+  const partition = getNestedRecordField(event.payload, ["partition"]);
   const summary = getRepairTraceSummary(event);
   const summaryRecord = isRecord(summary) ? summary : undefined;
   const eventData = getEventPayloadData(event.payload);
   return (
-    getStringField(caseRecord, ["case_id", "caseId", "id"]) ||
+    getStringField(partition, ["case_id", "caseId", "id"]) ||
     getEventCaseId(event.payload) ||
     getStringField(summaryRecord, ["case_id", "caseId"]) ||
     getStringField(eventData, ["case_id", "caseId"]) ||

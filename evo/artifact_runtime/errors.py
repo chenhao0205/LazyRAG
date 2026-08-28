@@ -32,10 +32,11 @@ def _string(value: object, name: str) -> str:
     return value
 
 
-def _text(value: object, name: str) -> None:
+def _text(value: object, name: str) -> str:
     value = _string(value, name)
     if not value.strip():
         raise DefinitionError(f'{name} must be non-empty')
+    return value
 
 
 def _integer(value: object, name: str, *, minimum: int = 0) -> None:

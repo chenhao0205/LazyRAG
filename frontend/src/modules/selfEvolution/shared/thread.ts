@@ -1,5 +1,10 @@
 import { type EvolutionMode, type ThreadRestorePayload } from "./types";
-import { getNestedRecordField, getNestedStringField, isRecord } from "./fields";
+import {
+  getNestedArrayField,
+  getNestedRecordField,
+  getNestedStringField,
+  isRecord,
+} from "./fields";
 
 export function getThreadTitleFromPayload(payload: ThreadRestorePayload) {
   if (!isRecord(payload)) {
@@ -16,20 +21,36 @@ export function getThreadTitleFromPayload(payload: ThreadRestorePayload) {
   );
 }
 
-export function getThreadKnowledgeBaseId(payload: ThreadRestorePayload) {
+export function getThreadKnowledgeBaseIds(payload: ThreadRestorePayload): string[] {
   if (!isRecord(payload)) {
-    return undefined;
+    return [];
   }
 
   const threadPayload = getThreadPayloadFromRestorePayload(payload);
   const inputs =
     getNestedRecordField(threadPayload, ["inputs", "input", "config"]) ||
     getNestedRecordField(payload, ["inputs", "input", "config"]);
-  return (
-    getNestedStringField(threadPayload, ["kb_id", "knowledge_base_id", "dataset_id"]) ||
-    getNestedStringField(payload, ["kb_id", "knowledge_base_id", "dataset_id"]) ||
-    getNestedStringField(inputs, ["kb_id", "knowledge_base_id", "dataset_id"])
-  );
+  const keys = ["kb_id", "kb_ids", "knowledge_base_id", "knowledge_base_ids", "dataset_id"];
+  const sources = [threadPayload, payload, inputs];
+
+  for (const source of sources) {
+    const ids = getNestedArrayField(source, keys)
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (ids.length) {
+      return [...new Set(ids)];
+    }
+  }
+
+  for (const source of sources) {
+    const id = getNestedStringField(source, keys);
+    if (id) {
+      return [id];
+    }
+  }
+
+  return [];
 }
 
 export function getThreadPayloadFromRestorePayload(payload: ThreadRestorePayload) {

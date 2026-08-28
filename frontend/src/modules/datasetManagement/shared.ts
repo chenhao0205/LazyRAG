@@ -30,8 +30,11 @@ export interface DatasetItem {
   case_id?: string;
   question: string;
   question_type: string;
+  difficulty?: string;
   ground_truth: string;
+  grading_guidance: string;
   key_points?: string;
+  forbidden_claims?: string;
   reference_context?: string;
   reference_doc?: string;
   reference_doc_ids?: string[];
@@ -53,8 +56,11 @@ export interface DatasetItemFormValues {
   case_id?: string;
   question: string;
   question_type: string;
+  difficulty?: string;
   ground_truth: string;
+  grading_guidance: string;
   key_points?: string;
+  forbidden_claims?: string;
   reference_context?: string;
   reference_doc?: string;
   reference_doc_ids?: string;
@@ -85,8 +91,11 @@ export type DatasetItemField =
   | "case_id"
   | "question"
   | "question_type"
+  | "difficulty"
   | "ground_truth"
+  | "grading_guidance"
   | "key_points"
+  | "forbidden_claims"
   | "reference_context"
   | "reference_doc"
   | "reference_doc_ids"
@@ -113,8 +122,11 @@ export const datasetItemFields: DatasetItemField[] = [
   "case_id",
   "question",
   "question_type",
+  "difficulty",
   "ground_truth",
+  "grading_guidance",
   "key_points",
+  "forbidden_claims",
   "reference_context",
   "reference_doc",
   "reference_doc_ids",
@@ -127,8 +139,11 @@ export const datasetItemFieldI18nKeys: Record<DatasetItemField, string> = {
   case_id: "datasetManagement.fields.caseId",
   question: "datasetManagement.fields.question",
   question_type: "datasetManagement.fields.questionType",
+  difficulty: "datasetManagement.fields.difficulty",
   ground_truth: "datasetManagement.fields.groundTruth",
+  grading_guidance: "datasetManagement.fields.gradingGuidance",
   key_points: "datasetManagement.fields.keyPoints",
+  forbidden_claims: "datasetManagement.fields.forbiddenClaims",
   reference_context: "datasetManagement.fields.referenceContext",
   reference_doc: "datasetManagement.fields.referenceDoc",
   reference_doc_ids: "datasetManagement.fields.referenceDocIds",
@@ -137,22 +152,20 @@ export const datasetItemFieldI18nKeys: Record<DatasetItemField, string> = {
   is_deleted: "datasetManagement.fields.isDeleted",
 };
 
-export const requiredDatasetItemFields: DatasetItemField[] = [
+export type RequiredDatasetItemField = "question" | "question_type" | "ground_truth" | "grading_guidance";
+
+export const requiredDatasetItemFields: RequiredDatasetItemField[] = [
   "question",
   "question_type",
   "ground_truth",
+  "grading_guidance",
 ];
 
-export const questionTypeOptions = [
-  "事实问答",
-  "总结问答",
-  "推理问答",
-  "多跳问答",
-  "操作问答",
-  "排障问答",
-];
+export const questionTypeOptions = ["precision", "reasoning"];
 
 export const questionTypeI18nKeys: Record<string, string> = {
+  precision: "datasetManagement.questionTypes.precision",
+  reasoning: "datasetManagement.questionTypes.reasoning",
   事实问答: "datasetManagement.questionTypes.fact",
   总结问答: "datasetManagement.questionTypes.summary",
   推理问答: "datasetManagement.questionTypes.reasoning",

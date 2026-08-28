@@ -32,7 +32,7 @@ export type SelfEvolutionCheckpointPrompt = {
 
 export type SelfEvolutionWorkbenchTab = "artifacts" | "history" | "messages" | "processes";
 
-export type SelfEvolutionStepStatus = "running" | "pending" | "done" | "paused" | "canceled" | "failed";
+export type SelfEvolutionStepStatus = "running" | "pending" | "waiting" | "done" | "paused" | "canceled" | "failed" | "partial";
 
 export type SelfEvolutionWorkflowStep = {
   id: string;

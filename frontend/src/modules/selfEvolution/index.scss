@@ -1543,6 +1543,8 @@
   background: transparent;
 }
 
+.self-evolution-dataset-adjust-button { flex: 0 0 auto; height: 38px; border-color: #b8d5fa; border-radius: 11px; color: #1e63b0; font-weight: 700; }
+
 .self-evolution-rail-section {
   min-width: 0;
   min-height: 0;
@@ -2634,7 +2636,8 @@
   background: linear-gradient(180deg, #f8fbff 0%, #f2f8ff 100%);
 }
 
-.self-evolution-step-card.is-paused {
+.self-evolution-step-card.is-paused,
+.self-evolution-step-card.is-waiting {
   border-color: #ffd591;
   background: linear-gradient(180deg, #fffdf7 0%, #fff7e6 100%);
 }
@@ -2647,6 +2650,11 @@
 .self-evolution-step-card.is-failed {
   border-color: #ffccc7;
   background: linear-gradient(180deg, #fffafa 0%, #fff1f0 100%);
+}
+
+.self-evolution-step-card.is-partial {
+  border-color: #ffd591;
+  background: linear-gradient(180deg, #fffdf7 0%, #fff7e6 100%);
 }
 
 .self-evolution-step-main {
@@ -2693,7 +2701,8 @@
     color: #6f83a1;
   }
 
-  &.is-paused {
+  &.is-paused,
+  &.is-waiting {
     background: #fff7e6;
     color: #ad6800;
   }
@@ -2706,6 +2715,11 @@
   &.is-failed {
     background: #fff1f0;
     color: #cf1322;
+  }
+
+  &.is-partial {
+    background: #fff7e6;
+    color: #ad6800;
   }
 }
 
@@ -6118,6 +6132,12 @@
     border-color: #ffcbc7;
     background: #fff1f0;
     color: #b42318;
+  }
+
+  &.is-partial {
+    border-color: #ffd591;
+    background: #fff7e6;
+    color: #ad6800;
   }
 }
 

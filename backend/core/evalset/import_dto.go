@@ -8,7 +8,10 @@ type ImportTemplatePathParams struct {
 
 type ImportNormalizedRow struct {
 	CaseID            string `json:"case_id"`
+	Difficulty        string `json:"difficulty"`
+	ForbiddenClaims   string `json:"forbidden_claims"`
 	GenerateReason    string `json:"generate_reason"`
+	GradingGuidance   string `json:"grading_guidance"`
 	GroundTruth       string `json:"ground_truth"`
 	IsDeleted         bool   `json:"is_deleted"`
 	KeyPoints         string `json:"key_points"`

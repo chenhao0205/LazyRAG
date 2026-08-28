@@ -39,8 +39,8 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 		mode.Aggregate == nil || mode.Aggregate.Version != 20260723183515 {
 		t.Fatalf("unexpected v0_2 mode: %#v", mode)
 	}
-	if len(mode.Dev) != 91 {
-		t.Fatalf("v0_2 dev migration count=%d, want 91", len(mode.Dev))
+	if len(mode.Dev) != 93 {
+		t.Fatalf("v0_2 dev migration count=%d, want 93", len(mode.Dev))
 	}
 	if !containsMigrationFileVersion(mode.Dev, 20260703130000) {
 		t.Fatal("v0_2 dev migrations are missing create_plugin_step_intents")
@@ -48,11 +48,17 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 	if !containsVersion(mode.Aggregate.Supersedes, 20260703130000) {
 		t.Fatal("v0_2 aggregate Supersedes is missing create_plugin_step_intents")
 	}
-	if len(mode.Aggregate.Supersedes) != len(mode.Dev)-3 {
+	if !containsMigrationFileVersion(mode.Dev, 20260825163500) {
+		t.Fatal("v0_2 dev migrations are missing repair_eval_set_item_case_fields")
+	}
+	if containsVersion(mode.Aggregate.Supersedes, 20260825163500) {
+		t.Fatal("v0_2 aggregate must not supersede the post-aggregate eval set field repair")
+	}
+	if len(mode.Aggregate.Supersedes) != len(mode.Dev)-4 {
 		t.Fatalf(
 			"v0_2 aggregate Supersedes count=%d, pre-aggregate dev migration count=%d",
 			len(mode.Aggregate.Supersedes),
-			len(mode.Dev)-3,
+			len(mode.Dev)-4,
 		)
 	}
 	for _, migration := range mode.Dev {

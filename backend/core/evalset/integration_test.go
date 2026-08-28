@@ -78,7 +78,7 @@ func TestEvalSetIntegrationCSVPreviewFailure(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	rec, req := multipartImportRequest(t, "missing-question.csv", "", "question,ground_truth,question_type\n,answer,type\n", "u1")
+	rec, req := multipartImportRequest(t, "missing-question.csv", "", "question,ground_truth,question_type,grading_guidance\n,answer,precision,guide\n", "u1")
 	PreviewEvalSetImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected preview status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -107,7 +107,7 @@ func TestEvalSetIntegrationCSVCreateImportSuccess(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	withTempImportDir(t)
 
-	csv := "question,ground_truth,question_type\nq1,a1,type\nq2,a2,type\n"
+	csv := "question,ground_truth,question_type,grading_guidance\nq1,a1,precision,guide 1\nq2,a2,reasoning,guide 2\n"
 	rec, req := multipartImportRequest(t, "cases.csv", "", csv, "u1")
 	PreviewEvalSetImport(rec, req)
 	if rec.Code != http.StatusOK {

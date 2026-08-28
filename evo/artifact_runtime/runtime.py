@@ -334,6 +334,59 @@ class ArtifactRuntime:
                 tuple(request for request in history.retry_requests if request.artifact_key.partition_key == case_id),
             )
 
+    async def case_operation_statuses(self, run_id: str, case_ids: Iterable[str],
+                                      operation_ids: Iterable[str]) -> dict[str, dict[str, str]]:
+        """Return requested per-Case operation statuses from one runtime history read."""
+        normalized_case_ids = tuple(_text(case_id, 'case_id') for case_id in case_ids)
+        normalized_operation_ids = tuple(_text(operation_id, 'operation_id') for operation_id in operation_ids)
+        if len(set(normalized_case_ids)) != len(normalized_case_ids):
+            raise DefinitionError('case_ids must not contain duplicates')
+        if len(set(normalized_operation_ids)) != len(normalized_operation_ids):
+            raise DefinitionError('operation_ids must not contain duplicates')
+        async with self._access():
+            history = await self._run_history(run_id)
+            snapshot = history.snapshot
+            operations_by_id = {operation.spec.op_id: operation for operation in self._definition.operations}
+            operations = tuple(
+                operations_by_id[operation_id]
+                for operation_id in normalized_operation_ids
+                if operation_id in operations_by_id
+            )
+            if len(operations) != len(normalized_operation_ids):
+                raise DefinitionError('operation_id is not defined')
+            latest_event_by_attempt = {
+                event.attempt_id: event
+                for event in history.operation_events
+            }
+            results: dict[str, dict[str, str]] = {}
+            for case_id in normalized_case_ids:
+                partition_set_ids = {
+                    key.artifact_id
+                    for key, partitions in snapshot.partition_sets.items()
+                    if case_id in partitions
+                }
+                if not partition_set_ids:
+                    raise DefinitionError(f'case is not active: {case_id}')
+                case_failures = tuple(
+                    failure for failure in snapshot.case_failures if failure.case_id == case_id
+                )
+                statuses: dict[str, str] = {}
+                for operation in operations:
+                    if operation.spec.partition_set_id not in partition_set_ids:
+                        raise DefinitionError(
+                            f'operation {operation.spec.op_id} does not apply to case: {case_id}',
+                        )
+                    statuses[operation.spec.op_id] = _case_operation_snapshot(
+                        operation,
+                        case_id,
+                        snapshot,
+                        history.attempts,
+                        case_failures,
+                        latest_event_by_attempt,
+                    ).status
+                results[case_id] = statuses
+            return results
+
     async def snapshot(self, run_id: str) -> RuntimeSnapshot:
         return await self._query(self._inspect, run_id)
 

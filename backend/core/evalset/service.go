@@ -154,9 +154,8 @@ func (s *Service) ListDatasetOptions(ctx context.Context, userID string) (*Datas
 func (s *Service) ListQuestionTypeOptions() QuestionTypeOptionsResponse {
 	return QuestionTypeOptionsResponse{
 		Items: []QuestionTypeOption{
-			{Value: "1", Label: "1"},
-			{Value: "2", Label: "2"},
-			{Value: "操作问答", Label: "操作问答"},
+			{Value: "precision", Label: "precision"},
+			{Value: "reasoning", Label: "reasoning"},
 		},
 	}
 }

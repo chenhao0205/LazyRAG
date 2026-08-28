@@ -8,6 +8,7 @@ import { getCompletedProgressSnapshot } from "./progress";
 import { buildVisibleWorkflowSteps, createWorkflowStepFromRuntime } from "./runtimeState";
 import { buildEventActivity, getStageLogicalTaskCount, isCutoverActivity, isCutoverCompletedEvent, shouldShowProcessActivity, stageProgressFromEvents } from "./dashboardActivity";
 import { buildCaseProgressGroups } from "./caseProgress";
+import { resolveCurrentStageStatus } from "./stageStatus";
 
 export function buildEvoProcessDashboard(
   events: NormalizedThreadEvent[],
@@ -37,13 +38,14 @@ export function buildEvoProcessDashboard(
     const stageEvents = sortedEvents.filter((event) => event.stage === stage);
     const status: StepStatus = cutoverCompleted
       ? "done"
-      : terminalStatusByStage[stage]
-      ?? (checkpoint?.completedStage === stage
-      ? "done"
-      : threadStepStatusByStage?.[stage]
-      ?? (includeFirstStep && !hasStageEvents && step.id === "dataset"
-        ? "running"
-        : step.status));
+      : resolveCurrentStageStatus(
+        threadStepStatusByStage?.[stage],
+        terminalStatusByStage[stage],
+        checkpoint?.completedStage === stage,
+        includeFirstStep && !hasStageEvents && step.id === "dataset"
+          ? "running"
+          : step.status,
+      );
     const resolvedStatus =
       status === "paused" && checkpoint?.completedStage === stage ? "done" : status;
     const resolvedProgress = cutoverCompleted

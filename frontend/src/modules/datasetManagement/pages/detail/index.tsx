@@ -42,7 +42,6 @@ import {
   findKnowledgeBaseDocumentById,
   getDataset,
   importDatasetItems,
-  listDatasetQuestionTypes,
   listDatasetItems,
   type KnowledgeDocumentOption,
   mergeKnowledgeDocumentOptions,
@@ -73,6 +72,7 @@ import type {
 import {
   datasetItemFieldI18nKeys,
   formatDateTime,
+  questionTypeOptions as supportedQuestionTypes,
   sourceLabelI18nKeys,
 } from "../../shared";
 import {
@@ -95,8 +95,11 @@ const DEFAULT_ROW_HEIGHT = 64;
 const DEFAULT_COLUMN_WIDTHS = {
   question: 240,
   question_type: 130,
+  difficulty: 100,
   ground_truth: 240,
+  grading_guidance: 220,
   key_points: 220,
+  forbidden_claims: 220,
   reference_context: 260,
   reference_doc: 160,
   is_deleted: 120,
@@ -109,8 +112,11 @@ type ResizableColumnKey = keyof typeof DEFAULT_COLUMN_WIDTHS;
 type EditableDatasetItemField =
   | "question"
   | "question_type"
+  | "difficulty"
   | "ground_truth"
+  | "grading_guidance"
   | "key_points"
+  | "forbidden_claims"
   | "reference_context"
   | "reference_doc";
 type ActiveEditableCell = {
@@ -129,6 +135,7 @@ const REQUIRED_VISIBLE_COLUMN_KEYS: ConfigurableColumnKey[] = [
   "question",
   "question_type",
   "ground_truth",
+  "grading_guidance",
 ];
 type ReferenceDocumentPreview = {
   datasetId: string;
@@ -197,15 +204,23 @@ const CONFIGURABLE_COLUMN_OPTIONS: Array<{
   { labelKey: datasetItemFieldI18nKeys.question, value: "question", disabled: true },
   { labelKey: datasetItemFieldI18nKeys.question_type, value: "question_type", disabled: true },
   { labelKey: datasetItemFieldI18nKeys.ground_truth, value: "ground_truth", disabled: true },
+  { labelKey: datasetItemFieldI18nKeys.grading_guidance, value: "grading_guidance", disabled: true },
+  { labelKey: datasetItemFieldI18nKeys.difficulty, value: "difficulty" },
   { labelKey: datasetItemFieldI18nKeys.key_points, value: "key_points" },
+  { labelKey: datasetItemFieldI18nKeys.forbidden_claims, value: "forbidden_claims" },
   { labelKey: datasetItemFieldI18nKeys.reference_doc, value: "reference_doc" },
   { labelKey: datasetItemFieldI18nKeys.reference_context, value: "reference_context" },
   { labelKey: "datasetManagement.fields.source", value: "source" },
   { labelKey: "datasetManagement.fields.updatedAt", value: "updated_at" },
 ];
 
-const DEFAULT_VISIBLE_COLUMN_KEYS = [
-  ...CONFIGURABLE_COLUMN_OPTIONS.map((option) => option.value),
+const DEFAULT_VISIBLE_COLUMN_KEYS: ConfigurableColumnKey[] = [
+  "question",
+  "question_type",
+  "ground_truth",
+  "grading_guidance",
+  "difficulty",
+  "source",
 ];
 
 function normalizeVisibleColumnKeys(keys: ConfigurableColumnKey[]) {
@@ -216,7 +231,10 @@ const editableFieldColumnMap: Record<EditableDatasetItemField, ConfigurableColum
   question: "question",
   question_type: "question_type",
   ground_truth: "ground_truth",
+  difficulty: "difficulty",
+  grading_guidance: "grading_guidance",
   key_points: "key_points",
+  forbidden_claims: "forbidden_claims",
   reference_context: "reference_context",
   reference_doc: "reference_doc",
 };
@@ -873,8 +891,11 @@ function createItemDraft(item?: DatasetItem): DatasetItemFormValues {
     case_id: item?.case_id || "",
     question: item?.question || "",
     question_type: item?.question_type || "",
+    difficulty: item?.difficulty || "",
     ground_truth: item?.ground_truth || "",
+    grading_guidance: item?.grading_guidance || "",
     key_points: item?.key_points || "",
+    forbidden_claims: item?.forbidden_claims || "",
     reference_context: item?.reference_context || "",
     reference_doc: item?.reference_doc || "",
     reference_doc_ids: joinListField(item?.reference_doc_ids),
@@ -977,6 +998,7 @@ export default function DatasetDetailPage() {
       question: t("datasetManagement.validation.questionRequired"),
       question_type: t("datasetManagement.validation.questionTypeRequired"),
       ground_truth: t("datasetManagement.validation.groundTruthRequired"),
+      grading_guidance: t("datasetManagement.validation.gradingGuidanceRequired"),
     }),
     [t],
   );
@@ -1125,7 +1147,7 @@ export default function DatasetDetailPage() {
     loadDetailRequestIdRef.current = requestId;
     setLoading(true);
     try {
-      const [datasetDetail, itemList, remoteQuestionTypes] = await Promise.all([
+      const [datasetDetail, itemList] = await Promise.all([
         getDataset(datasetId),
         listDatasetItems(datasetId, {
           keyword: appliedFilters.keyword,
@@ -1134,7 +1156,6 @@ export default function DatasetDetailPage() {
           page: pagination.current,
           pageSize: pagination.pageSize,
         }),
-        listDatasetQuestionTypes(datasetId).catch(() => []),
       ]);
       if (loadDetailRequestIdRef.current !== requestId) {
         return;
@@ -1142,7 +1163,7 @@ export default function DatasetDetailPage() {
       setDataset(datasetDetail);
       setItems(itemList.items);
       setTotal(itemList.total);
-      setQuestionTypeOptions(remoteQuestionTypes);
+      setQuestionTypeOptions(supportedQuestionTypes);
     } catch {
       if (loadDetailRequestIdRef.current !== requestId) {
         return;
@@ -1278,6 +1299,7 @@ export default function DatasetDetailPage() {
           question: t("datasetManagement.detail.newSample"),
           question_type: "",
           ground_truth: "",
+          grading_guidance: "",
           source: "manual",
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -2007,6 +2029,7 @@ export default function DatasetDetailPage() {
       question: t("datasetManagement.detail.newSample"),
       question_type: "",
       ground_truth: "",
+      grading_guidance: "",
       source: "manual",
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -2425,6 +2448,27 @@ export default function DatasetDetailPage() {
           ),
       },
       {
+        title: renderRequiredColumnTitle(t(datasetItemFieldI18nKeys.grading_guidance)),
+        dataIndex: "grading_guidance",
+        key: "grading_guidance",
+        width: columnWidths.grading_guidance,
+        onHeaderCell: () => getHeaderCellProps("grading_guidance"),
+        render: (_, record) =>
+          renderInlineTextArea(
+            record,
+            "grading_guidance",
+            t("datasetManagement.detail.placeholders.gradingGuidance"),
+          ),
+      },
+      {
+        title: t(datasetItemFieldI18nKeys.difficulty),
+        dataIndex: "difficulty",
+        key: "difficulty",
+        width: columnWidths.difficulty,
+        onHeaderCell: () => getHeaderCellProps("difficulty"),
+        render: (_, record) => renderInlineInput(record, "difficulty", "easy / medium / hard"),
+      },
+      {
         title: t(datasetItemFieldI18nKeys.key_points),
         dataIndex: "key_points",
         key: "key_points",
@@ -2436,6 +2480,14 @@ export default function DatasetDetailPage() {
             "key_points",
             t("datasetManagement.detail.placeholders.keyPoints"),
           ),
+      },
+      {
+        title: t(datasetItemFieldI18nKeys.forbidden_claims),
+        dataIndex: "forbidden_claims",
+        key: "forbidden_claims",
+        width: columnWidths.forbidden_claims,
+        onHeaderCell: () => getHeaderCellProps("forbidden_claims"),
+        render: (_, record) => renderInlineTextArea(record, "forbidden_claims", "JSON 数组"),
       },
       {
         title: t(datasetItemFieldI18nKeys.reference_doc),

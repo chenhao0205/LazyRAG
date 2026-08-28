@@ -1,7 +1,8 @@
 import { type CheckpointWaitPrompt, type NormalizedThreadEvent, type ThreadEventStage } from "./types";
 import { getCheckpointCommandText, t } from "./i18n";
 import { getEventPayloadData, getLastItem, getNestedRecordField, getStringField } from "./fields";
-import { compareNormalizedThreadEvents, getNextStageFromOperation, getStageLabel, isInactiveTerminalThreadEvent, isThreadEventAfter, toThreadEventStage } from "./threadEvents";
+import { compareNormalizedThreadEvents, getNextStageFromOperation, getStageLabel, isInactiveTerminalThreadEvent, isThreadEventAfter } from "./threadEvents";
+import { toThreadEventStage } from "./datasetWorkflowStatus";
 import { localizeErrorCode } from "@/components/request";
 
 export function formatCheckpointOperation(value: string | undefined) {

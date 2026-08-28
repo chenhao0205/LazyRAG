@@ -27,8 +27,11 @@ function getInitialValues(item?: DatasetItem, initialValues?: Partial<DatasetIte
     case_id: item?.case_id || "",
     question: item?.question || "",
     question_type: item?.question_type || "",
+    difficulty: item?.difficulty || "",
     ground_truth: item?.ground_truth || "",
+    grading_guidance: item?.grading_guidance || "",
     key_points: item?.key_points || "",
+    forbidden_claims: item?.forbidden_claims || "",
     reference_context: item?.reference_context || "",
     reference_doc: item?.reference_doc || "",
     reference_doc_ids: joinListField(item?.reference_doc_ids),
@@ -107,6 +110,18 @@ export default function DatasetExpandedRowEditor({
           }]}
         >
           <TextArea rows={4} placeholder={t("datasetManagement.detail.placeholders.groundTruth")} />
+        </Form.Item>
+
+        <Form.Item
+          name="grading_guidance"
+          label={t("datasetManagement.fields.gradingGuidance")}
+          rules={[{
+            required: true,
+            whitespace: true,
+            message: t("datasetManagement.validation.gradingGuidanceRequired"),
+          }]}
+        >
+          <TextArea rows={3} placeholder={t("datasetManagement.detail.placeholders.gradingGuidance")} />
         </Form.Item>
 
         <Form.Item name="key_points" label={t("datasetManagement.fields.keyPoints")}>

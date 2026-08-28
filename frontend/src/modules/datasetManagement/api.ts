@@ -257,8 +257,11 @@ function mapEvalSetItemToDatasetItem(item: EvalSetItemResponse): DatasetItem {
     case_id: item.case_id,
     question: item.question,
     question_type: item.question_type,
+    difficulty: item.difficulty,
     ground_truth: item.ground_truth,
+    grading_guidance: item.grading_guidance,
     key_points: item.key_points,
+    forbidden_claims: item.forbidden_claims,
     reference_context: item.reference_context,
     reference_doc: item.reference_doc,
     reference_doc_ids: splitListField(item.reference_doc_ids),
@@ -332,8 +335,11 @@ function buildCreateEvalSetItemPayload(values: DatasetItemFormValues): CreateEva
     case_id: normalized.case_id,
     question: normalized.question,
     question_type: normalized.question_type,
+    difficulty: normalized.difficulty,
     ground_truth: normalized.ground_truth,
+    grading_guidance: normalized.grading_guidance,
     key_points: normalized.key_points,
+    forbidden_claims: normalized.forbidden_claims,
     reference_context: normalized.reference_context,
     reference_doc: normalized.reference_doc,
     reference_doc_ids: joinListField(normalized.reference_doc_ids),
@@ -349,8 +355,11 @@ function buildUpdateEvalSetItemPayload(values: DatasetItemFormValues): UpdateEva
     case_id: normalized.case_id,
     question: normalized.question,
     question_type: normalized.question_type,
+    difficulty: normalized.difficulty,
     ground_truth: normalized.ground_truth,
+    grading_guidance: normalized.grading_guidance,
     key_points: normalized.key_points,
+    forbidden_claims: normalized.forbidden_claims,
     reference_context: normalized.reference_context,
     reference_doc: normalized.reference_doc,
     reference_doc_ids: joinListField(normalized.reference_doc_ids),
@@ -626,6 +635,11 @@ export async function importDatasetItems(
 ) {
   if (file) {
     const preview = await previewImportFile(file);
+    if (Number(preview.valid_rows || 0) <= 0) {
+      const reason = preview.invalid_preview_rows?.[0]?.errors?.[0]?.reason
+        || preview.error_details?.[0]?.reason;
+      throw new Error(reason || i18n.t("datasetManagement.import.noValidRows"));
+    }
     const appendResponse = await evalSetImportsClient.apiCoreEvalSetsEvalSetIdImportsPost({
       evalSetId: datasetId,
       appendEvalSetImportRequest: {
@@ -653,8 +667,11 @@ export async function importDatasetItems(
         case_id: item.case_id || "",
         question: item.question || "",
         question_type: item.question_type || "",
+        difficulty: item.difficulty || "",
         ground_truth: item.ground_truth || "",
+        grading_guidance: item.grading_guidance || "",
         key_points: item.key_points || "",
+        forbidden_claims: item.forbidden_claims || "",
         reference_context: item.reference_context || "",
         reference_doc: item.reference_doc || "",
         reference_doc_ids: joinListField(item.reference_doc_ids),

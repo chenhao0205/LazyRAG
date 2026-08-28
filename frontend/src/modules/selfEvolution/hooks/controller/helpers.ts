@@ -28,6 +28,8 @@ import {
   isCheckpointGateFlowStatus,
   getFlowStatusFromPayload,
   resolveTerminalStepStatusFromFlowStatus,
+  datasetWorkflowStepFromSteps,
+  isDatasetSubStage,
   type ThreadEventStage,
   type WorkflowRuntimeState,
   AGENT_API_BASE,
@@ -237,8 +239,8 @@ export function buildStreamingDatasetCaseRows(events: NormalizedThreadEvent[]): 
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
-    const caseIndex = getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
+    const caseIndex = getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: DatasetStreamingRow & { order: number } = {
       key: caseId,
@@ -322,9 +324,9 @@ export function buildStreamingAnalysisCaseRows(
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
     const caseIndex =
-      getNumberField(caseRecord, ["index"]) ??
+      getNumberField(partition, ["index"]) ??
       getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: AnalysisStreamingRow & { order: number } = {
@@ -451,8 +453,8 @@ export function buildStreamingEvalCaseRows(events: NormalizedThreadEvent[]): Eva
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
-    const caseIndex = getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
+    const caseIndex = getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: EvalStreamingRow & { order: number } = {
       key: caseId,
@@ -582,9 +584,9 @@ export function buildStreamingAbtestCaseRows(events: NormalizedThreadEvent[]): A
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
     const caseIndex =
-      getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+      getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: AbtestStreamingRow & { order: number } = {
       key: caseId,
@@ -791,6 +793,9 @@ export function normalizeThreadStepStatus(status?: string): StepStatus | undefin
   if (["failed", "failure", "error", "errored", "已失败", "失败"].includes(normalizedStatus)) {
     return "failed";
   }
+  if (["partial_failed", "partial", "部分失败"].includes(normalizedStatus)) {
+    return "partial";
+  }
   if (["pause", "paused", "waiting_checkpoint", "checkpoint_wait", "已暂停", "暂停"].includes(normalizedStatus)) {
     return "paused";
   }
@@ -861,16 +866,32 @@ export function normalizeThreadStepListPayload(payload: ThreadRestorePayload): T
 export function buildThreadStepStatusByStage(
   stepList: ThreadStepListState,
   flowStatus?: string,
+  datasetTopStatus?: StepStatus,
 ): Partial<Record<ThreadEventStage, StepStatus>> {
   const result: Partial<Record<ThreadEventStage, StepStatus>> = {};
   for (const step of stepList.steps) {
     const stage = toThreadEventStage(step.stage || step.title);
+    if (!stage || stage === "dataset") {
+      continue;
+    }
     const normalizedStatus = resolveCheckpointAwareStepStatus(
       normalizeThreadStepStatus(step.status),
       { flowStatus, step, stage },
     );
-    if (stage && normalizedStatus) {
+    if (normalizedStatus) {
       result[stage] = normalizedStatus;
+    }
+  }
+  const datasetStep = datasetWorkflowStepFromSteps(stepList.steps);
+  if (datasetTopStatus) {
+    result.dataset = datasetTopStatus;
+  } else if (datasetStep) {
+    const normalizedStatus = resolveCheckpointAwareStepStatus(
+      normalizeThreadStepStatus(datasetStep.status),
+      { flowStatus, step: datasetStep, stage: "dataset" },
+    );
+    if (normalizedStatus) {
+      result.dataset = normalizedStatus;
     }
   }
   return result;
@@ -892,8 +913,11 @@ export function applyThreadStepListToWorkflowRuntimeState(
 
   for (const step of stepList.steps) {
     const stage = toThreadEventStage(step.stage || step.title);
+    if (!stage || stage === "dataset") {
+      continue;
+    }
     const normalizedStatus = normalizeThreadStepStatus(step.status);
-    if (!stage || !normalizedStatus) {
+    if (!normalizedStatus) {
       continue;
     }
     const workflowStepId = stageStepMap[stage];
@@ -905,6 +929,21 @@ export function applyThreadStepListToWorkflowRuntimeState(
           ? next[workflowStepId].progress || getCompletedProgressSnapshot()
           : next[workflowStepId].progress,
     };
+  }
+  const datasetStep = datasetWorkflowStepFromSteps(stepList.steps);
+  if (datasetStep) {
+    const normalizedStatus = normalizeThreadStepStatus(datasetStep.status);
+    if (normalizedStatus) {
+      const workflowStepId = stageStepMap.dataset;
+      next[workflowStepId] = {
+        ...next[workflowStepId],
+        status: normalizedStatus,
+        progress:
+          normalizedStatus === "done"
+            ? next[workflowStepId].progress || getCompletedProgressSnapshot()
+            : next[workflowStepId].progress,
+      };
+    }
   }
 
   return next;
@@ -1018,6 +1057,9 @@ export function resolveCheckpointAwareStepStatus(
   },
 ): StepStatus | undefined {
   if (!status || status !== "paused") {
+    return status;
+  }
+  if (options?.stage === "dataset") {
     return status;
   }
   if (isCheckpointGateFlowStatus(options?.flowStatus)) {
@@ -1172,7 +1214,11 @@ export function resolveStepListCheckpointPrompt(
 ): CheckpointWaitPrompt | undefined {
   const waitingStep = getCheckpointWaitingStep(stepList);
   if (waitingStep) {
-    const completedStage = toThreadEventStage(waitingStep.stage || waitingStep.title);
+    const rawStage = waitingStep.stage || waitingStep.title;
+    if (isDatasetSubStage(rawStage)) {
+      return undefined;
+    }
+    const completedStage = toThreadEventStage(rawStage);
     if (!completedStage || completedStage === "abtest") {
       return undefined;
     }
@@ -1193,7 +1239,11 @@ export function resolveStepListCheckpointPrompt(
     return undefined;
   }
 
-  const lastStage = toThreadEventStage(lastStep.stage || lastStep.title);
+  const rawLastStage = lastStep.stage || lastStep.title;
+  if (isDatasetSubStage(rawLastStage)) {
+    return undefined;
+  }
+  const lastStage = toThreadEventStage(rawLastStage);
   if (!lastStage || lastStage === "abtest") {
     return undefined;
   }

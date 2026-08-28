@@ -47,6 +47,9 @@ type EvalSetItem struct {
 	Question                  string    `gorm:"column:question;type:text;not null"`
 	GroundTruth               string    `gorm:"column:ground_truth;type:text;not null"`
 	QuestionType              string    `gorm:"column:question_type;type:varchar(128);not null;index:idx_eval_set_items_set_type,priority:3"`
+	Difficulty                string    `gorm:"column:difficulty;type:varchar(32);not null;default:''"`
+	GradingGuidance           string    `gorm:"column:grading_guidance;type:text;not null;default:''"`
+	ForbiddenClaims           string    `gorm:"column:forbidden_claims;type:text;not null;default:''"`
 	GenerateReason            string    `gorm:"column:generate_reason;type:text;not null;default:''"`
 	KeyPoints                 string    `gorm:"column:key_points;type:text;not null;default:''"`
 	ReferenceChunkIDs         string    `gorm:"column:reference_chunk_ids;type:text;not null;default:''"`

@@ -5,15 +5,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-CASE_FIELDS = tuple('answer difficulty difficulty_rationale grading_guidance id question question_type reasoning_steps '
+CASE_FIELDS = tuple('answer difficulty difficulty_rationale forbidden_claims generate_reason grading_guidance '
+                    'ground_truth id is_deleted key_points question question_type reasoning_steps '
                     'reference_chunk_ids reference_context reference_doc reference_doc_ids source_message_id '
                     'source_preparation type_rationale'.split())
 AUDIT_FIELDS = ('original_id', 'source', 'kb_id', 'csv_path')
 DEFAULT_MIN_CASE_COUNT = 100
 QUESTION_TYPES = ('single_hop', 'single_doc_multi_hop', 'multi_doc_multi_hop', 'table_list', 'formula')
 DIFFICULTIES = ('easy', 'medium', 'hard')
-LIST_FIELDS = {'reasoning_steps', 'reference_chunk_ids', 'reference_context', 'reference_doc', 'reference_doc_ids'}
-REQUIRED_IMPORT_FIELDS = CASE_FIELDS[:12]
+LIST_FIELDS = {'forbidden_claims', 'reasoning_steps', 'reference_chunk_ids', 'reference_doc', 'reference_doc_ids'}
+LEGACY_REQUIRED_FIELDS = tuple('answer difficulty grading_guidance id question question_type reasoning_steps '
+                               'reference_chunk_ids reference_context reference_doc reference_doc_ids'.split())
 GENERATED_CASE_FIELDS = ('question', 'answer', 'grading_guidance', 'reasoning_steps',
                          'difficulty_rationale', 'type_rationale')
 
@@ -79,24 +81,42 @@ def normalize_eval_case(raw: Mapping[str, Any], *, default_id: str = '') -> dict
         if isinstance(prep, str) and prep.strip() else prep if isinstance(prep, Mapping) else {}
     )
     row = {field: raw.get(field, '') for field in CASE_FIELDS}
+    row['answer'] = raw.get('answer', raw.get('ground_truth', ''))
+    row['ground_truth'] = raw.get('ground_truth', raw.get('answer', ''))
     row.update({'id': as_text(row['id'] or default_id), 'question_type': as_text(row['question_type']),
                 'difficulty': as_text(row['difficulty']), 'source_message_id': as_text(row['source_message_id']),
+                'generate_reason': as_text(row['generate_reason']), 'is_deleted': bool(row['is_deleted']),
                 'source_preparation': dict(prep)})
     for field in LIST_FIELDS:
         row[field] = as_list(row[field])
+    key_points = raw.get('key_points', [])
+    if not isinstance(key_points, list):
+        raise ValueError('key_points must be a list')
+    row['key_points'] = [dict(item) if isinstance(item, Mapping) else item for item in key_points]
+
+    raw_context = raw.get('reference_context', [])
+    if raw_context in (None, ''):
+        row['reference_context'] = []
+    elif isinstance(raw_context, list):
+        row['reference_context'] = [dict(item) if isinstance(item, Mapping) else as_text(item) for item in raw_context]
+    else:
+        row['reference_context'] = [raw_context]
 
     refs = row['source_preparation'].get('context_reference')
     if refs and (not isinstance(refs, list) or not all(isinstance(item, Mapping) for item in refs)):
         raise ValueError('source_preparation.context_reference must be a list of objects')
 
-    missing = [field for field in REQUIRED_IMPORT_FIELDS if (
+    imported = row['source_preparation'].get('dataset_mode') == 'imported'
+    required = ('answer', 'grading_guidance', 'id', 'question', 'question_type') if imported else LEGACY_REQUIRED_FIELDS
+    missing = [field for field in required if (
         not any(row[field]) if isinstance(row[field], list) else not as_text(row[field])
     )]
     if missing:
         raise ValueError(f'eval case missing required fields: {", ".join(missing)}')
-    if row['question_type'] not in QUESTION_TYPES:
+    supported_question_types = (*QUESTION_TYPES, 'precision', 'reasoning')
+    if row['question_type'] not in supported_question_types:
         raise ValueError(f'unsupported question_type: {row["question_type"]}')
-    if row['difficulty'] not in DIFFICULTIES:
+    if row['difficulty'] and row['difficulty'] not in DIFFICULTIES:
         raise ValueError(f'unsupported difficulty: {row["difficulty"]}')
     return row
 
@@ -119,7 +139,7 @@ def load_eval_dataset_csv_report(path: str | Path, *, kb_id: str) -> dict[str, A
                 'csv_row_invalid', 'eval dataset csv fields do not match required dataset fields', kb_id=kb_id)]}
         for row_number, raw in enumerate(reader, 1):
             original_id = as_text(raw.get('id') if isinstance(raw, Mapping) else '')
-            missing = [field for field in REQUIRED_IMPORT_FIELDS
+            missing = [field for field in LEGACY_REQUIRED_FIELDS
                        if not as_text(raw.get(field)) or (field in LIST_FIELDS and not as_list(raw.get(field)))]
             if None in raw or missing:
                 message = 'has extra columns' if None in raw else f'missing: {", ".join(missing)}'

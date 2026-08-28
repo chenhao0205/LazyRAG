@@ -14,6 +14,7 @@ import type {
 } from "../../shared";
 import type { DatasetStreamingRow, EvalStreamingRow, AbtestStreamingRow, AnalysisStreamingRow } from "../../hooks/controller/types";
 import type { RepairTraceRow } from "../../shared/repairTrace";
+import type { DatasetTab, ThreadStepsResponse, VisualStatus } from "./dataset/types";
 
 export type SelfEvolutionSessionSummary = {
   id: string;
@@ -84,9 +85,15 @@ export type SelfEvolutionWorkbenchViewProps = {
   onSend: (command?: string) => void;
   onConfirmIntentCheckpoint: () => void;
   onContinueCheckpoint: () => void;
+  canContinueDatasetStage?: boolean;
+  datasetStageStatuses?: Record<DatasetTab, VisualStatus>;
+  datasetSuggestedTab?: DatasetTab;
+  onDatasetStepsSnapshot?: (response: ThreadStepsResponse) => void;
   onOpenArtifact: (kind: WorkflowResultKind) => void;
   onOpenObservation: (kind: SelfEvolutionObservationKind) => void;
   onOpenCaseArtifact: (kind: WorkflowResultKind, artifactId: string, title: string, caseId?: string) => void;
+  onDatasetWriteApplied?: () => void;
+  datasetExecutionResumeToken?: number;
   onWorkbenchTabChange: (tab?: SelfEvolutionWorkbenchTab) => void;
   onCloseArtifactPanel: () => void;
   canViewStageArtifact?: boolean;

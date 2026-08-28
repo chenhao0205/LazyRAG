@@ -779,7 +779,13 @@ components:
             properties:
                 case_id:
                     type: string
+                difficulty:
+                    type: string
+                forbidden_claims:
+                    type: string
                 generate_reason:
+                    type: string
+                grading_guidance:
                     type: string
                 ground_truth:
                     type: string
@@ -801,7 +807,10 @@ components:
                     type: string
             required:
                 - case_id
+                - difficulty
+                - forbidden_claims
                 - generate_reason
+                - grading_guidance
                 - ground_truth
                 - key_points
                 - question
@@ -1587,7 +1596,13 @@ components:
                     type: string
                 eval_set_id:
                     type: string
+                difficulty:
+                    type: string
+                forbidden_claims:
+                    type: string
                 generate_reason:
+                    type: string
+                grading_guidance:
                     type: string
                 ground_truth:
                     type: string
@@ -1849,7 +1864,13 @@ components:
             properties:
                 case_id:
                     type: string
+                difficulty:
+                    type: string
+                forbidden_claims:
+                    type: string
                 generate_reason:
+                    type: string
+                grading_guidance:
                     type: string
                 ground_truth:
                     type: string
@@ -3134,7 +3155,13 @@ components:
             properties:
                 case_id:
                     type: string
+                difficulty:
+                    type: string
+                forbidden_claims:
+                    type: string
                 generate_reason:
+                    type: string
+                grading_guidance:
                     type: string
                 ground_truth:
                     type: string

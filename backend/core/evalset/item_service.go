@@ -403,6 +403,9 @@ func (r *Repository) CreateItem(ctx context.Context, evalSetID string, req Creat
 			Question:                  req.Question,
 			GroundTruth:               req.GroundTruth,
 			QuestionType:              req.QuestionType,
+			Difficulty:                req.Difficulty,
+			GradingGuidance:           req.GradingGuidance,
+			ForbiddenClaims:           req.ForbiddenClaims,
 			GenerateReason:            req.GenerateReason,
 			KeyPoints:                 req.KeyPoints,
 			ReferenceChunkIDs:         req.ReferenceChunkIDs,
@@ -467,6 +470,9 @@ func (r *Repository) UpdateItem(ctx context.Context, evalSetID, itemID string, r
 			"question":                    updated.Question,
 			"ground_truth":                updated.GroundTruth,
 			"question_type":               updated.QuestionType,
+			"difficulty":                  updated.Difficulty,
+			"grading_guidance":            updated.GradingGuidance,
+			"forbidden_claims":            updated.ForbiddenClaims,
 			"generate_reason":             updated.GenerateReason,
 			"key_points":                  updated.KeyPoints,
 			"reference_chunk_ids":         updated.ReferenceChunkIDs,
@@ -611,6 +617,9 @@ func normalizeCreateItemRequest(req CreateEvalSetItemRequest) (CreateEvalSetItem
 	req.Question = strings.TrimSpace(req.Question)
 	req.GroundTruth = strings.TrimSpace(req.GroundTruth)
 	req.QuestionType = strings.TrimSpace(req.QuestionType)
+	req.Difficulty = strings.TrimSpace(req.Difficulty)
+	req.GradingGuidance = strings.TrimSpace(req.GradingGuidance)
+	req.ForbiddenClaims = strings.TrimSpace(req.ForbiddenClaims)
 	req.GenerateReason = strings.TrimSpace(req.GenerateReason)
 	req.KeyPoints = strings.TrimSpace(req.KeyPoints)
 	req.ReferenceChunkIDs = strings.TrimSpace(req.ReferenceChunkIDs)
@@ -625,6 +634,9 @@ func normalizeCreateItemRequest(req CreateEvalSetItemRequest) (CreateEvalSetItem
 		Question:          req.Question,
 		GroundTruth:       req.GroundTruth,
 		QuestionType:      req.QuestionType,
+		Difficulty:        req.Difficulty,
+		GradingGuidance:   req.GradingGuidance,
+		ForbiddenClaims:   req.ForbiddenClaims,
 		GenerateReason:    req.GenerateReason,
 		KeyPoints:         req.KeyPoints,
 		ReferenceChunkIDs: req.ReferenceChunkIDs,
@@ -653,6 +665,15 @@ func applyUpdateItemRequest(item *orm.EvalSetItem, req UpdateEvalSetItemRequest)
 	}
 	if req.QuestionType != nil {
 		item.QuestionType = strings.TrimSpace(*req.QuestionType)
+	}
+	if req.Difficulty != nil {
+		item.Difficulty = strings.TrimSpace(*req.Difficulty)
+	}
+	if req.GradingGuidance != nil {
+		item.GradingGuidance = strings.TrimSpace(*req.GradingGuidance)
+	}
+	if req.ForbiddenClaims != nil {
+		item.ForbiddenClaims = strings.TrimSpace(*req.ForbiddenClaims)
 	}
 	if req.GenerateReason != nil {
 		item.GenerateReason = strings.TrimSpace(*req.GenerateReason)
@@ -702,6 +723,9 @@ func hasUpdateItemField(req UpdateEvalSetItemRequest) bool {
 		req.Question != nil ||
 		req.GroundTruth != nil ||
 		req.QuestionType != nil ||
+		req.Difficulty != nil ||
+		req.GradingGuidance != nil ||
+		req.ForbiddenClaims != nil ||
 		req.GenerateReason != nil ||
 		req.KeyPoints != nil ||
 		req.ReferenceChunkIDs != nil ||
@@ -721,6 +745,9 @@ func estimateEvalSetItemBytes(item *orm.EvalSetItem) int64 {
 		item.Question,
 		item.GroundTruth,
 		item.QuestionType,
+		item.Difficulty,
+		item.GradingGuidance,
+		item.ForbiddenClaims,
 		item.GenerateReason,
 		item.KeyPoints,
 		item.ReferenceChunkIDs,
@@ -815,6 +842,9 @@ func itemResponse(item *orm.EvalSetItem, knowledgeBaseReferenceDocIDs map[string
 		Question:                      item.Question,
 		GroundTruth:                   item.GroundTruth,
 		QuestionType:                  item.QuestionType,
+		Difficulty:                    item.Difficulty,
+		GradingGuidance:               item.GradingGuidance,
+		ForbiddenClaims:               item.ForbiddenClaims,
 		GenerateReason:                item.GenerateReason,
 		KeyPoints:                     item.KeyPoints,
 		ReferenceChunkIDs:             item.ReferenceChunkIDs,

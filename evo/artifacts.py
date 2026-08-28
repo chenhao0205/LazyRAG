@@ -22,8 +22,14 @@ DATASET_CHUNK_ENTITIES_MANIFEST = 'dataset.chunk_entities_manifest'
 DATASET_ENTITY_GRAPH = 'dataset.entity_graph'
 DATASET_ENTITY_CLUSTERS = 'dataset.entity_clusters'
 DATASET_EMBEDDING_CLUSTER_CANDIDATES = 'dataset.embedding_cluster_candidates'
+DATASET_EMBEDDING_LABEL_REQUESTS = 'dataset.embedding_label_requests'
+DATASET_EMBEDDING_LABEL_REQUEST = 'dataset.embedding_label_request'
+DATASET_EMBEDDING_CLUSTER = 'dataset.embedding_cluster'
 DATASET_EMBEDDING_CLUSTERS = 'dataset.embedding_clusters'
 DATASET_TOPIC_MANIFEST = 'dataset.topic_manifest'
+DATASET_SELECT_DOCS_PARAMS = 'dataset.select_docs_params'
+DATASET_BUILD_CHUNKS_PARAMS = 'dataset.build_chunks_params'
+DATASET_QAPLAN_PLAN_PARAMS = 'dataset.qaplan_plan_params'
 DATASET_QAPLAN_PLAN = 'dataset.qaplan_plan'
 DATASET_QAPLAN_SPEC = 'dataset.qaplan_spec'
 DATASET_QAPLAN_MANIFEST = 'dataset.qaplan_manifest'
@@ -50,16 +56,29 @@ ABTEST_CANDIDATE_JUDGE_RESULT = 'abtest.candidate_judge_results'
 ABTEST_CANDIDATE_EVAL_SUMMARY = 'abtest.candidate_eval_summary'
 ABTEST_COMPARISON = 'abtest.comparison'
 
+APPROVAL_DATASET_MATERIAL_PREPARATION = 'approval.dataset.material_preparation'
+APPROVAL_DATASET_TOPIC_DISCOVERY = 'approval.dataset.topic_discovery'
 APPROVAL_DATASET = 'approval.dataset'
 APPROVAL_EVAL = 'approval.eval'
 APPROVAL_ANALYSIS = 'approval.analysis'
 APPROVAL_REPAIR = 'approval.repair'
 
-STEPS = ('dataset', 'eval', 'analysis', 'repair', 'abtest')
+STEPS = (
+    'dataset.material_preparation',
+    'dataset.topic_discovery',
+    'dataset.case_generation',
+    'eval',
+    'analysis',
+    'repair',
+    'abtest',
+)
 
 SEEDS = (
     RUN_CONFIG,
     CORPUS_SOURCE_CONFIG,
+    DATASET_SELECT_DOCS_PARAMS,
+    DATASET_BUILD_CHUNKS_PARAMS,
+    DATASET_QAPLAN_PLAN_PARAMS,
     EVAL_TARGET_CONFIG,
     EVAL_POLICY,
     REPAIR_POLICY,
@@ -67,7 +86,9 @@ SEEDS = (
 )
 
 ROOTS = MappingProxyType({
-    'dataset': EVAL_DATASET,
+    'dataset.material_preparation': DATASET_BUILD_CHUNKS_MANIFEST,
+    'dataset.topic_discovery': DATASET_TOPIC_MANIFEST,
+    'dataset.case_generation': EVAL_DATASET,
     'eval': EVAL_SUMMARY,
     'analysis': ANALYSIS_SUMMARY,
     'repair': REPAIR_VERIFIED_PATCH,
@@ -75,7 +96,9 @@ ROOTS = MappingProxyType({
 })
 
 APPROVALS = MappingProxyType({
-    'dataset': APPROVAL_DATASET,
+    'dataset.material_preparation': APPROVAL_DATASET_MATERIAL_PREPARATION,
+    'dataset.topic_discovery': APPROVAL_DATASET_TOPIC_DISCOVERY,
+    'dataset.case_generation': APPROVAL_DATASET,
     'eval': APPROVAL_EVAL,
     'analysis': APPROVAL_ANALYSIS,
     'repair': APPROVAL_REPAIR,
@@ -85,6 +108,8 @@ PARTITION_SET_BY_ARTIFACT = MappingProxyType({
     DATASET_CHUNK_REQUEST: DATASET_CHUNK_REQUESTS,
     DATASET_CHUNK: DATASET_CHUNK_REQUESTS,
     DATASET_CHUNK_ENTITY: DATASET_CHUNK_REQUESTS,
+    DATASET_EMBEDDING_LABEL_REQUEST: DATASET_EMBEDDING_LABEL_REQUESTS,
+    DATASET_EMBEDDING_CLUSTER: DATASET_EMBEDDING_LABEL_REQUESTS,
     EVAL_CASE_REQUEST: EVAL_CASE_REQUESTS,
     EVAL_CASE_PREPARATION: EVAL_CASE_REQUESTS,
     DATASET_QAPLAN_SPEC: EVAL_CASE_REQUESTS,

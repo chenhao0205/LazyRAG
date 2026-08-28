@@ -16,6 +16,7 @@ import (
 
 var (
 	errInvalidImportToken = errors.New("invalid import_token")
+	errNoValidImportRows  = errors.New("no valid import rows")
 	errImportTaskNotFound = errors.New("import task not found")
 )
 
@@ -185,6 +186,9 @@ func consumeReadyImportPreview(ctx context.Context, tx *gorm.DB, importToken, us
 			return nil, errInvalidImportToken
 		}
 		return nil, err
+	}
+	if preview.ValidRows <= 0 {
+		return nil, errNoValidImportRows
 	}
 	if err := tx.WithContext(ctx).Model(&orm.EvalSetImportPreview{}).
 		Where("token = ? AND status = ?", preview.Token, importPreviewStatusReady).

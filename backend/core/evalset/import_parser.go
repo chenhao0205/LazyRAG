@@ -33,32 +33,24 @@ const (
 
 var importTemplateFields = []string{
 	"case_id",
-	"generate_reason",
-	"ground_truth",
-	"is_deleted",
-	"key_points",
 	"question",
 	"question_type",
-	"reference_chunk_ids",
+	"difficulty",
+	"ground_truth",
+	"grading_guidance",
+	"key_points",
+	"forbidden_claims",
 	"reference_context",
 	"reference_doc",
 	"reference_doc_ids",
-}
-
-var importDownloadTemplateFields = []string{
-	"generate_reason",
-	"ground_truth",
-	"is_deleted",
-	"key_points",
-	"question",
-	"question_type",
 	"reference_chunk_ids",
-	"reference_context",
-	"reference_doc",
-	"reference_doc_ids",
+	"generate_reason",
+	"is_deleted",
 }
 
-var importRequiredFields = []string{"question", "ground_truth", "question_type"}
+var importDownloadTemplateFields = append([]string(nil), importTemplateFields...)
+
+var importRequiredFields = []string{"question", "question_type", "ground_truth", "grading_guidance"}
 
 type importParseResult struct {
 	rows             []ImportNormalizedRow
@@ -475,7 +467,10 @@ func normalizedRowFromValues(values map[string]string) (ImportNormalizedRow, err
 	}
 	return ImportNormalizedRow{
 		CaseID:            values["case_id"],
+		Difficulty:        values["difficulty"],
+		ForbiddenClaims:   values["forbidden_claims"],
 		GenerateReason:    values["generate_reason"],
+		GradingGuidance:   values["grading_guidance"],
 		GroundTruth:       values["ground_truth"],
 		IsDeleted:         isDeleted,
 		KeyPoints:         values["key_points"],
@@ -491,7 +486,10 @@ func normalizedRowFromValues(values map[string]string) (ImportNormalizedRow, err
 func rowFromValuesWithoutBool(values map[string]string) ImportNormalizedRow {
 	return ImportNormalizedRow{
 		CaseID:            values["case_id"],
+		Difficulty:        values["difficulty"],
+		ForbiddenClaims:   values["forbidden_claims"],
 		GenerateReason:    values["generate_reason"],
+		GradingGuidance:   values["grading_guidance"],
 		GroundTruth:       values["ground_truth"],
 		KeyPoints:         values["key_points"],
 		Question:          values["question"],
@@ -521,7 +519,7 @@ func normalizedRowFromJSONObject(obj map[string]any) (ImportNormalizedRow, error
 		if !ok || value == nil {
 			return "", nil
 		}
-		out, err := importJSONString(value)
+		out, err := importJSONField(field, value)
 		if err != nil {
 			return "", &importFieldError{column: field, reason: field + " 必须是字符串"}
 		}
@@ -537,6 +535,18 @@ func normalizedRowFromJSONObject(obj map[string]any) (ImportNormalizedRow, error
 		return ImportNormalizedRow{}, err
 	}
 	groundTruth, err := stringField("ground_truth")
+	if err != nil {
+		return ImportNormalizedRow{}, err
+	}
+	difficulty, err := stringField("difficulty")
+	if err != nil {
+		return ImportNormalizedRow{}, err
+	}
+	gradingGuidance, err := stringField("grading_guidance")
+	if err != nil {
+		return ImportNormalizedRow{}, err
+	}
+	forbiddenClaims, err := stringField("forbidden_claims")
 	if err != nil {
 		return ImportNormalizedRow{}, err
 	}
@@ -575,7 +585,10 @@ func normalizedRowFromJSONObject(obj map[string]any) (ImportNormalizedRow, error
 
 	return ImportNormalizedRow{
 		CaseID:            caseID,
+		Difficulty:        difficulty,
+		ForbiddenClaims:   forbiddenClaims,
 		GenerateReason:    generateReason,
+		GradingGuidance:   gradingGuidance,
 		GroundTruth:       groundTruth,
 		IsDeleted:         isDeleted,
 		KeyPoints:         keyPoints,
@@ -590,13 +603,16 @@ func normalizedRowFromJSONObject(obj map[string]any) (ImportNormalizedRow, error
 
 func rowFromJSONObjectBestEffort(obj map[string]any) ImportNormalizedRow {
 	value := func(field string) string {
-		out, _ := importJSONString(obj[field])
+		out, _ := importJSONField(field, obj[field])
 		return out
 	}
 	isDeleted, _ := importJSONBool(obj["is_deleted"])
 	return ImportNormalizedRow{
 		CaseID:            value("case_id"),
+		Difficulty:        value("difficulty"),
+		ForbiddenClaims:   value("forbidden_claims"),
 		GenerateReason:    value("generate_reason"),
+		GradingGuidance:   value("grading_guidance"),
 		GroundTruth:       value("ground_truth"),
 		IsDeleted:         isDeleted,
 		KeyPoints:         value("key_points"),
@@ -609,10 +625,36 @@ func rowFromJSONObjectBestEffort(obj map[string]any) ImportNormalizedRow {
 	}
 }
 
+func importJSONField(field string, value any) (string, error) {
+	switch field {
+	case "key_points", "forbidden_claims", "reference_context":
+		if _, ok := value.([]any); ok {
+			raw, err := json.Marshal(value)
+			return string(raw), err
+		}
+	case "reference_doc", "reference_doc_ids", "reference_chunk_ids":
+		if values, ok := value.([]any); ok {
+			items := make([]string, 0, len(values))
+			for _, item := range values {
+				text, err := importJSONString(item)
+				if err != nil {
+					return "", err
+				}
+				items = append(items, text)
+			}
+			return strings.Join(items, ","), nil
+		}
+	}
+	return importJSONString(value)
+}
+
 func valuesFromNormalizedRow(row ImportNormalizedRow) map[string]string {
 	values := map[string]string{
 		"case_id":             row.CaseID,
+		"difficulty":          row.Difficulty,
+		"forbidden_claims":    row.ForbiddenClaims,
 		"generate_reason":     row.GenerateReason,
+		"grading_guidance":    row.GradingGuidance,
 		"ground_truth":        row.GroundTruth,
 		"is_deleted":          strconv.FormatBool(row.IsDeleted),
 		"key_points":          row.KeyPoints,
@@ -702,7 +744,10 @@ func parseImportBool(raw string) (bool, error) {
 func normalizedImportRowEmpty(row ImportNormalizedRow) bool {
 	return !row.IsDeleted &&
 		row.CaseID == "" &&
+		row.Difficulty == "" &&
+		row.ForbiddenClaims == "" &&
 		row.GenerateReason == "" &&
+		row.GradingGuidance == "" &&
 		row.GroundTruth == "" &&
 		row.KeyPoints == "" &&
 		row.Question == "" &&
@@ -723,6 +768,11 @@ func requiredImportErrors(rowNumber int, row ImportNormalizedRow) []ImportValida
 	}
 	if strings.TrimSpace(row.QuestionType) == "" {
 		out = append(out, ImportValidationErrorDetail{Row: rowNumber, Column: "question_type", Reason: "question_type 不能为空"})
+	} else if row.QuestionType != "precision" && row.QuestionType != "reasoning" {
+		out = append(out, ImportValidationErrorDetail{Row: rowNumber, Column: "question_type", Reason: "question_type 仅支持 precision 或 reasoning"})
+	}
+	if strings.TrimSpace(row.GradingGuidance) == "" {
+		out = append(out, ImportValidationErrorDetail{Row: rowNumber, Column: "grading_guidance", Reason: "grading_guidance 不能为空"})
 	}
 	return out
 }

@@ -97,6 +97,8 @@ func replyImportServiceError(w http.ResponseWriter, err error, fallback string) 
 	switch {
 	case errors.Is(err, errInvalidImportToken):
 		common.ReplyErr(w, "invalid import_token", http.StatusBadRequest)
+	case errors.Is(err, errNoValidImportRows):
+		common.ReplyErr(w, "no valid import rows", http.StatusBadRequest)
 	case errors.Is(err, errImportTaskNotFound):
 		common.ReplyErr(w, "import task not found", http.StatusNotFound)
 	case errors.Is(err, errForbidden):

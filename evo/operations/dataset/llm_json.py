@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
@@ -10,6 +11,7 @@ from json_repair import repair_json
 
 DEFAULT_LLM_JSON_TIMEOUT_SECONDS = 180
 T = TypeVar('T')
+logger = logging.getLogger(__name__)
 
 
 def call_json(
@@ -27,9 +29,17 @@ def call_json(
             assert last_error is not None
             current_prompt = f'{prompt}\n\n{repair_instruction(last_error)}'
         raw = _invoke(llm, current_prompt)
+        parsed: object = raw
         try:
-            return validate(_json_object(raw))
+            parsed = _json_object(raw)
+            return validate(parsed)
         except Exception as exc:
+            logger.warning(
+                'LLM JSON validation failed attempt=%s/2 error=%s payload=%s',
+                attempt + 1,
+                exc,
+                _preview(parsed),
+            )
             if attempt:
                 raise ValueError(f'LLM JSON call failed after 2 attempts: {exc}') from exc
             last_error = exc
@@ -50,6 +60,16 @@ def _invoke(llm: Callable[..., Any], prompt: str) -> Any:
         return llm(prompt, **kwargs)
     accepted = {parameter.name for parameter in parameters}
     return llm(prompt, **{name: value for name, value in kwargs.items() if name in accepted})
+
+
+def _preview(value: object, *, limit: int = 2000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(value)
+    if len(text) > limit:
+        return f'{text[:limit]}…'
+    return text
 
 
 def _json_object(raw: Any) -> Mapping[str, Any]:

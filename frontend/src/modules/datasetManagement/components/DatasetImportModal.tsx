@@ -73,10 +73,12 @@ export default function DatasetImportModal({
       fileUnsupported: t("datasetManagement.import.fileUnsupported"),
       jsonFormatInvalid: t("datasetManagement.import.jsonFormatInvalid"),
       deletedFieldInvalid: t("datasetManagement.import.deletedFieldInvalid"),
+      questionTypeInvalid: t("datasetManagement.import.questionTypeInvalid"),
       required: {
         question: t("datasetManagement.validation.questionRequired"),
         question_type: t("datasetManagement.validation.questionTypeRequired"),
         ground_truth: t("datasetManagement.validation.groundTruthRequired"),
+        grading_guidance: t("datasetManagement.validation.gradingGuidanceRequired"),
       },
     }),
     [t],

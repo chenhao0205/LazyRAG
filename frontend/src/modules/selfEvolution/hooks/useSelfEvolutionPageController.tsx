@@ -22,7 +22,6 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import {
   FileTextOutlined,
-  DownloadOutlined,
   DownOutlined,
   ExperimentOutlined,
   LoadingOutlined,
@@ -54,6 +53,11 @@ import {
   type SelfEvolutionWorkbenchViewProps,
 } from "../components/WorkbenchView";
 import { type SelfEvolutionWorkbenchTab } from "../components/types";
+import {
+  knowledgeBaseNamesFor,
+  pruneKnowledgeBaseSelection,
+  selectionSummary,
+} from "../shared/knowledgeBaseSelection";
 import "../index.scss";
 import {
   EvolutionMode,
@@ -83,6 +87,7 @@ import {
   FIXED_EXTRA_EVAL_STRATEGY,
   DEFAULT_EVAL_CASE_COUNT,
   AGENT_API_BASE,
+  EVO_API_BASE,
   SELF_EVOLUTION_LAST_THREAD_STORAGE_KEY,
   SELF_EVOLUTION_THREAD_COMMAND_STORAGE_PREFIX,
   DEPRECATED_SELF_EVOLUTION_THREAD_HISTORY_STORAGE_KEY,
@@ -165,13 +170,17 @@ import {
   isThreadEventAfter,
   reduceWorkflowRuntimeState,
   getThreadTitleFromPayload,
-  getThreadKnowledgeBaseId,
+  getThreadKnowledgeBaseIds,
   getThreadModeFromPayload,
   getTerminalFlowStepStatus,
   applyThreadStreamTerminalToState,
   applyThreadStepStatusToWorkflowSteps,
   getStageLabel,
   toThreadEventStage,
+  mergeWorkflowStepStatus,
+  deriveDatasetView,
+  deriveDatasetTopStatus,
+  toDatasetNavStatus,
   fetchThreadGateContent,
   fetchThreadGateDownload,
   getGateEvalCaseCount,
@@ -233,8 +242,6 @@ import {
   buildAffectedBlockCountRows,
   extractDatasetArtifactData,
   buildDatasetCasePreviewRows,
-  buildDatasetQuestionTypeCounts,
-  getDatasetTotalCaseCount,
   buildStreamingDatasetCaseRows,
   getStreamingDatasetProgress,
   buildStreamingEvalCaseRows,
@@ -261,6 +268,11 @@ import {
   buildAnalysisActionableCaseColumns,
   buildAbComparisonColumns,
 } from "./controller/columns";
+import {
+  DatasetArtifactPreview,
+  WorkflowResultPayload,
+} from "./controller/ArtifactPreviews";
+import { ArtifactDetailPanel } from "./controller/ArtifactPanel";
 
 const { Paragraph, Text } = Typography;
 
@@ -289,7 +301,7 @@ export function SelfEvolutionPageController({
   const [extraEvalStrategy, setExtraEvalStrategy] = useState<ExtraEvalStrategy>(
     FIXED_EXTRA_EVAL_STRATEGY,
   );
-  const [selectedKb, setSelectedKb] = useState<string>();
+  const [selectedKbs, setSelectedKbs] = useState<string[]>([]);
   const [knowledgeBaseOptions, setKnowledgeBaseOptions] = useState<
     KnowledgeBaseOption[]
   >([]);
@@ -378,6 +390,7 @@ export function SelfEvolutionPageController({
     steps: [],
   });
   const [threadFlowStatus, setThreadFlowStatus] = useState<string>();
+  const [datasetExecutionResumeToken, setDatasetExecutionResumeToken] = useState(0);
   const threadStepListRef = useRef(threadStepList);
   threadStepListRef.current = threadStepList;
   const activeThreadIdRef = useRef<string>();
@@ -462,17 +475,11 @@ export function SelfEvolutionPageController({
             }));
 
           setKnowledgeBaseOptions(nextOptions);
-          setSelectedKb((prev) =>
-            prev && nextOptions.some((item) => item.value === prev)
-              ? prev
-              : undefined,
-          );
-          setNewSessionDraft((prev) =>
-            prev.selectedKb &&
-            !nextOptions.some((item) => item.value === prev.selectedKb)
-              ? { ...prev, selectedKb: undefined }
-              : prev,
-          );
+          setSelectedKbs((prev) => pruneKnowledgeBaseSelection(prev, nextOptions));
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(prev.selectedKbs || [], nextOptions),
+          }));
         })
         .catch((error) => {
           if (isCanceledRequest(error)) {
@@ -490,9 +497,9 @@ export function SelfEvolutionPageController({
     [t],
   );
   const fetchExistingEvalSetOptions = useCallback(
-    (datasetId?: string, signal?: AbortSignal) => {
-      const normalizedDatasetId = `${datasetId || ""}`.trim();
-      if (!normalizedDatasetId) {
+    (datasetIds: string[] = [], signal?: AbortSignal) => {
+      const normalizedDatasetIds = [...new Set(datasetIds.map((id) => id.trim()).filter(Boolean))];
+      if (!normalizedDatasetIds.length) {
         setExistingEvalSetOptions([]);
         setExistingEvalSetError("");
         setIsExistingEvalSetLoading(false);
@@ -504,7 +511,7 @@ export function SelfEvolutionPageController({
       createCoreEvalSetsApiClient()
         .apiCoreEvalSetsGet(
           {
-            datasetIds: [normalizedDatasetId],
+            datasetIds: normalizedDatasetIds,
             page: 1,
             pageSize: 1000,
           },
@@ -545,9 +552,6 @@ export function SelfEvolutionPageController({
     },
     [],
   );
-  const selectedKnowledgeBaseLabel = knowledgeBaseOptions.find(
-    (item) => item.value === selectedKb,
-  )?.label;
   const knowledgeBasePlaceholder = knowledgeBaseError
     ? t("selfEvolutionRun.knowledgeBaseLoadFailed")
     : isKnowledgeBaseLoading
@@ -555,15 +559,14 @@ export function SelfEvolutionPageController({
       : knowledgeBaseOptions.length === 0
         ? t("selfEvolutionRun.noKnowledgeBase")
         : t("selfEvolutionRun.knowledgeBase");
-  const selectedKnowledgeBase =
-    selectedKnowledgeBaseLabel || knowledgeBasePlaceholder;
-  const knowledgeBaseLaunchLabel =
-    selectedKnowledgeBaseLabel ||
-    (knowledgeBaseError ||
-    isKnowledgeBaseLoading ||
-    knowledgeBaseOptions.length === 0
+  const selectedKnowledgeBase = selectionSummary(selectedKbs, knowledgeBaseOptions, knowledgeBasePlaceholder);
+  const knowledgeBaseLaunchLabel = selectionSummary(
+    selectedKbs,
+    knowledgeBaseOptions,
+    knowledgeBaseError || isKnowledgeBaseLoading || knowledgeBaseOptions.length === 0
       ? knowledgeBasePlaceholder
-      : t("selfEvolutionRun.knowledgeBaseNotSelected"));
+      : t("selfEvolutionRun.knowledgeBaseNotSelected"),
+  );
   const getExistingEvalSetLabel = useCallback(
     (value?: string) => {
       const option = [
@@ -593,23 +596,20 @@ export function SelfEvolutionPageController({
   const modeLabel = isAutoMode
     ? t("selfEvolutionRun.modeAuto")
     : t("selfEvolutionRun.modeInteractive");
-  const isKnowledgeBaseRequired = !selectedKb;
+  const isKnowledgeBaseRequired = selectedKbs.length === 0;
   const isLaunchConfigComplete = Boolean(
-    selectedKb && selectedEvalSet && extraEvalStrategy && mode,
+    selectedKbs.length > 0 && selectedEvalSet && extraEvalStrategy && mode,
   );
   const isLaunchConfigValid =
     isLaunchConfigComplete &&
     (!isExtraEvalRequired || extraEvalStrategy === "generate");
-  const draftSelectedKnowledgeBaseLabel = knowledgeBaseOptions.find(
-    (item) => item.value === newSessionDraft.selectedKb,
-  )?.label;
-  const draftKnowledgeBaseLaunchLabel =
-    draftSelectedKnowledgeBaseLabel ||
-    (knowledgeBaseError ||
-    isKnowledgeBaseLoading ||
-    knowledgeBaseOptions.length === 0
+  const draftKnowledgeBaseLaunchLabel = selectionSummary(
+    newSessionDraft.selectedKbs || [],
+    knowledgeBaseOptions,
+    knowledgeBaseError || isKnowledgeBaseLoading || knowledgeBaseOptions.length === 0
       ? knowledgeBasePlaceholder
-      : t("selfEvolutionRun.selectKnowledgeBase"));
+      : t("selfEvolutionRun.selectKnowledgeBase"),
+  );
   const draftSelectedEvalSetLabel = newSessionDraft.selectedEvalSet
     ? getExistingEvalSetLabel(newSessionDraft.selectedEvalSet)
     : undefined;
@@ -630,7 +630,7 @@ export function SelfEvolutionPageController({
         ? t("selfEvolutionRun.interventionAuto")
         : t("selfEvolutionRun.selectInterventionMode");
   const isNewSessionDraftComplete = Boolean(
-    newSessionDraft.selectedKb &&
+    newSessionDraft.selectedKbs?.length &&
     newSessionDraft.selectedEvalSet &&
     newSessionDraft.extraEvalStrategy &&
     newSessionDraft.mode,
@@ -639,23 +639,36 @@ export function SelfEvolutionPageController({
     isNewSessionDraftComplete &&
     (!isDraftExtraEvalRequired ||
       newSessionDraft.extraEvalStrategy === "generate");
-  const isNewSessionStepOneDone = Boolean(newSessionDraft.selectedKb);
+  const isNewSessionStepOneDone = Boolean(newSessionDraft.selectedKbs?.length);
   const isNewSessionStepTwoDone = Boolean(newSessionDraft.selectedEvalSet);
   const isNewSessionStepThreeDone = Boolean(newSessionDraft.extraEvalStrategy);
   const isNewSessionStepFourDone = Boolean(newSessionDraft.mode);
-  const evalSetDatasetId = isNewSessionConfigOpen
-    ? newSessionDraft.selectedKb
-    : selectedKb;
+  const evalSetDatasetIds = useMemo(
+    () =>
+      isNewSessionConfigOpen
+        ? newSessionDraft.selectedKbs || []
+        : selectedKbs,
+    [isNewSessionConfigOpen, newSessionDraft.selectedKbs, selectedKbs],
+  );
+  const datasetWorkflowView = useMemo(
+    () => deriveDatasetView(threadStepList.steps, threadStepList.activeStepId),
+    [threadStepList],
+  );
+  const datasetTopStatus = useMemo(
+    () => deriveDatasetTopStatus(threadStepList.steps),
+    [threadStepList.steps],
+  );
   const threadTerminalStatusByStage = useMemo(
     () => buildTerminalStatusByStage(threadEvents),
     [threadEvents],
   );
   const threadStepStatusByStage = useMemo(
-    () => ({
-      ...buildThreadStepStatusByStage(threadStepList, threadFlowStatus),
-      ...threadTerminalStatusByStage,
-    }),
-    [threadFlowStatus, threadStepList, threadTerminalStatusByStage],
+    () =>
+      mergeWorkflowStepStatus(
+        threadTerminalStatusByStage,
+        buildThreadStepStatusByStage(threadStepList, threadFlowStatus, datasetTopStatus),
+      ),
+    [datasetTopStatus, threadFlowStatus, threadStepList, threadTerminalStatusByStage],
   );
   const stepListCheckpointPrompt = useMemo(
     () =>
@@ -667,6 +680,16 @@ export function SelfEvolutionPageController({
     [threadFlowStatus, threadStepList, threadStepStatusByStage],
   );
   const checkpointWaitPrompt = stepListCheckpointPrompt || liveCheckpointWaitPrompt;
+  const canContinueDatasetStage = datasetWorkflowView.canContinue;
+  const datasetStageStatuses = useMemo(
+    () => ({
+      materials: toDatasetNavStatus(datasetWorkflowView.subStatuses.materials),
+      topics: toDatasetNavStatus(datasetWorkflowView.subStatuses.topics),
+      cases: toDatasetNavStatus(datasetWorkflowView.subStatuses.cases),
+    }),
+    [datasetWorkflowView],
+  );
+  const datasetSuggestedTab = datasetWorkflowView.suggestedTab;
   const workflowSteps = useMemo<WorkflowStep[]>(
     () =>
       applyThreadStepStatusToWorkflowSteps(
@@ -1964,12 +1987,12 @@ export function SelfEvolutionPageController({
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchExistingEvalSetOptions(evalSetDatasetId, controller.signal);
+    fetchExistingEvalSetOptions(evalSetDatasetIds, controller.signal);
 
     return () => {
       controller.abort();
     };
-  }, [evalSetDatasetId, fetchExistingEvalSetOptions]);
+  }, [evalSetDatasetIds, fetchExistingEvalSetOptions]);
 
   useEffect(() => {
     if (isExistingEvalSetLoading || existingEvalSetError) {
@@ -2103,21 +2126,6 @@ export function SelfEvolutionPageController({
     }));
   }, [isKnowledgeBaseLoading, knowledgeBaseError, knowledgeBaseOptions, t]);
 
-  const onKnowledgeBaseMenuClick = (
-    key: string,
-    onSelect: (nextKnowledgeBase: string) => void,
-  ) => {
-    if (key === "__retry__") {
-      fetchKnowledgeBaseOptions();
-      return;
-    }
-    if (key.startsWith("__")) {
-      return;
-    }
-
-    onSelect(key);
-  };
-
   const modeMenuItems: MenuProps["items"] = [
     { key: "auto", label: t("selfEvolutionRun.modeAuto") },
     { key: "interactive", label: t("selfEvolutionRun.modeInteractive") },
@@ -2147,7 +2155,7 @@ export function SelfEvolutionPageController({
       });
       return items;
     }
-    if (evalSetDatasetId && existingEvalSetOptions.length === 0) {
+    if (evalSetDatasetIds.length > 0 && existingEvalSetOptions.length === 0) {
       items.push({
         key: "__eval_set_empty__",
         label: t("selfEvolutionRun.noMatchingEvalSet"),
@@ -2166,7 +2174,7 @@ export function SelfEvolutionPageController({
     );
     return items;
   }, [
-    evalSetDatasetId,
+    evalSetDatasetIds,
     existingEvalSetError,
     existingEvalSetOptions,
     getExistingEvalSetLabel,
@@ -2179,7 +2187,7 @@ export function SelfEvolutionPageController({
     onSelect: (nextEvalSet: string) => void,
   ) => {
     if (key === "__eval_set_retry__") {
-      fetchExistingEvalSetOptions(evalSetDatasetId);
+      fetchExistingEvalSetOptions(evalSetDatasetIds);
       return;
     }
     if (key.startsWith("__eval_set_")) {
@@ -2221,10 +2229,12 @@ export function SelfEvolutionPageController({
       const statusKeyMap: Record<WorkflowStep["status"], string> = {
         running: "selfEvolutionRun.status.running",
         pending: "selfEvolutionRun.status.pending",
+        waiting: "selfEvolutionRun.statusWaitingNext",
         done: "selfEvolutionRun.status.done",
         paused: "selfEvolutionRun.status.paused",
         canceled: "selfEvolutionRun.status.canceled",
         failed: "selfEvolutionRun.status.failed",
+        partial: "selfEvolutionRun.statusPartial",
       };
       return t(statusKeyMap[status]);
     },
@@ -2282,15 +2292,17 @@ export function SelfEvolutionPageController({
 
   const createAndStartThread = async (config?: {
     mode: EvolutionMode;
-    selectedKb: string;
+    selectedKbs: string[];
     selectedKnowledgeBase: string;
     selectedEvalSet: string;
+    extraEvalStrategy: ExtraEvalStrategy;
   }) => {
     const targetMode = config?.mode || mode;
-    const targetSelectedKb = config?.selectedKb || selectedKb;
+    const targetSelectedKbs = config?.selectedKbs || selectedKbs;
     const targetKnowledgeBase =
       config?.selectedKnowledgeBase || selectedKnowledgeBase;
     const targetEvalSet = config?.selectedEvalSet || selectedEvalSet;
+    const targetExtraEvalStrategy = config?.extraEvalStrategy || extraEvalStrategy;
     const evalName =
       targetEvalSet && targetEvalSet !== FIXED_EVAL_SET
         ? targetEvalSet
@@ -2305,12 +2317,14 @@ export function SelfEvolutionPageController({
         mode: targetMode,
         title: targetKnowledgeBase || "self evolution test",
         inputs: {
-          kb_id: targetSelectedKb,
+          kb_id: targetSelectedKbs,
+          knowledge_base_names: knowledgeBaseNamesFor(targetSelectedKbs, knowledgeBaseOptions),
           algo_id: "general_algo",
           eval_name: evalName,
           ...(targetEvalSet && targetEvalSet !== FIXED_EVAL_SET
             ? { eval_set_id: targetEvalSet }
             : {}),
+          extra_eval_strategy: targetExtraEvalStrategy,
           num_cases: DEFAULT_EVAL_CASE_COUNT,
         },
       },
@@ -2483,6 +2497,9 @@ export function SelfEvolutionPageController({
     }
 
     processedWorkflowEventKeysRef.current.add(event.key);
+    if (event.type === "checkpoint.continue") {
+      setDatasetExecutionResumeToken((token) => token + 1);
+    }
     const mergedEvents = mergeThreadEvents([event]);
     if (event.checkpointWait) {
       setLiveCheckpointWaitPrompt(getPendingCheckpointWaitPrompt(mergedEvents));
@@ -3486,9 +3503,9 @@ export function SelfEvolutionPageController({
 
       const threadPayload = threadResult.data as ThreadRestorePayload;
       const detailTitle = getThreadTitleFromPayload(threadPayload);
-      const knowledgeBaseId = getThreadKnowledgeBaseId(threadPayload);
-      if (knowledgeBaseId) {
-        setSelectedKb(knowledgeBaseId);
+      const knowledgeBaseIds = getThreadKnowledgeBaseIds(threadPayload);
+      if (knowledgeBaseIds.length) {
+        setSelectedKbs(knowledgeBaseIds);
       }
       const restoredMode = getThreadModeFromPayload(threadPayload);
       if (restoredMode) {
@@ -3780,7 +3797,9 @@ export function SelfEvolutionPageController({
             activeSessionId,
             controller,
           );
-          await subscribePendingNextStepRun(activeThreadId, activeSessionId);
+          if (await subscribePendingNextStepRun(activeThreadId, activeSessionId)) {
+            setDatasetExecutionResumeToken((token) => token + 1);
+          }
           return;
         }
 
@@ -3806,7 +3825,9 @@ export function SelfEvolutionPageController({
             { dedupeLast: true },
           );
         }
-        await subscribePendingNextStepRun(activeThreadId, activeSessionId);
+        if (await subscribePendingNextStepRun(activeThreadId, activeSessionId)) {
+          setDatasetExecutionResumeToken((token) => token + 1);
+        }
       } catch (error) {
         appendSystemMessage(
           getCatalogApiErrorMessage(error),
@@ -3851,6 +3872,7 @@ export function SelfEvolutionPageController({
         `${AGENT_API_BASE}/threads/${encodeURIComponent(activeThreadId)}/continue`,
         { command_id: requestedCommandId },
       );
+      setDatasetExecutionResumeToken((token) => token + 1);
       await refreshThreadStepList(activeThreadId);
 
       setSelectedThreadStepId(undefined);
@@ -3949,7 +3971,7 @@ export function SelfEvolutionPageController({
     }
     if (!isLaunchConfigValid) {
       setHasLaunchValidationTriggered(true);
-      if (!selectedKb) {
+      if (!selectedKbs.length) {
         message.warning(
           t("selfEvolutionRun.message.selectKnowledgeBaseBeforeStart"),
           1.2,
@@ -4065,7 +4087,7 @@ export function SelfEvolutionPageController({
     }
     if (!isNewSessionDraftValid) {
       setHasNewSessionValidationTriggered(true);
-      if (!newSessionDraft.selectedKb) {
+      if (!newSessionDraft.selectedKbs?.length) {
         message.warning(
           t("selfEvolutionRun.message.selectKnowledgeBaseBeforeNewSession"),
           1.2,
@@ -4098,13 +4120,12 @@ export function SelfEvolutionPageController({
     }
 
     const nextMode = newSessionDraft.mode as EvolutionMode;
-    const nextKnowledgeBase = newSessionDraft.selectedKb as string;
+    const nextKnowledgeBases = newSessionDraft.selectedKbs as string[];
     const nextEvalSet = newSessionDraft.selectedEvalSet as string;
     const nextExtraEvalStrategy =
       newSessionDraft.extraEvalStrategy as ExtraEvalStrategy;
     const nextKnowledgeBaseLabel =
-      knowledgeBaseOptions.find((item) => item.value === nextKnowledgeBase)
-        ?.label || t("selfEvolutionRun.knowledgeBase");
+      selectionSummary(nextKnowledgeBases, knowledgeBaseOptions, t("selfEvolutionRun.knowledgeBase"));
     const nextEvalSetLabel = getExistingEvalSetLabel(nextEvalSet);
     const nextExtraEvalLabel =
       nextExtraEvalStrategy === "generate"
@@ -4122,9 +4143,10 @@ export function SelfEvolutionPageController({
     try {
       const { threadId } = await createAndStartThread({
         mode: nextMode,
-        selectedKb: nextKnowledgeBase,
+        selectedKbs: nextKnowledgeBases,
         selectedKnowledgeBase: nextKnowledgeBaseLabel,
         selectedEvalSet: nextEvalSet,
+        extraEvalStrategy: nextExtraEvalStrategy,
       });
       activeThreadIdRef.current = threadId;
       const newSession: ChatSession = {
@@ -4147,7 +4169,7 @@ export function SelfEvolutionPageController({
         ],
       };
 
-      setSelectedKb(nextKnowledgeBase);
+      setSelectedKbs(nextKnowledgeBases);
       setSelectedEvalSet(nextEvalSet);
       setExtraEvalStrategy(nextExtraEvalStrategy);
       setMode(nextMode);
@@ -4395,15 +4417,18 @@ export function SelfEvolutionPageController({
       menu={{
         items: knowledgeBaseMenuItems,
         selectable: true,
-        selectedKeys: selectedKb ? [selectedKb] : [],
-        onClick: ({ key }) => {
+        multiple: true,
+        selectedKeys: selectedKbs,
+        onSelect: ({ key, selectedKeys }) => {
           if (isLocked) {
             return;
           }
-          onKnowledgeBaseMenuClick(String(key), (nextKnowledgeBase) => {
-            setSelectedKb(nextKnowledgeBase);
-            setHasLaunchValidationTriggered(false);
-          });
+          if (String(key) === "__retry__") return fetchKnowledgeBaseOptions();
+          setSelectedKbs(pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions));
+          setHasLaunchValidationTriggered(false);
+        },
+        onDeselect: ({ selectedKeys }) => {
+          setSelectedKbs(pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions));
         },
       }}
     >
@@ -4566,24 +4591,28 @@ export function SelfEvolutionPageController({
       menu={{
         items: knowledgeBaseMenuItems,
         selectable: true,
-        selectedKeys: newSessionDraft.selectedKb
-          ? [newSessionDraft.selectedKb]
-          : [],
-        onClick: ({ key }) => {
-          onKnowledgeBaseMenuClick(String(key), (nextKnowledgeBase) => {
-            setNewSessionDraft((prev) => ({
-              ...prev,
-              selectedKb: nextKnowledgeBase,
-            }));
-            setHasNewSessionValidationTriggered(false);
-          });
+        multiple: true,
+        selectedKeys: newSessionDraft.selectedKbs || [],
+        onSelect: ({ key, selectedKeys }) => {
+          if (String(key) === "__retry__") return fetchKnowledgeBaseOptions();
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions),
+          }));
+          setHasNewSessionValidationTriggered(false);
+        },
+        onDeselect: ({ selectedKeys }) => {
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions),
+          }));
         },
       }}
     >
       <button
         type="button"
         className={`self-evolution-chatlike-tool is-launch-control${
-          hasNewSessionValidationTriggered && !newSessionDraft.selectedKb
+          hasNewSessionValidationTriggered && !newSessionDraft.selectedKbs?.length
             ? " is-warning"
             : ""
         }`}
@@ -4795,7 +4824,7 @@ export function SelfEvolutionPageController({
       toneClassName: "is-blue",
       icon: <DatabaseOutlined />,
       isHighlighted:
-        hasNewSessionValidationTriggered && !newSessionDraft.selectedKb,
+        hasNewSessionValidationTriggered && !newSessionDraft.selectedKbs?.length,
       isDescSingleLine: false,
       control: renderNewSessionKnowledgeBaseButton(),
     },
@@ -4877,145 +4906,30 @@ export function SelfEvolutionPageController({
     </button>
   );
 
-  const renderDatasetPreview = () => {
-    const state = workflowResults.datasets;
-    if (
-      state.loading ||
-      state.error ||
-      !state.loaded ||
-      isEmptyResultPayload(state.data)
-    ) {
-      return renderWorkflowResultPayload("datasets");
-    }
-
-    const checks =
-      getStructuredRecordField(datasetArtifactData, ["checks"]) ||
-      getNestedRecordField(datasetArtifactData, ["checks"]);
-    const typeCounts = buildDatasetQuestionTypeCounts(datasetArtifactData);
-    const errors = getStructuredArrayField(checks, ["errors"]) || [];
-    const warnings = getStructuredArrayField(checks, ["warnings"]) || [];
-    const hasLegacyChecks = Boolean(checks);
-    const totalCases = getDatasetTotalCaseCount(
-      datasetArtifactData,
-      datasetCaseRows.length,
-    );
-    const runId = getStringField(datasetArtifactData, ["run_id"]);
-
+  const workflowResultPayload = (kind: WorkflowResultKind) => {
     return (
-      <section
-        className="self-evolution-dataset-preview"
-        aria-label={t("selfEvolutionRun.datasetResultAria")}
-      >
-        <div className="self-evolution-dataset-cases-head">
-          <Text>{t("selfEvolutionRun.finalEvalDataset")}</Text>
-          <Text>
-            {t("selfEvolutionRun.datasetSampleStats", {
-              total: totalCases,
-              shown: datasetCaseRows.length,
-            })}
-          </Text>
-        </div>
-        <div className="self-evolution-dataset-metrics">
-          {runId ? <span>run_id：{runId}</span> : null}
-          {hasLegacyChecks ? (
-            <>
-              <span>
-                ready：
-                {checks?.ready === false
-                  ? t("selfEvolutionRun.datasetReadyNo")
-                  : t("selfEvolutionRun.datasetReadyYes")}
-              </span>
-              <span>
-                {t("selfEvolutionRun.datasetWarningError", {
-                  warnings: warnings.length,
-                  errors: errors.length,
-                })}
-              </span>
-            </>
-          ) : null}
-          <span>
-            {t("selfEvolutionRun.datasetTypeCount", {
-              count: Object.keys(typeCounts).length,
-            })}
-          </span>
-        </div>
-        <Table<DatasetCasePreviewRow>
-          className="self-evolution-dataset-table"
-          size="small"
-          rowKey="key"
-          columns={datasetCaseColumns}
-          dataSource={datasetCaseRows}
-          locale={{
-            emptyText: t("selfEvolutionRun.datasetCaseTableEmpty"),
-          }}
-          pagination={
-            datasetCaseRows.length > 10
-              ? { pageSize: 10, size: "small", showSizeChanger: false }
-              : false
-          }
-          scroll={{ x: 1250, y: 360 }}
-        />
-      </section>
+      <WorkflowResultPayload
+        kind={kind}
+        state={workflowResults[kind]}
+        label={getWorkflowResultLabels()[kind]}
+        t={t}
+        onRetry={(resultKind) =>
+          void fetchWorkflowResult(resultKind, { force: true })
+        }
+      />
     );
   };
 
-  const renderWorkflowResultPayload = (kind: WorkflowResultKind) => {
-    const resultState = workflowResults[kind];
-    const label = getWorkflowResultLabels()[kind];
-
-    if (resultState.loading) {
-      return (
-        <div className="self-evolution-result-state is-loading">
-          <LoadingOutlined spin />
-          <span>{t("selfEvolutionRun.resultLoading", { label })}</span>
-        </div>
-      );
-    }
-
-    if (resultState.error) {
-      return (
-        <div className="self-evolution-result-state is-error" role="alert">
-          <span>{resultState.error}</span>
-          <button
-            type="button"
-            onClick={() => void fetchWorkflowResult(kind, { force: true })}
-          >
-            {t("selfEvolutionRun.resultRetry")}
-          </button>
-        </div>
-      );
-    }
-
-    if (!resultState.loaded) {
-      return (
-        <Paragraph className="self-evolution-px-empty">
-          {t("selfEvolutionRun.resultNotLoadedHint", { label })}
-        </Paragraph>
-      );
-    }
-
-    if (isEmptyResultPayload(resultState.data)) {
-      return (
-        <Paragraph className="self-evolution-px-empty">
-          {t("selfEvolutionRun.resultEmptyHint", { label })}
-        </Paragraph>
-      );
-    }
-
-    return (
-      <div className="self-evolution-result-json">
-        <div className="self-evolution-result-json-head">
-          <Text>{t("selfEvolutionRun.resultJsonHead", { label })}</Text>
-          <Text>
-            {t("selfEvolutionRun.resultItemCount", {
-              count: getResultItems(resultState.data).length || 1,
-            })}
-          </Text>
-        </div>
-        <pre>{stringifyResultPayload(resultState.data)}</pre>
-      </div>
-    );
-  };
+  const datasetPreview = (
+    <DatasetArtifactPreview
+      state={workflowResults.datasets}
+      artifactData={datasetArtifactData}
+      rows={datasetCaseRows}
+      columns={datasetCaseColumns}
+      t={t}
+      fallback={workflowResultPayload("datasets")}
+    />
+  );
 
   const getEvalMetricTone = (value: number) => {
     const score = clampScore(value);
@@ -5138,9 +5052,9 @@ export function SelfEvolutionPageController({
       aria-label={t("selfEvolutionRun.pxReportAria")}
     >
       {workflowResults["eval-reports"].loading ? (
-        renderWorkflowResultPayload("eval-reports")
+        workflowResultPayload("eval-reports")
       ) : workflowResults["eval-reports"].error ? (
-        renderWorkflowResultPayload("eval-reports")
+        workflowResultPayload("eval-reports")
       ) : evalTraceObservation && pxReportCategoryMetrics.length === 0 ? (
         <TraceObservationView
           observation={evalTraceObservation}
@@ -5438,10 +5352,10 @@ export function SelfEvolutionPageController({
               <MarkdownViewer>{fetchedAnalysisReportMarkdown}</MarkdownViewer>
             </div>
           ) : (
-            renderWorkflowResultPayload("analysis-reports")
+            workflowResultPayload("analysis-reports")
           )
         ) : (
-          renderWorkflowResultPayload("analysis-reports")
+          workflowResultPayload("analysis-reports")
         )}
       </div>
     </section>
@@ -5503,7 +5417,7 @@ export function SelfEvolutionPageController({
           <div className="self-evolution-optimize-head">
             <Text>{t("selfEvolutionRun.codeChangesTitle")}</Text>
           </div>
-          {renderWorkflowResultPayload("diffs")}
+          {workflowResultPayload("diffs")}
         </section>
       );
     }
@@ -6173,7 +6087,7 @@ export function SelfEvolutionPageController({
         aria-label={t("selfEvolutionRun.abReportAria")}
       >
         {workflowResults.abtests.loading || workflowResults.abtests.error ? (
-          renderWorkflowResultPayload("abtests")
+          workflowResultPayload("abtests")
         ) : workflowResults.abtests.loaded && abtestComparisonArtifact ? (
           <AbtestComparisonPanel artifact={abtestComparisonArtifact} />
         ) : workflowResults.abtests.loaded &&
@@ -6199,7 +6113,7 @@ export function SelfEvolutionPageController({
           </>
         ) : workflowResults.abtests.loaded &&
           !isEmptyResultPayload(workflowResults.abtests.data) ? (
-          renderWorkflowResultPayload("abtests")
+          workflowResultPayload("abtests")
         ) : (
           <>
             <div className="self-evolution-ab-head">
@@ -6240,7 +6154,7 @@ export function SelfEvolutionPageController({
       title: t("selfEvolutionRun.artifact1Name"),
       desc: t("selfEvolutionRun.artifact1Detail"),
       fileName: datasetDownloadFileName,
-      preview: renderDatasetPreview(),
+      preview: datasetPreview,
     },
     {
       kind: "eval-reports",
@@ -6511,116 +6425,34 @@ export function SelfEvolutionPageController({
         ] === "done") &&
       viewStageOverview?.step.status === "done",
   );
-  const renderCaseArtifactPreview = () => {
-    if (!caseArtifact) {
-      return null;
-    }
-    if (caseArtifact.loading) {
-      return (
-        <div className="self-evolution-result-state is-loading">
-          <LoadingOutlined spin />
-          <span>
-            {t("selfEvolutionRun.caseArtifactLoading", {
-              id: caseArtifact.artifactId,
-            })}
-          </span>
-        </div>
-      );
-    }
-    if (caseArtifact.error) {
-      return (
-        <div className="self-evolution-result-state is-error" role="alert">
-          <span>{caseArtifact.error}</span>
-          <button
-            type="button"
-            onClick={() =>
-              void openCaseArtifact(
-                caseArtifact.kind,
-                caseArtifact.artifactId,
-                caseArtifact.title,
-                caseArtifact.caseId,
-              )
-            }
-          >
-            {t("selfEvolutionRun.resultRetry")}
-          </button>
-        </div>
-      );
-    }
-    const traceObservation = normalizeTraceObservation(caseArtifact.data);
-    if (traceObservation) {
-      return (
-        <TraceObservationView
-          observation={traceObservation}
-          title={
-            traceObservation.kind === "compare"
-              ? `${caseArtifact.title}${t("selfEvolutionRun.caseTraceABObservationSuffix")}`
-              : `${caseArtifact.title}${t("selfEvolutionRun.caseObservationDetailSuffix")}`
-          }
-        />
-      );
-    }
-    return (
-      <div className="self-evolution-result-json">
-        <div className="self-evolution-result-json-head">
-          <Text>{caseArtifact.artifactId}</Text>
-          <Text>
-            {t("selfEvolutionRun.resultItemCount", {
-              count: getResultItems(caseArtifact.data).length || 1,
-            })}
-          </Text>
-        </div>
-        <pre>{stringifyResultPayload(caseArtifact.data)}</pre>
-      </div>
-    );
-  };
-  const renderArtifactPanel = () =>
-    caseArtifact ? (
-      <section
-        className="self-evolution-artifact-detail"
-        aria-label={t("selfEvolutionRun.artifactDetailAria")}
-      >
-        <div className="self-evolution-artifact-detail-head">
-          <div>
-            <Text strong>{caseArtifact.title}</Text>
-            <span>{`${getWorkflowResultLabels()[caseArtifact.kind]} · ${t("selfEvolutionRun.singleCaseArtifact")}`}</span>
-          </div>
-        </div>
-        <div className="self-evolution-artifact-detail-body">
-          {renderCaseArtifactPreview()}
-        </div>
-      </section>
-    ) : activeArtifactItem ? (
-      <section
-        className="self-evolution-artifact-detail"
-        aria-label={t("selfEvolutionRun.artifactProductDetail")}
-      >
-        <div className="self-evolution-artifact-detail-head">
-          <div>
-            <Text strong>{activeArtifactItem.title}</Text>
-            <span>{activeArtifactItem.desc}</span>
-          </div>
-          <button
-            type="button"
-            onClick={(event) =>
-              void handleWorkflowDownload(
-                activeArtifactItem.kind,
-                activeArtifactItem.fileName,
-                event,
-              )
-            }
-          >
-            <DownloadOutlined />
-            <span>{t("selfEvolutionRun.downloadArtifact")}</span>
-          </button>
-        </div>
-        <div
-          className={`self-evolution-artifact-detail-body${activeArtifactItem.kind === "analysis-reports" ? " is-analysis-report" : ""}`}
-        >
-          {activeArtifactItem.preview}
-        </div>
-      </section>
-    ) : null;
+  const artifactPanel = (
+    <ArtifactDetailPanel
+      caseArtifact={caseArtifact}
+      activeArtifact={activeArtifactItem}
+      t={t}
+      onRetryCaseArtifact={() => {
+        if (!caseArtifact) {
+          return;
+        }
+        void openCaseArtifact(
+          caseArtifact.kind,
+          caseArtifact.artifactId,
+          caseArtifact.title,
+          caseArtifact.caseId,
+        );
+      }}
+      onDownloadArtifact={(event) => {
+        if (!activeArtifactItem) {
+          return;
+        }
+        void handleWorkflowDownload(
+          activeArtifactItem.kind,
+          activeArtifactItem.fileName,
+          event,
+        );
+      }}
+    />
+  );
 
   return (
     <>
@@ -6654,7 +6486,7 @@ export function SelfEvolutionPageController({
           abtestPreviewPanel: renderAbTestPreview(),
           activeWorkbenchTab,
           artifactNavigationPanel: renderArtifactNavigationPanel(),
-          artifactPanel: renderArtifactPanel(),
+          artifactPanel,
           isArtifactPanelOpen:
             isArtifactPanelOpen && Boolean(activeArtifactItem || caseArtifact),
           activeStepText,
@@ -6707,9 +6539,52 @@ export function SelfEvolutionPageController({
           onSend: (command) => void onSend(command),
           onConfirmIntentCheckpoint: () => void onConfirmIntentCheckpoint(),
           onContinueCheckpoint: () => void onContinueCheckpoint(),
+          canContinueDatasetStage,
+          datasetStageStatuses,
+          datasetSuggestedTab,
+          onDatasetStepsSnapshot: (response) => {
+            if (!routeThreadId) return;
+            const stepList = normalizeThreadStepListPayload(
+              response as ThreadRestorePayload,
+            );
+            syncThreadStepListState(routeThreadId, stepList);
+          },
           onOpenArtifact: openWorkflowArtifact,
           onOpenObservation: openObservationPage,
           onOpenCaseArtifact: openCaseArtifact,
+          onDatasetWriteApplied: () => {
+            if (!routeThreadId) {
+              return;
+            }
+            // Apply starts a new Dataset round — refresh /steps and follow the
+            // running step so top status / continue stay aligned through settle.
+            void (async () => {
+              const waited = await waitForSubscribableThreadStep(() =>
+                refreshThreadStepList(routeThreadId),
+              );
+              if (!waited || !ownsThreadStepList(routeThreadId)) {
+                return;
+              }
+              const running = waited.steps.find(
+                (step) => step.active || isThreadStepRunning(step),
+              );
+              if (running?.stepId) {
+                await subscribeNextStepWithEventsFirst(
+                  routeThreadId,
+                  running.stepId,
+                  activeSessionId,
+                );
+                return;
+              }
+              await restoreLatestThreadStep(
+                routeThreadId,
+                activeSessionId,
+                undefined,
+                waited,
+              );
+            })();
+          },
+          datasetExecutionResumeToken,
           onWorkbenchTabChange: handleWorkbenchTabChange,
           onCloseArtifactPanel: closeArtifactPanel,
           canViewStageArtifact,

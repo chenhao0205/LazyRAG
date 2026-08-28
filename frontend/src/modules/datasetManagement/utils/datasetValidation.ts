@@ -4,6 +4,7 @@ export type RequiredDatasetItemMessages = {
   question: string;
   question_type: string;
   ground_truth: string;
+  grading_guidance: string;
 };
 
 export function splitListField(value?: string | string[]) {
@@ -43,7 +44,10 @@ export function normalizeItemFormValues(values: DatasetItemFormValues) {
     question: `${values.question || ""}`.trim(),
     question_type: `${values.question_type || ""}`.trim(),
     ground_truth: `${values.ground_truth || ""}`.trim(),
+    difficulty: `${values.difficulty || ""}`.trim(),
+    grading_guidance: `${values.grading_guidance || ""}`.trim(),
     key_points: `${values.key_points || ""}`.trim(),
+    forbidden_claims: `${values.forbidden_claims || ""}`.trim(),
     reference_context: `${values.reference_context || ""}`.trim(),
     reference_doc: `${values.reference_doc || ""}`.trim(),
     reference_doc_ids: splitListField(values.reference_doc_ids),
@@ -66,6 +70,9 @@ export function validateRequiredDatasetItem(
   }
   if (!`${values.ground_truth || ""}`.trim()) {
     errors.push(messages.ground_truth);
+  }
+  if (!`${values.grading_guidance || ""}`.trim()) {
+    errors.push(messages.grading_guidance);
   }
   return errors;
 }

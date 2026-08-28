@@ -1,7 +1,7 @@
 export type EvolutionMode = "auto" | "interactive";
 export type ExtraEvalStrategy = "skip" | "generate";
 export type WorkflowStepId = "dataset" | "px-report" | "analysis" | "code-optimize" | "ab-test";
-export type StepStatus = "running" | "pending" | "done" | "paused" | "canceled" | "failed";
+export type StepStatus = "running" | "pending" | "waiting" | "done" | "paused" | "canceled" | "failed" | "partial";
 export type ChatRole = "user" | "assistant";
 export type ThreadEventStage = "dataset" | "eval" | "analysis" | "repair" | "abtest";
 
@@ -149,7 +149,7 @@ export type HistorySessionEntry = {
 };
 
 export type NewSessionDraft = {
-  selectedKb?: string;
+  selectedKbs?: string[];
   selectedEvalSet?: string;
   extraEvalStrategy?: ExtraEvalStrategy;
   mode?: EvolutionMode;

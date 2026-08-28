@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,10 +22,11 @@ import (
 )
 
 const (
-	defaultThreadPageSize        = 20
-	maxThreadPageSize            = 100
-	threadModelNotConfiguredCode = 2001300
-	evoModelNotAllowedCode       = 2001301
+	defaultThreadPageSize         = 20
+	maxThreadPageSize             = 100
+	defaultEvalSetSupplementCases = 20
+	threadModelNotConfiguredCode  = 2001300
+	evoModelNotAllowedCode        = 2001301
 )
 
 type threadModelConfigIssue struct {
@@ -157,21 +159,152 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 	if algorithmID == "" {
 		algorithmID = "default"
 	}
+	// Evo now has one interaction mode; whether it advances automatically is a
+	// separate configuration flag. The Core-facing API still uses "auto" for
+	// that user choice, so translate it at this boundary.
+	automatic := firstNonEmptyScalar(payload["mode"], "auto") == "auto"
 
 	return map[string]any{
-		"mode":       firstNonEmptyScalar(payload["mode"], "auto"),
+		"mode":       "interactive",
+		"automatic":  automatic,
 		"title":      firstNonEmptyScalar(payload["title"]),
 		"llm_config": payload["llm_config"],
 		"inputs": map[string]any{
-			"kb_id":                 stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
-			"csv_data":              csvDataListFromAny(inputs["csv_data"]),
-			"router_chat_url":       routerChatURL,
-			"router_admin_url":      routerAdminURL,
-			"algorithm_id":          algorithmID,
-			"num_case":              numCase,
-			"case_deadline_seconds": deadlineSeconds,
+			"kb_id":                        stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
+			"knowledge_base_names":         stringMapFromAny(inputs["knowledge_base_names"]),
+			"csv_data":                     csvDataListFromAny(inputs["csv_data"]),
+			"imported_cases":               mapListFromAny(inputs["imported_cases"]),
+			"supplement_existing_eval_set": inputs["supplement_existing_eval_set"] == true,
+			"router_chat_url":              routerChatURL,
+			"router_admin_url":             routerAdminURL,
+			"algorithm_id":                 algorithmID,
+			"num_case":                     numCase,
+			"case_deadline_seconds":        deadlineSeconds,
 		},
 	}
+}
+
+func mapListFromAny(value any) []map[string]any {
+	if typed, ok := value.([]map[string]any); ok {
+		return typed
+	}
+	raw, ok := value.([]any)
+	if !ok {
+		return []map[string]any{}
+	}
+	result := make([]map[string]any, 0, len(raw))
+	for _, value := range raw {
+		if row, ok := value.(map[string]any); ok {
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+func attachThreadCreateEvalSetCases(ctx context.Context, db *gorm.DB, userID string, payload map[string]any) error {
+	inputs, _ := payload["inputs"].(map[string]any)
+	if db == nil || inputs == nil {
+		return nil
+	}
+	evalSetID := strings.TrimSpace(agentScalarString(inputs["eval_set_id"]))
+	if evalSetID == "" {
+		return nil
+	}
+	var evalSet orm.EvalSet
+	if err := db.WithContext(ctx).Select("id", "shard_id").Where("id = ? AND owner_id = ? AND status = ?", evalSetID, strings.TrimSpace(userID), "active").First(&evalSet).Error; err != nil {
+		return fmt.Errorf("load selected eval set: %w", err)
+	}
+	var items []orm.EvalSetItem
+	if err := db.WithContext(ctx).
+		Where("shard_id = ? AND eval_set_id = ?", evalSet.ShardID, evalSet.ID).
+		Order("created_at ASC, id ASC").Find(&items).Error; err != nil {
+		return fmt.Errorf("load selected eval set items: %w", err)
+	}
+	cases := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		cases = append(cases, map[string]any{
+			"case_id": item.CaseID, "question": item.Question, "question_type": item.QuestionType,
+			"difficulty": item.Difficulty, "ground_truth": item.GroundTruth,
+			"grading_guidance": item.GradingGuidance, "key_points": item.KeyPoints,
+			"forbidden_claims": item.ForbiddenClaims, "reference_context": item.ReferenceContext,
+			"reference_doc": item.ReferenceDoc, "reference_doc_ids": item.ReferenceDocIDs,
+			"reference_chunk_ids": item.ReferenceChunkIDs, "generate_reason": item.GenerateReason,
+			"is_deleted": item.IsDeleted,
+		})
+	}
+	if len(cases) == 0 {
+		return errors.New("selected eval set has no cases")
+	}
+	inputs["imported_cases"] = cases
+	activeCount := 0
+	for _, item := range items {
+		if !item.IsDeleted {
+			activeCount++
+		}
+	}
+	if activeCount == 0 {
+		return errors.New("selected eval set has no active cases")
+	}
+	supplement := strings.EqualFold(strings.TrimSpace(agentScalarString(inputs["extra_eval_strategy"])), "generate")
+	inputs["supplement_existing_eval_set"] = supplement
+	inputs["num_cases"] = activeCount
+	if supplement {
+		inputs["num_cases"] = activeCount + defaultEvalSetSupplementCases
+	}
+	return nil
+}
+
+func attachThreadCreateKnowledgeBaseNames(ctx context.Context, db *gorm.DB, payload map[string]any) {
+	inputs, _ := payload["inputs"].(map[string]any)
+	if db == nil || inputs == nil {
+		return
+	}
+	delete(inputs, "knowledge_base_names")
+	kbIDs := stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"]))
+	if len(kbIDs) == 0 {
+		return
+	}
+	var datasets []orm.Dataset
+	if err := db.WithContext(ctx).Where("(id IN ? OR kb_id IN ?) AND deleted_at IS NULL", kbIDs, kbIDs).Find(&datasets).Error; err != nil {
+		return
+	}
+	namesByID := make(map[string]string, len(datasets)*2)
+	for _, dataset := range datasets {
+		if name := strings.TrimSpace(dataset.DisplayName); name != "" {
+			namesByID[dataset.ID] = name
+			namesByID[dataset.KbID] = name
+		}
+	}
+	names := make(map[string]string, len(kbIDs))
+	for _, kbID := range kbIDs {
+		if name := namesByID[kbID]; name != "" {
+			names[kbID] = name
+		}
+	}
+	if len(names) > 0 {
+		inputs["knowledge_base_names"] = names
+	}
+}
+
+func stringMapFromAny(value any) map[string]string {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		if values, typed := value.(map[string]string); typed {
+			raw = make(map[string]any, len(values))
+			for key, name := range values {
+				raw[key] = name
+			}
+		} else {
+			return map[string]string{}
+		}
+	}
+	result := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if normalizedKey, normalizedValue := strings.TrimSpace(key), strings.TrimSpace(agentScalarString(value)); normalizedKey != "" && normalizedValue != "" {
+			result[normalizedKey] = normalizedValue
+		}
+	}
+	return result
 }
 
 func cloneJSONMap(payload map[string]any) map[string]any {

@@ -18,7 +18,10 @@ class StrictModel(BaseModel):
 
 class ThreadInputs(StrictModel):
     kb_id: list[str] = Field(default_factory=list)
+    knowledge_base_names: dict[str, str] = Field(default_factory=dict)
     csv_data: list[dict[str, str]] = Field(default_factory=list)
+    imported_cases: list[dict[str, Any]] = Field(default_factory=list)
+    supplement_existing_eval_set: bool = False
     router_chat_url: str = Field(min_length=1)
     router_admin_url: str = Field(min_length=1)
     algorithm_id: str = Field(min_length=1)
@@ -28,6 +31,11 @@ class ThreadInputs(StrictModel):
     @model_validator(mode='after')
     def validate_sources(self) -> Self:
         self.kb_id = [item.strip() for item in self.kb_id if item.strip()]
+        self.knowledge_base_names = {
+            key.strip(): value.strip()
+            for key, value in self.knowledge_base_names.items()
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip()
+        }
         rows: list[dict[str, str]] = []
         for row in self.csv_data:
             if len(row) != 1:
@@ -119,14 +127,80 @@ class ArtifactUpdateBody(StrictModel):
         return self
 
 
+class DatasetApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+
+class TopicApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: list[dict[str, Any]] = Field(min_length=1)
+
+
+class GenerationPlanApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    distribution: dict[str, dict[str, int]]
+
+    @model_validator(mode='after')
+    def validate_distribution(self) -> Self:
+        expected_types = {'precision', 'reasoning'}
+        expected_difficulties = {'easy', 'medium', 'hard'}
+        if set(self.distribution) != expected_types:
+            raise ValueError('distribution must contain precision and reasoning')
+        for question_type, counts in self.distribution.items():
+            if set(counts) != expected_difficulties:
+                raise ValueError(f'distribution.{question_type} must contain easy, medium and hard')
+            if any(isinstance(count, bool) or count < 0 for count in counts.values()):
+                raise ValueError('distribution values must be non-negative integers')
+        return self
+
+
+class CasePatchBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+    @model_validator(mode='after')
+    def validate_changes(self) -> Self:
+        if not self.changes or set(self.changes) - {'plan', 'generate', 'grading'}:
+            raise ValueError('changes must contain plan, generate or grading')
+        return self
+
+
+_QAPLAN_LANES = frozenset({
+    'precision_easy', 'precision_medium', 'precision_hard',
+    'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
+})
+
+
 class ConfigurationUpdateBody(StrictModel):
     request_id: str = Field(min_length=1, max_length=160)
     target: Literal[
-        'run_config', 'source_config', 'target_config', 'eval_policy',
+        'run_config', 'source_config', 'qaplan_plan_params', 'target_config', 'eval_policy',
         'repair_policy', 'candidate_config',
     ]
     base_version: int = Field(ge=1)
     value: dict[str, Any]
+
+    @model_validator(mode='after')
+    def validate_qaplan_plan_params(self) -> Self:
+        if self.target != 'qaplan_plan_params':
+            return self
+        if 'lane_ratios' in self.value:
+            raise ValueError('qaplan_plan_params uses lane_case_counts, not lane_ratios')
+        if set(self.value) - {'lane_case_counts'}:
+            raise ValueError('qaplan_plan_params only supports lane_case_counts')
+        counts = self.value.get('lane_case_counts')
+        if counts is None:
+            return self
+        if not isinstance(counts, dict) or set(counts) != _QAPLAN_LANES:
+            raise ValueError('lane_case_counts must contain exactly the six lanes')
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts.values()):
+            raise ValueError('lane_case_counts values must be non-negative integers')
+        return self
 
 
 class CaseSeed(StrictModel):
@@ -199,8 +273,8 @@ class AbStrategyBody(StrictModel):
 
 __all__ = [
     'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'ArtifactUpdateBody', 'ArtifactValue',
-    'AutomaticUpdateBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
-    'ConfigurationUpdateBody', 'ControlRequest', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
+    'AutomaticUpdateBody', 'CasePatchBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
+    'ConfigurationUpdateBody', 'ControlRequest', 'DatasetApplyBody', 'ExternalResultBody', 'GenerationPlanApplyBody', 'MessageBody', 'RegisterAlgorithmBody',
     'RetryRequest',
-    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs',
+    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs', 'TopicApplyBody',
 ]

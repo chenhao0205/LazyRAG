@@ -29,10 +29,9 @@ def generate(
     ctx: Any,
     inputs: Mapping[str, object],
     llm_complete: Callable[[str], str] | None = None,
-    *,
-    partition_key: str | None = None,
 ) -> dict[str, object]:
-    case_id = _text(partition_key or getattr(ctx, 'partition_key', None), 'case output partition')
+    output_key = getattr(ctx, 'output_key_by_name', {}).get('case')
+    case_id = _text(getattr(output_key, 'partition', None), 'case output partition')
     preparation = _mapping(inputs.get('qaplan_spec'), 'qaplan_spec')
     if _text(preparation.get('id'), 'qaplan_spec.id') != case_id:
         raise ValueError('qaplan_spec.id must match case output partition')
@@ -42,22 +41,21 @@ def generate(
         if _text(case.get('id'), 'imported_case.id') != case_id:
             raise ValueError('imported_case.id must match case output partition')
         _choice(case.get('question_type'), ('precision', 'reasoning'), 'imported_case.question_type')
-        _choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'imported_case.difficulty')
+        _optional_choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'imported_case.difficulty')
         _text(case.get('question'), 'imported_case.question')
         _text(case.get('answer'), 'imported_case.answer')
         _text(case.get('grading_guidance'), 'imported_case.grading_guidance')
-        _string_list(case.get('reference_chunk_ids'), 'imported_case.reference_chunk_ids')
-        source_preparation = dict(_mapping(case.get('source_preparation'), 'imported_case.source_preparation'))
-        source_preparation['dataset_mode'] = 'imported'
-        return {'case': {**dict(case), 'source_preparation': source_preparation}}
+        _optional_string_list(case.get('reference_chunk_ids'), 'imported_case.reference_chunk_ids')
+        return {'case': dict(case)}
 
     question_type = _choice(preparation.get('question_type'), ('precision', 'reasoning'), 'question_type')
     difficulty = _choice(preparation.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
     instruction = _text(preparation.get('instruction'), 'instruction')
-    topic = _text(preparation.get('topic'), 'topic')
+    topic_value = _mapping(preparation.get('topic'), 'topic')
+    _text(topic_value.get('topic_id'), 'topic.topic_id')
+    topic = _text(topic_value.get('name'), 'topic.name')
     references = _references(preparation.get('references'), difficulty)
-    source = _mapping(preparation.get('source'), 'qaplan_spec.source')
-    qaplan = _mapping(preparation.get('qaplan'), 'qaplan_spec.qaplan')
+    _mapping(preparation.get('qaplan'), 'qaplan_spec.qaplan')
 
     run_config = _mapping(inputs.get('run_config'), 'run_config')
     llm_config = _mapping(run_config.get('llm_config'), 'run_config.llm_config')
@@ -76,14 +74,11 @@ def generate(
         'question': generated['question'],
         'answer': generated['answer'],
         'grading_guidance': generated['grading_guidance'],
+        'references': references,
         'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in references],
         'reference_chunk_ids': [item['chunk_id'] for item in references],
         'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in references)),
-        'source_preparation': {
-            'dataset_mode': 'generated',
-            'kb_ids': _string_list(source.get('kb_ids'), 'qaplan_spec.source.kb_ids'),
-            'qaplan': dict(qaplan),
-        },
+        'source_preparation': {'kb_ids': list(dict.fromkeys(item['kb_id'] for item in references))},
     }}
 
 
@@ -96,6 +91,13 @@ def generate_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, objec
     for index, raw in enumerate(values, 1):
         case = _mapping(raw, f'cases[{index}]')
         reference_chunk_ids = _string_list(case.get('reference_chunk_ids'), 'reference_chunk_ids')
+        raw_references = case.get('references')
+        if raw_references is not None:
+            if not isinstance(raw_references, list) or [
+                _text(_mapping(value, 'references[]').get('chunk_id'), 'references[].chunk_id')
+                for value in raw_references
+            ] != reference_chunk_ids:
+                raise ValueError('references must match reference_chunk_ids')
         cases.append({
             'id': _text(case.get('id'), 'id'),
             'question_type': _choice(case.get('question_type'), ('precision', 'reasoning'), 'question_type'),
@@ -139,6 +141,7 @@ def _references(value: object, difficulty: str) -> list[dict[str, str]]:
     for index, raw in enumerate(value):
         item = _mapping(raw, f'references[{index}]')
         references.append({
+            'kb_id': _text(item.get('kb_id'), 'reference kb_id'),
             'chunk_id': _text(item.get('chunk_id'), 'reference chunk_id'),
             'doc_id': _text(item.get('doc_id'), 'reference doc_id'),
             'text': _text(item.get('text'), 'reference text'),
@@ -184,6 +187,12 @@ def _string_list(value: object, name: str) -> list[str]:
     return [_text(item, name) for item in value]
 
 
+def _optional_string_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f'{name} must be a list')
+    return [_text(item, name) for item in value]
+
+
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f'{name} must be a non-empty string')
@@ -195,6 +204,12 @@ def _choice(value: object, choices: tuple[str, ...], name: str) -> str:
     if item not in choices:
         raise ValueError(f'{name} is invalid')
     return item
+
+
+def _optional_choice(value: object, choices: tuple[str, ...], name: str) -> str:
+    if value in (None, ''):
+        return ''
+    return _choice(value, choices, name)
 
 
 def _non_negative_int(value: object, name: str) -> int:

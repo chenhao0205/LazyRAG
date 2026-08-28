@@ -10,6 +10,9 @@ type EvalSetItemResponse struct {
 	Question                      string    `json:"question"`
 	GroundTruth                   string    `json:"ground_truth"`
 	QuestionType                  string    `json:"question_type"`
+	Difficulty                    string    `json:"difficulty"`
+	GradingGuidance               string    `json:"grading_guidance"`
+	ForbiddenClaims               string    `json:"forbidden_claims"`
 	GenerateReason                string    `json:"generate_reason"`
 	KeyPoints                     string    `json:"key_points"`
 	ReferenceChunkIDs             string    `json:"reference_chunk_ids"`
@@ -43,6 +46,9 @@ type CreateEvalSetItemRequest struct {
 	Question          string `json:"question"`
 	GroundTruth       string `json:"ground_truth"`
 	QuestionType      string `json:"question_type"`
+	Difficulty        string `json:"difficulty"`
+	GradingGuidance   string `json:"grading_guidance"`
+	ForbiddenClaims   string `json:"forbidden_claims"`
 	GenerateReason    string `json:"generate_reason"`
 	KeyPoints         string `json:"key_points"`
 	ReferenceChunkIDs string `json:"reference_chunk_ids"`
@@ -57,6 +63,9 @@ type UpdateEvalSetItemRequest struct {
 	Question          *string `json:"question"`
 	GroundTruth       *string `json:"ground_truth"`
 	QuestionType      *string `json:"question_type"`
+	Difficulty        *string `json:"difficulty"`
+	GradingGuidance   *string `json:"grading_guidance"`
+	ForbiddenClaims   *string `json:"forbidden_claims"`
 	GenerateReason    *string `json:"generate_reason"`
 	KeyPoints         *string `json:"key_points"`
 	ReferenceChunkIDs *string `json:"reference_chunk_ids"`

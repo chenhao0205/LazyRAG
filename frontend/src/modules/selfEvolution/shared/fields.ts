@@ -272,8 +272,12 @@ export function getEventFlowKind(payload: Record<string, unknown> | undefined) {
 
 export function getEventCaseId(payload: Record<string, unknown> | undefined) {
   const data = getEventPayloadData(payload);
-  const caseRecord = getNestedRecordField(payload, ["case"]) || getNestedRecordField(data, ["case"]);
-  return getStringField(data, ["case_id"]) || getStringField(caseRecord, ["id"]) || getStringField(payload, ["case_id"]);
+  const partition =
+    getNestedRecordField(payload, ["partition"]) ||
+    getNestedRecordField(data, ["partition"]) ||
+    getNestedRecordField(payload, ["case"]) ||
+    getNestedRecordField(data, ["case"]);
+  return getStringField(data, ["case_id"]) || getStringField(partition, ["id"]) || getStringField(payload, ["case_id"]);
 }
 
 export function getEventCaseProgress(payload: Record<string, unknown> | undefined): { current: number; total?: number } | undefined {

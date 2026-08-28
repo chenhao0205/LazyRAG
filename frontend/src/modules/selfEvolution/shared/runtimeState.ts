@@ -2,7 +2,8 @@ import { type CheckpointWaitPrompt, type EvolutionMode, type NormalizedThreadEve
 import { stageStepMap, stepStageMap, workflowStepOrder } from "./constants";
 import { getWorkflowStepDefinitions, t } from "./i18n";
 import { getLastItem, getOperationRunId, getStringField } from "./fields";
-import { dedupeNormalizedEvents, getFlowStatusFromPayload, isTerminalThreadEvent, resolveTerminalStepStatusFromFlowStatus, toThreadEventStage } from "./threadEvents";
+import { dedupeNormalizedEvents, getFlowStatusFromPayload, isTerminalThreadEvent, resolveTerminalStepStatusFromFlowStatus } from "./threadEvents";
+import { toThreadEventStage } from "./datasetWorkflowStatus";
 import { getCompletedEvalProgressPhases, getCompletedProgressSnapshot, getEvalOverallProgressSnapshot, getRuntimeProgressStatusLabel, isIntentSidecarOperation, isStepFinishEvent, mergeProgressSnapshot, updateEvalProgressPhases, updateProgressStatusText } from "./progress";
 
 export function createInitialWorkflowRuntimeState(): WorkflowRuntimeState {
@@ -73,6 +74,9 @@ export function getStepStatusLabel(status: StepStatus) {
   if (status === "running") {
     return t("selfEvolutionRun.statusRunning");
   }
+  if (status === "waiting") {
+    return t("selfEvolutionRun.statusWaitingNext");
+  }
   if (status === "done") {
     return t("selfEvolutionRun.statusDone");
   }
@@ -84,6 +88,9 @@ export function getStepStatusLabel(status: StepStatus) {
   }
   if (status === "failed") {
     return t("selfEvolutionRun.statusFailed");
+  }
+  if (status === "partial") {
+    return t("selfEvolutionRun.statusPartial");
   }
   return t("selfEvolutionRun.statusPending");
 }
@@ -376,7 +383,7 @@ export function applyThreadStepStatusToWorkflowSteps(
   return steps.map((step) => {
     const stage = stepStageMap[step.id];
     let overrideStatus = stage ? threadStepStatusByStage[stage] : undefined;
-    if (checkpoint?.completedStage === stage) {
+    if (checkpoint?.completedStage === stage && overrideStatus !== "partial") {
       overrideStatus = "done";
     } else if (
       overrideStatus === "running" &&
