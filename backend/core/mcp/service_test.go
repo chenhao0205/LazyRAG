@@ -12,18 +12,103 @@ import (
 
 	"lazymind/core/common/orm"
 	appLog "lazymind/core/log"
+	"lazymind/core/settings"
 )
 
 func newTestDB(t *testing.T) *orm.DB {
 	t.Helper()
-	db, err := orm.Connect(orm.DriverSQLite, t.TempDir()+"/mcp.db")
-	if err != nil {
-		t.Fatalf("connect db: %v", err)
-	}
-	if err := db.AutoMigrate(&orm.MCPServer{}, &orm.MCPServerTool{}); err != nil {
-		t.Fatalf("auto migrate: %v", err)
-	}
+	db := orm.MigrateTestDB(t, &orm.MCPServer{}, &orm.MCPServerTool{}, &orm.UserUIPreferences{})
 	return db
+}
+
+func TestLoadRuntimeConfigHonorsMCPMasterSwitchWithoutHidingSharedServices(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now().UTC()
+	servers := []orm.MCPServer{
+		{
+			ID: "msp-master-switch", Name: "Verified", Transport: "http", URL: "https://mcp.example.com",
+			HeadersJSON: []byte("{}"), AllowedToolsJSON: []byte(`["search"]`), Enabled: true, IsVerified: true, Share: true,
+			BaseModel: orm.BaseModel{CreateUserID: "u1", CreatedAt: now, UpdatedAt: now},
+		},
+		{
+			ID: "shared-server", Name: "Shared", Transport: "http", URL: "https://shared.example.com",
+			HeadersJSON: []byte("{}"), AllowedToolsJSON: []byte(`["lookup"]`), Enabled: true, IsVerified: true, Share: true,
+			BaseModel: orm.BaseModel{CreateUserID: "u2", CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	if err := db.Create(&servers).Error; err != nil {
+		t.Fatalf("seed mcp server: %v", err)
+	}
+	if err := db.Model(&orm.UserUIPreferences{}).Create(map[string]any{"user_id": "u1", "task_center_enabled": true, "skills_enabled": true, "mcp_enabled": false, "created_at": now, "updated_at": now}).Error; err != nil {
+		t.Fatalf("seed preferences: %v", err)
+	}
+	runtime, err := LoadRuntimeConfig(context.Background(), db.DB, "u1")
+	if err != nil {
+		t.Fatalf("load paused runtime: %v", err)
+	}
+	if len(runtime) != 1 || runtime[0].ID != "shared-server" {
+		t.Fatalf("expected only the shared MCP runtime when the owned-service switch is off, got %#v", runtime)
+	}
+	if err := db.Model(&orm.UserUIPreferences{}).Where("user_id = ?", "u1").Update("mcp_enabled", true).Error; err != nil {
+		t.Fatalf("enable MCP master: %v", err)
+	}
+	runtime, err = LoadRuntimeConfig(context.Background(), db.DB, "u1")
+	if err != nil || len(runtime) != 2 {
+		t.Fatalf("expected enabled runtime after restoring master switch, got %#v err=%v", runtime, err)
+	}
+}
+
+func TestLoadRuntimeConfigCanonicalizesLegacyDiscoveredToolIDs(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now().UTC()
+	server := orm.MCPServer{
+		ID:               "msp-legacy-tool-grants",
+		Name:             "Legacy tool grants",
+		Transport:        "http",
+		URL:              "https://mcp.example.com",
+		HeadersJSON:      json.RawMessage(`{}`),
+		AllowedToolsJSON: json.RawMessage(`["mst_search","direct-name"]`),
+		Enabled:          true,
+		IsVerified:       true,
+		BaseModel: orm.BaseModel{
+			CreateUserID:   "u1",
+			CreateUserName: "User 1",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	}
+	if err := db.Create(&server).Error; err != nil {
+		t.Fatalf("seed mcp server: %v", err)
+	}
+	tool := orm.MCPServerTool{
+		ID:               "mst_search",
+		MCPServerID:      server.ID,
+		ToolName:         "search",
+		InputSchemaJSON:  json.RawMessage(`{}`),
+		LastDiscoveredAt: now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := db.Create(&tool).Error; err != nil {
+		t.Fatalf("seed discovered tool: %v", err)
+	}
+
+	runtime, err := LoadRuntimeConfig(context.Background(), db.DB, "u1")
+	if err != nil {
+		t.Fatalf("load runtime config: %v", err)
+	}
+	if len(runtime) != 1 {
+		t.Fatalf("runtime configs = %#v, want one", runtime)
+	}
+	want := []string{"direct-name", "search"}
+	if len(runtime[0].AllowedTools) != len(want) {
+		t.Fatalf("runtime allowed tools = %#v, want %#v", runtime[0].AllowedTools, want)
+	}
+	for index := range want {
+		if runtime[0].AllowedTools[index] != want[index] {
+			t.Fatalf("runtime allowed tools = %#v, want %#v", runtime[0].AllowedTools, want)
+		}
+	}
 }
 
 func TestDoRPCNon2xxHidesResponseBodyFromError(t *testing.T) {
@@ -306,6 +391,150 @@ func TestUpdateServerRequiresVerificationBeforeEnabling(t *testing.T) {
 	}
 	if !updated.Enabled {
 		t.Fatalf("verified server should be enabled")
+	}
+}
+
+func TestUpdateServerToolsCanonicalizesDiscoveredToolIDs(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now().UTC()
+	server := orm.MCPServer{
+		ID:               "msp-tool-permissions",
+		Name:             "Tool permissions",
+		Transport:        "http",
+		URL:              "https://mcp.example.com",
+		HeadersJSON:      json.RawMessage(`{}`),
+		AllowedToolsJSON: json.RawMessage(`[]`),
+		Enabled:          true,
+		IsVerified:       true,
+		BaseModel: orm.BaseModel{
+			CreateUserID:   "u1",
+			CreateUserName: "User 1",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	}
+	if err := db.Create(&server).Error; err != nil {
+		t.Fatalf("seed mcp server: %v", err)
+	}
+	tools := []orm.MCPServerTool{
+		{ID: "mst_search", MCPServerID: server.ID, ToolName: "search", InputSchemaJSON: json.RawMessage(`{}`), LastDiscoveredAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: "mst_fetch", MCPServerID: server.ID, ToolName: "fetch", InputSchemaJSON: json.RawMessage(`{}`), LastDiscoveredAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: "mst_other", MCPServerID: "other-server", ToolName: "other", InputSchemaJSON: json.RawMessage(`{}`), LastDiscoveredAt: now, CreatedAt: now, UpdatedAt: now},
+	}
+	if err := db.Create(&tools).Error; err != nil {
+		t.Fatalf("seed discovered tools: %v", err)
+	}
+
+	updated, err := UpdateServerTools(context.Background(), db.DB, "u1", server.ID, UpdateToolsRequest{
+		AllowedTools: []string{"mst_search", "search", "fetch", "legacy-direct-name", "mst_search", "mst_other"},
+	})
+	if err != nil {
+		t.Fatalf("update server tools: %v", err)
+	}
+	want := []string{"fetch", "legacy-direct-name", "mst_other", "search"}
+	if len(updated.AllowedTools) != len(want) {
+		t.Fatalf("allowed tools = %#v, want %#v", updated.AllowedTools, want)
+	}
+	for index := range want {
+		if updated.AllowedTools[index] != want[index] {
+			t.Fatalf("allowed tools = %#v, want %#v", updated.AllowedTools, want)
+		}
+	}
+
+	var saved orm.MCPServer
+	if err := db.Take(&saved, "id = ?", server.ID).Error; err != nil {
+		t.Fatalf("load saved mcp server: %v", err)
+	}
+	got := parseStringJSON(saved.AllowedToolsJSON)
+	if len(got) != len(want) {
+		t.Fatalf("persisted allowed tools = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("persisted allowed tools = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestSetOwnedServersEnabledUpdatesOnlyOwnedVerifiedServers(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now().UTC()
+	rows := []orm.MCPServer{
+		{
+			ID: "owned-verified", Name: "Owned verified", Transport: "http", URL: "https://owned.example.com/mcp",
+			HeadersJSON: []byte("{}"), AllowedToolsJSON: []byte(`["search","fetch"]`), Enabled: false, IsVerified: true,
+			BaseModel: orm.BaseModel{CreateUserID: "u1", CreatedAt: now, UpdatedAt: now},
+		},
+		{
+			ID: "owned-unverified", Name: "Owned unverified", Transport: "http", URL: "https://unverified.example.com/mcp",
+			HeadersJSON: []byte("{}"), AllowedToolsJSON: []byte(`["unsafe"]`), Enabled: false, IsVerified: false,
+			BaseModel: orm.BaseModel{CreateUserID: "u1", CreatedAt: now, UpdatedAt: now},
+		},
+		{
+			ID: "shared-other-user", Name: "Shared", Transport: "http", URL: "https://shared.example.com/mcp",
+			HeadersJSON: []byte("{}"), AllowedToolsJSON: []byte(`["shared_lookup"]`), Enabled: false, IsVerified: true, Share: true,
+			BaseModel: orm.BaseModel{CreateUserID: "u2", CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed mcp servers: %v", err)
+	}
+	if err := db.Model(&orm.UserUIPreferences{}).Create(map[string]any{
+		"user_id": "u1", "task_center_enabled": true, "skills_enabled": true,
+		"workflows_enabled": true, "mcp_enabled": false, "created_at": now, "updated_at": now,
+	}).Error; err != nil {
+		t.Fatalf("seed preferences: %v", err)
+	}
+
+	result, err := SetOwnedServersEnabled(context.Background(), db.DB, "u1", true)
+	if err != nil {
+		t.Fatalf("enable owned MCP servers: %v", err)
+	}
+	if result.TotalCount != 2 || result.UpdatedCount != 1 || result.SkippedUnverifiedCount != 1 || !result.Enabled {
+		t.Fatalf("unexpected enable result: %#v", result)
+	}
+
+	var stored []orm.MCPServer
+	if err := db.Order("id ASC").Find(&stored).Error; err != nil {
+		t.Fatalf("load mcp servers: %v", err)
+	}
+	states := map[string]bool{}
+	allowedTools := map[string]string{}
+	for _, row := range stored {
+		states[row.ID] = row.Enabled
+		allowedTools[row.ID] = string(row.AllowedToolsJSON)
+	}
+	if !states["owned-verified"] || states["owned-unverified"] || states["shared-other-user"] {
+		t.Fatalf("unexpected enabled states: %#v", states)
+	}
+	if allowedTools["owned-verified"] != `["search","fetch"]` ||
+		allowedTools["owned-unverified"] != `["unsafe"]` ||
+		allowedTools["shared-other-user"] != `["shared_lookup"]` {
+		t.Fatalf("bulk MCP updates must preserve tool grants: %#v", allowedTools)
+	}
+
+	controls, err := settings.LoadFeatureControls(context.Background(), db.DB, "u1")
+	if err != nil || !controls.MCPEnabled {
+		t.Fatalf("expected MCP feature control enabled, controls=%#v err=%v", controls, err)
+	}
+
+	result, err = SetOwnedServersEnabled(context.Background(), db.DB, "u1", false)
+	if err != nil {
+		t.Fatalf("disable owned MCP servers: %v", err)
+	}
+	if result.TotalCount != 2 || result.UpdatedCount != 2 || result.SkippedUnverifiedCount != 0 || result.Enabled {
+		t.Fatalf("unexpected disable result: %#v", result)
+	}
+	var disabled orm.MCPServer
+	if err := db.First(&disabled, "id = ?", "owned-verified").Error; err != nil {
+		t.Fatalf("load disabled server: %v", err)
+	}
+	if disabled.Enabled {
+		t.Fatal("owned verified server should be disabled")
+	}
+	controls, err = settings.LoadFeatureControls(context.Background(), db.DB, "u1")
+	if err != nil || controls.MCPEnabled {
+		t.Fatalf("expected MCP feature control disabled, controls=%#v err=%v", controls, err)
 	}
 }
 

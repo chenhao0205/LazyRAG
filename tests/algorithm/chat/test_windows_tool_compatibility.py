@@ -2,8 +2,11 @@ import os
 import ntpath
 from pathlib import Path
 
+import pytest
+
+from lazyllm.tools.agent import ToolExecutionError
 from lazyllm.tools.fs import client as fs_client
-from lazymind.chat.engine.tools import chat_artifact
+from lazymind.chat.engine.tools.local_file import workspace as chat_artifact
 
 
 def test_file_uri_with_windows_drive_becomes_native_path(monkeypatch):
@@ -33,9 +36,8 @@ def test_chat_file_publish_supports_long_filename(tmp_path, monkeypatch):
 
     result = chat_artifact.save_chat_artifact(filename, filename, content_type='file')
 
-    assert result['success'] is True
     published_dir = chat_artifact._published_file_directory(
-        'windows-user', 'windows-conversation', result['result']['artifact_id'],
+        'windows-user', 'windows-conversation', result['artifact_id'],
     )
     assert (Path(published_dir) / filename).read_text(encoding='utf-8') == 'requirements'
     assert not [name for name in os.listdir(published_dir) if name.endswith('.tmp')]
@@ -56,6 +58,29 @@ def test_published_artifact_path_fits_legacy_windows_limit():
     assert len(generated) < 260
 
 
+def test_chat_workspace_reuses_legacy_hash_until_current_exists(tmp_path, monkeypatch):
+    monkeypatch.setitem(chat_artifact._cfg._impl, 'agentic_workspace', str(tmp_path))
+    legacy = (
+        tmp_path
+        / 'chat-artifacts'
+        / chat_artifact._legacy_scope_hash('user-1')
+        / chat_artifact._legacy_scope_hash('conversation-1')
+    )
+    legacy.mkdir(parents=True)
+
+    assert Path(chat_artifact.chat_agent_workspace('user-1', 'conversation-1')) == legacy
+
+    current = (
+        tmp_path
+        / 'chat-artifacts'
+        / chat_artifact._scope_hash('user-1')
+        / chat_artifact._scope_hash('conversation-1')
+    )
+    current.mkdir(parents=True)
+
+    assert Path(chat_artifact.chat_agent_workspace('user-1', 'conversation-1')) == current
+
+
 def test_chat_write_file_append_does_not_require_overwrite_approval(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_artifact, 'chat_agent_workspace', lambda *_args: str(tmp_path))
     monkeypatch.setattr(
@@ -67,4 +92,35 @@ def test_chat_write_file_append_does_not_require_overwrite_approval(tmp_path, mo
 
     assert first['status'] == 'ok'
     assert appended['status'] == 'ok'
-    assert chat_artifact.read_file('document.md')['content'] == 'first second'
+    assert 'first second' in chat_artifact.read_file('document.md')['text']
+
+
+def test_chat_file_tools_reject_outside_workspace_by_default(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    outside = tmp_path / 'outside' / 'document.md'
+    monkeypatch.setattr(chat_artifact, 'chat_agent_workspace', lambda *_args: str(workspace))
+    monkeypatch.setattr(
+        chat_artifact, '_current_artifact_scope', lambda: ('windows-user', 'windows-conversation'),
+    )
+
+    with pytest.raises(ToolExecutionError, match='inside the current main-Agent workspace'):
+        chat_artifact.write_file(str(outside), 'blocked')
+
+
+def test_chat_file_tools_allow_absolute_host_paths_in_trusted_local_mode(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    outside_dir = tmp_path / 'outside'
+    outside = outside_dir / 'document.md'
+    monkeypatch.setattr(chat_artifact, 'chat_agent_workspace', lambda *_args: str(workspace))
+    monkeypatch.setattr(
+        chat_artifact, '_current_artifact_scope', lambda: ('windows-user', 'windows-conversation'),
+    )
+
+    with chat_artifact._cfg.temp('trusted_local_mode', True):
+        written = chat_artifact.write_file(str(outside), 'trusted')
+        loaded = chat_artifact.read_file(str(outside))
+        listed = chat_artifact.list_dir(str(outside_dir))
+
+    assert written['status'] == 'ok'
+    assert 'trusted' in loaded['text']
+    assert listed['entries'] == ['document.md']

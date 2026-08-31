@@ -8,8 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import lazyllm
-
-from .db import SubAgentDB
+from lazyllm.tools.agent import ToolExecutionError
 
 # Key under which the SubAgent execution context is stored in lazyllm.globals.
 _CTX_KEY = 'subagent_ctx'
@@ -33,7 +32,7 @@ class SubAgentContext:
     workspace_path: str
     input_slots: List[str]
     output_slots: List[str]
-    db: SubAgentDB
+    db: Any
     emit: Callable[[Dict[str, Any]], None]
     # artifact seq counters and local cache (Go persists to DB; this serves intra-task reads).
     _artifact_counts: Dict[str, int] = field(default_factory=dict)
@@ -245,5 +244,7 @@ def get_context() -> Optional[SubAgentContext]:
 def require_context() -> SubAgentContext:
     ctx = get_context()
     if ctx is None:
-        raise RuntimeError('SubAgent context is not initialized for this session.')
+        raise ToolExecutionError(
+            'SubAgent context is not initialized for this session; subagent_context is required.'
+        )
     return ctx

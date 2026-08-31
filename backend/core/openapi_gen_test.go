@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+
+	"lazymind/core/chat"
 )
 
 func TestOpenAPISpecCoversAllRegisteredRoutes(t *testing.T) {
@@ -34,7 +36,7 @@ func TestOpenAPISpecCoversAllRegisteredRoutes(t *testing.T) {
 		if err != nil || path == "" {
 			return nil
 		}
-		if strings.HasPrefix(path, "/openapi") || path == "/docs" {
+		if skipOpenAPIRoute(path) {
 			return nil
 		}
 		methods, err := route.GetMethods()
@@ -92,6 +94,371 @@ func TestOpenAPISpecIncludesSkillMarketDelete(t *testing.T) {
 	}
 }
 
+func TestOpenAPIConversationItemIncludesThinkingDepthEnum(t *testing.T) {
+	router := mux.NewRouter()
+	registerCoreRoutes(router)
+	specJSON, err := buildOpenAPISpecFromRouter(router)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	properties := schemaPropertiesForTest(t, schemas, "ConversationItem")
+	depth, ok := properties["thinking_depth"].(map[string]any)
+	if !ok {
+		t.Fatalf("ConversationItem thinking_depth schema missing: %#v", properties["thinking_depth"])
+	}
+	rawEnum, ok := depth["enum"].([]any)
+	if !ok || !reflect.DeepEqual(rawEnum, []any{"low", "medium", "high", "max"}) {
+		t.Fatalf("ConversationItem thinking_depth enum=%#v", depth["enum"])
+	}
+}
+
+func TestOpenAPIChatEntryDefaultsEnumsMatchValidation(t *testing.T) {
+	router := mux.NewRouter()
+	registerCoreRoutes(router)
+	specJSON, err := buildOpenAPISpecFromRouter(router)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	assertEnum := func(schemaName, propertyName string, want []any) {
+		t.Helper()
+		properties := schemaPropertiesForTest(t, schemas, schemaName)
+		property, ok := properties[propertyName].(map[string]any)
+		if !ok || !reflect.DeepEqual(property["enum"], want) {
+			t.Fatalf("%s.%s enum=%#v, want %#v", schemaName, propertyName, property["enum"], want)
+		}
+	}
+
+	thinkingDepths := []any{"low", "medium", "high", "max"}
+	workflowModes := []any{"auto", "dynamic"}
+	executors := []any{
+		chat.ChatExecutorLazyMind,
+		chat.ChatExecutorCodex,
+		chat.ChatExecutorCursor,
+		chat.ChatExecutorWorkBuddy,
+	}
+	for _, schemaName := range []string{
+		"chatEntryDefaultsOpenAPI",
+		"chatEntryDefaultsPatchOpenAPIRequest",
+	} {
+		assertEnum(schemaName, "thinking_depth", thinkingDepths)
+	}
+	for _, schemaName := range []string{
+		"chatConversationDefaultsOpenAPI",
+		"chatConversationDefaultsPatchOpenAPIRequest",
+	} {
+		assertEnum(schemaName, "workflow_mode", workflowModes)
+		assertEnum(schemaName, "chat_executor", executors)
+	}
+}
+
+func TestOpenAPIEpisodeRoutesExposeOnlyPublicContract(t *testing.T) {
+	router := mux.NewRouter()
+	registerCoreRoutes(router)
+	specJSON, err := buildOpenAPISpecFromRouter(router)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	paths := spec["paths"].(map[string]any)
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"get", "/api/core/memory/episodes"},
+		{"get", "/api/core/memory/episodes/{episode_id}"},
+		{"delete", "/api/core/memory/episodes/{episode_id}"},
+	} {
+		openAPIOperationForTest(t, spec, operation.method, operation.path)
+	}
+	for _, internalPath := range []string{
+		"/api/core/internal/memory/episodes",
+		"/api/core/internal/memory/episodes/{episode_id}",
+		"/api/core/internal/memory/episodes:searchCandidates",
+		"/api/core/internal/memory/episodes:listRecent",
+		"/api/core/internal/memory/episodes:recordHits",
+	} {
+		if _, exists := paths[internalPath]; exists {
+			t.Fatalf("internal Episode route leaked into OpenAPI: %s", internalPath)
+		}
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	episodeProperties := schemaPropertiesForTest(t, schemas, "EpisodeMemory")
+	for _, field := range []string{
+		"id",
+		"conversation_id",
+		"source_kind",
+		"episode_type",
+		"summary",
+		"occurred_at_ms",
+		"recorded_at_ms",
+		"hit_count",
+	} {
+		if _, exists := episodeProperties[field]; !exists {
+			t.Fatalf("EpisodeMemory schema missing field %q", field)
+		}
+	}
+	episodeSchema := schemas["EpisodeMemory"].(map[string]any)
+	requiredEpisodeFields, ok := episodeSchema["required"].([]any)
+	if !ok || len(requiredEpisodeFields) != len(episodeProperties) {
+		t.Fatalf("EpisodeMemory fields must all be required: %#v", episodeSchema)
+	}
+	for field, expected := range map[string][]string{
+		"source_kind":  {"chat_explicit", "memory_review"},
+		"episode_type": {"decision", "progress", "result", "blocker", "event"},
+	} {
+		property := episodeProperties[field].(map[string]any)
+		rawEnum, enumOK := property["enum"].([]any)
+		if !enumOK || len(rawEnum) != len(expected) {
+			t.Fatalf("EpisodeMemory %s enum = %#v", field, property["enum"])
+		}
+	}
+	for _, operation := range []struct {
+		method   string
+		path     string
+		statuses []string
+	}{
+		{"get", "/api/core/memory/episodes", []string{"200", "400", "401", "500"}},
+		{"get", "/api/core/memory/episodes/{episode_id}", []string{"200", "401", "404", "500"}},
+		{"delete", "/api/core/memory/episodes/{episode_id}", []string{"204", "401", "500"}},
+	} {
+		op := openAPIOperationForTest(t, spec, operation.method, operation.path)
+		responses := op["responses"].(map[string]any)
+		for _, status := range operation.statuses {
+			if _, exists := responses[status]; !exists {
+				t.Fatalf(
+					"Episode operation %s %s missing response %s",
+					operation.method,
+					operation.path,
+					status,
+				)
+			}
+		}
+	}
+	for _, privateField := range []string{
+		"user_id",
+		"search_text",
+		"tokenizer_version",
+		"normalized_summary",
+		"lexical_score",
+	} {
+		if _, exists := episodeProperties[privateField]; exists {
+			t.Fatalf("public EpisodeMemory schema must not expose %q", privateField)
+		}
+	}
+}
+
+func TestOpenAPICurrentMemoryContractAndPrivateRouteIsolation(t *testing.T) {
+	router := mux.NewRouter()
+	registerCoreRoutes(router)
+	specJSON, err := buildOpenAPISpecFromRouter(router)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	for _, operation := range []struct {
+		method string
+		path   string
+	}{
+		{"get", "/api/core/memory/soul"},
+		{"patch", "/api/core/memory/soul"},
+		{"get", "/api/core/memory/soul/avatar"},
+		{"put", "/api/core/memory/soul/avatar"},
+		{"delete", "/api/core/memory/soul/avatar"},
+		{"get", "/api/core/memory/profile"},
+		{"patch", "/api/core/memory/profile"},
+		{"get", "/api/core/memory/profile/avatar"},
+		{"put", "/api/core/memory/profile/avatar"},
+		{"delete", "/api/core/memory/profile/avatar"},
+		{"get", "/api/core/memory/preferences"},
+		{"put", "/api/core/memory/preferences:order"},
+		{"get", "/api/core/memory/preferences/{name}"},
+		{"delete", "/api/core/memory/preferences/{name}"},
+	} {
+		op := openAPIOperationForTest(t, spec, operation.method, operation.path)
+		if _, tagged := op["tags"]; tagged {
+			t.Fatalf(
+				"Current Memory operation must remain in DefaultApi: %s %s",
+				operation.method,
+				operation.path,
+			)
+		}
+	}
+
+	paths := spec["paths"].(map[string]any)
+	for path := range paths {
+		if strings.HasPrefix(path, "/api/core/internal/") ||
+			strings.HasPrefix(path, "/api/core/remote-fs/") {
+			t.Fatalf("private Core route leaked into public OpenAPI: %s", path)
+		}
+	}
+	for _, privatePath := range []string{
+		"/api/core/internal/workflow-sessions/{session_id}/projection",
+		"/api/core/internal/memory/episodes",
+		"/api/core/remote-fs/list",
+		"/api/core/remote-fs/content",
+	} {
+		if _, exists := paths[privatePath]; exists {
+			t.Fatalf("private Core route leaked into public OpenAPI: %s", privatePath)
+		}
+	}
+
+	detailOperation := openAPIOperationForTest(
+		t,
+		spec,
+		"get",
+		"/api/core/memory/preferences/{name}",
+	)
+	names := openAPIParameterNamesForTest(t, detailOperation)
+	if _, exists := names["name"]; !exists {
+		t.Fatalf("Preference detail path parameter must be named name: %#v", names)
+	}
+
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	documentSchema := schemas["CurrentMemoryDocument"].(map[string]any)
+	documentValue := documentSchema["additionalProperties"].(map[string]any)
+	documentValueOptions := documentValue["oneOf"].([]any)
+	nullableString := documentValueOptions[0].(map[string]any)
+	if nullableString["type"] != "string" || nullableString["nullable"] != true {
+		t.Fatalf(
+			"CurrentMemoryDocument null must be declared by a nullable string branch: %#v",
+			documentValueOptions,
+		)
+	}
+	for name := range schemas {
+		if strings.HasPrefix(strings.ToLower(name), "remotefs") {
+			t.Fatalf("private RemoteFS schema leaked into public OpenAPI: %s", name)
+		}
+	}
+	soulData := schemaPropertiesForTest(t, schemas, "CurrentMemorySoulData")
+	if _, exists := soulData["etag"]; exists {
+		t.Fatal("Soul response must not expose etag")
+	}
+	soulUpdatedAt := soulData["updated_at"].(map[string]any)
+	if soulUpdatedAt["type"] != "integer" || soulUpdatedAt["format"] != "int64" {
+		t.Fatalf("Soul updated_at must be epoch milliseconds: %#v", soulUpdatedAt)
+	}
+	for _, field := range []string{"document", "template_version", "presentation"} {
+		if _, exists := soulData[field]; !exists {
+			t.Fatalf("Soul response missing %s", field)
+		}
+	}
+	profileData := schemaPropertiesForTest(t, schemas, "CurrentMemoryProfileData")
+	if _, exists := profileData["etag"]; exists {
+		t.Fatal("Profile response must not expose etag")
+	}
+	profileUpdatedAt := profileData["updated_at"].(map[string]any)
+	if profileUpdatedAt["type"] != "integer" || profileUpdatedAt["format"] != "int64" {
+		t.Fatalf("Profile updated_at must be epoch milliseconds: %#v", profileUpdatedAt)
+	}
+	for _, field := range []string{"document", "template_version", "presentation"} {
+		if _, exists := profileData[field]; !exists {
+			t.Fatalf("Profile response missing %s", field)
+		}
+	}
+	for _, removed := range []string{
+		"CurrentMemorySoulIdentity",
+		"CurrentMemorySoulMission",
+		"CurrentMemorySoulInteraction",
+		"CurrentMemorySoulEpistemic",
+		"CurrentMemorySoulDocument",
+		"CurrentMemoryProfileIdentity",
+		"CurrentMemoryProfileLocale",
+		"CurrentMemoryProfileProfessional",
+		"CurrentMemoryProfileDocument",
+	} {
+		if _, exists := schemas[removed]; exists {
+			t.Fatalf("fixed business schema %s must not remain in OpenAPI", removed)
+		}
+	}
+	avatarData := schemaPropertiesForTest(t, schemas, "CurrentMemoryAvatarData")
+	if _, exists := avatarData["updated_at"]; !exists {
+		t.Fatal("Avatar response missing updated_at")
+	}
+	preferenceList := schemaPropertiesForTest(
+		t,
+		schemas,
+		"CurrentMemoryPreferenceListData",
+	)
+	preferenceUpdatedAt := preferenceList["updated_at"].(map[string]any)
+	if preferenceUpdatedAt["type"] != "integer" ||
+		preferenceUpdatedAt["format"] != "int64" {
+		t.Fatalf(
+			"Preference list updated_at must be epoch milliseconds: %#v",
+			preferenceUpdatedAt,
+		)
+	}
+	residentUsage := preferenceList["resident_index_usage"].(map[string]any)
+	if residentUsage["$ref"] !=
+		"#/components/schemas/CurrentMemoryPreferenceResidentIndexUsage" {
+		t.Fatalf("Preference resident usage schema = %#v", residentUsage)
+	}
+	publicItem := schemaPropertiesForTest(t, schemas, "CurrentMemoryPreferenceItem")
+	if _, exists := publicItem["ref"]; exists {
+		t.Fatal("public Preference item must not expose ref")
+	}
+	orderRequest := schemaPropertiesForTest(
+		t,
+		schemas,
+		"CurrentMemoryPreferenceOrderRequest",
+	)
+	if _, exists := orderRequest["expected_etag"]; !exists {
+		t.Fatal("Preference reorder request missing expected_etag")
+	}
+	if _, exists := orderRequest["etag"]; exists {
+		t.Fatal("Preference reorder request must not expose an etag field")
+	}
+	detailData := schemaPropertiesForTest(
+		t,
+		schemas,
+		"CurrentMemoryPreferenceDetailData",
+	)
+	referenceSchema := detailData["reference"].(map[string]any)
+	if nullable, _ := referenceSchema["nullable"].(bool); !nullable {
+		t.Fatalf("Preference reference must be nullable: %#v", referenceSchema)
+	}
+	allOf, ok := referenceSchema["allOf"].([]any)
+	if !ok || len(allOf) != 1 {
+		t.Fatalf(
+			"Preference nullable reference must wrap its component reference: %#v",
+			referenceSchema,
+		)
+	}
+	operationsRequest := schemaPropertiesForTest(
+		t,
+		schemas,
+		"CurrentMemoryOperationsRequest",
+	)
+	operations := operationsRequest["operations"].(map[string]any)
+	items := operations["items"].(map[string]any)
+	if items["$ref"] != "#/components/schemas/CurrentMemoryOperation" {
+		t.Fatalf("operations items schema = %#v", items)
+	}
+	operation := schemaPropertiesForTest(
+		t,
+		schemas,
+		"CurrentMemoryOperation",
+	)
+	if _, exists := operation["value"]; !exists {
+		t.Fatal("CurrentMemoryOperation must expose an optional value")
+	}
+}
+
 func TestOpenAPISpecIncludesDatasetSourceFilter(t *testing.T) {
 	r := mux.NewRouter()
 	registerCoreRoutes(r)
@@ -112,8 +479,105 @@ func TestOpenAPISpecIncludesDatasetSourceFilter(t *testing.T) {
 		t.Fatalf("dataset list must document the source query parameter")
 	}
 	sourceSchema := openAPIParameterSchemaForTest(t, op, "source")
-	if !reflect.DeepEqual(sourceSchema["enum"], []any{"manual", "cloud"}) {
+	if !reflect.DeepEqual(sourceSchema["enum"], []any{"manual", "cloud", "official_installed"}) {
 		t.Fatalf("unexpected dataset source values: %#v", sourceSchema["enum"])
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	datasetProps := schemaPropertiesForTest(t, schemas, "Dataset")
+	if _, ok := datasetProps["source_type"]; !ok {
+		t.Fatalf("Dataset schema must document source_type")
+	}
+}
+
+func TestOpenAPISpecIncludesKnowledgeMarketSurface(t *testing.T) {
+	r := mux.NewRouter()
+	registerCoreRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+
+	installOp := openAPIOperationForTest(t, spec, "post", "/api/core/knowledge-market/items/{market_item_id}:install")
+	if got := openAPIObjectResponseRefForTest(t, installOp); got != "#/components/schemas/knowledgeMarketInstallOpenAPIResponse" {
+		t.Fatalf("install response ref = %q", got)
+	}
+
+	tasksOp := openAPIOperationForTest(t, spec, "get", "/api/core/knowledge-market/tasks")
+	if got := openAPIObjectResponseRefForTest(t, tasksOp); got != "#/components/schemas/knowledgeMarketTaskListOpenAPIResponse" {
+		t.Fatalf("tasks list response ref = %q", got)
+	}
+	statusSchema := openAPIParameterSchemaForTest(t, tasksOp, "status")
+	if !reflect.DeepEqual(statusSchema["enum"], []any{"pending", "running", "succeeded", "failed", "canceled"}) {
+		t.Fatalf("unexpected tasks status values: %#v", statusSchema["enum"])
+	}
+
+	taskOp := openAPIOperationForTest(t, spec, "get", "/api/core/knowledge-market/tasks/{job_id}")
+	if got := openAPIObjectResponseRefForTest(t, taskOp); got != "#/components/schemas/knowledgeMarketTaskDetailOpenAPIResponse" {
+		t.Fatalf("task detail response ref = %q", got)
+	}
+	taskParams := openAPIParameterNamesForTest(t, taskOp)
+	if _, ok := taskParams["job_id"]; !ok {
+		t.Fatalf("task detail must document the job_id path parameter")
+	}
+
+	installsOp := openAPIOperationForTest(t, spec, "get", "/api/core/knowledge-market/installs")
+	if got := openAPIObjectResponseRefForTest(t, installsOp); got != "#/components/schemas/knowledgeMarketInstallsOpenAPIResponse" {
+		t.Fatalf("installs response ref = %q", got)
+	}
+
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	listProps := schemaPropertiesForTest(t, schemas, "knowledgeMarketListItemOpenAPIResponse")
+	if _, ok := listProps["version"]; !ok {
+		t.Fatalf("list item schema must document version")
+	}
+	if _, ok := listProps["doc_count"]; ok {
+		t.Fatalf("list item schema must not document doc_count")
+	}
+	detailProps := schemaPropertiesForTest(t, schemas, "knowledgeMarketDetailOpenAPIResponse")
+	for _, stale := range []string{"package_sha256", "package_size", "doc_count", "files"} {
+		if _, ok := detailProps[stale]; ok {
+			t.Fatalf("detail schema must not document %s", stale)
+		}
+	}
+	if _, ok := detailProps["package_revision"]; !ok {
+		t.Fatalf("detail schema must document package_revision")
+	}
+	for _, field := range []string{"version", "version_date", "version_note"} {
+		if _, ok := detailProps[field]; !ok {
+			t.Fatalf("detail schema must document %s", field)
+		}
+	}
+	installProps := schemaPropertiesForTest(t, schemas, "knowledgeMarketInstallsOpenAPIResponseItem")
+	if _, ok := installProps["installed_version"]; !ok {
+		t.Fatalf("install schema must document installed_version")
+	}
+}
+
+func TestOpenAPISpecChatChunkDeltaModeValues(t *testing.T) {
+	router := mux.NewRouter()
+	registerCoreRoutes(router)
+
+	specJSON, err := buildOpenAPISpecFromRouter(router)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	properties := schemaPropertiesForTest(t, schemas, "ChatChunkResponse")
+	deltaMode, ok := properties["delta_mode"].(map[string]any)
+	if !ok {
+		t.Fatalf("ChatChunkResponse delta_mode property = %#v", properties["delta_mode"])
+	}
+	if !reflect.DeepEqual(deltaMode["enum"], []any{"append", "replace"}) {
+		t.Fatalf("unexpected delta_mode values: %#v", deltaMode["enum"])
 	}
 }
 
@@ -130,7 +594,7 @@ func TestOpenAPISpecRevisionSchemasIncludeHeadMarker(t *testing.T) {
 		t.Fatalf("decode openapi spec: %v", err)
 	}
 	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
-	for _, schemaName := range []string{"RevisionSummary", "skillRevisionOpenAPIResponse"} {
+	for _, schemaName := range []string{"skillRevisionOpenAPIResponse"} {
 		schema, ok := schemas[schemaName].(map[string]any)
 		if !ok {
 			t.Fatalf("schema %s missing", schemaName)
@@ -304,6 +768,32 @@ func TestOpenAPISpecIncludesAgentEvoContracts(t *testing.T) {
 		if _, ok := schemas[legacySchema]; ok {
 			t.Fatalf("legacy agent result schema still present in openapi spec: %s", legacySchema)
 		}
+	}
+}
+
+func TestOpenAPISpecUsesGatewaySafeExternalChatProviderRoutes(t *testing.T) {
+	r := mux.NewRouter()
+	registerCoreRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{"get", "/api/core/external-chat/hosts/{provider}/status"},
+		{"post", "/api/core/external-chat/hosts/{provider}/claim"},
+		{"get", "/api/core/external-chat/providers/{provider}/sessions"},
+		{"post", "/api/core/external-chat/providers/{provider}/sessions/{thread_id}/binding"},
+		{"post", "/api/core/external-chat/providers/{provider}/sessions:sync"},
+	} {
+		openAPIOperationForTest(t, spec, route.method, route.path)
 	}
 }
 
@@ -515,7 +1005,6 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		{"post", "/api/core/skill-shares/{share_item_id}:accept", false, true, true},
 		{"post", "/api/core/skill-shares/{share_item_id}:reject", false, true, true},
 		{"post", "/api/core/skill/create", true, false, true},
-		{"get", "/api/core/personalization-items", false, false, true},
 		{"get", "/api/core/model_providers", false, true, true},
 		{"get", "/api/core/model_providers/features", false, false, true},
 		{"get", "/api/core/model_providers:with_groups", false, false, true},
@@ -532,26 +1021,16 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		{"delete", "/api/core/model_providers/{model_provider_id}/groups/{group_id}/models/{model_id}", false, true, true},
 		{"get", "/api/core/personalization-setting", false, false, true},
 		{"put", "/api/core/personalization-setting", true, false, true},
+		{"get", "/api/core/user/chat-settings", false, false, true},
+		{"patch", "/api/core/user/chat-settings", true, false, true},
 		{"get", "/api/core/user/ui-preferences", false, false, true},
 		{"patch", "/api/core/user/ui-preferences", true, false, true},
-		{"patch", "/api/core/personal-resource/{resource_type}", true, true, true},
-		{"get", "/api/core/personal-resource/{resource_type}:file", false, true, true},
-		{"put", "/api/core/personal-resource/{resource_type}:file", true, true, true},
-		{"put", "/api/core/personal-resource/{resource_type}:draft", true, true, true},
-		{"get", "/api/core/personal-resource/{resource_type}:draft-preview", false, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}:generate", true, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}/draft-review/{review_id}/actions", true, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}/draft-review/{review_id}:undo", true, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}:commit", true, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}:discard", false, true, true},
-		{"get", "/api/core/personal-resource/{resource_type}/revisions", false, true, true},
-		{"get", "/api/core/personal-resource/{resource_type}/revisions/{revision_id}", false, true, true},
-		{"post", "/api/core/personal-resource/{resource_type}:rollback", true, true, true},
 		{"get", "/api/core/skill-review:summary", false, false, false},
 		{"post", "/api/core/skill-review:run", false, false, false},
 		{"get", "/api/core/skill-review/tasks", false, false, false},
 		{"get", "/api/core/agent/threads", false, true, true},
 		{"get", "/api/core/conversations/{name}:history", false, true, true},
+		{"get", "/api/core/conversations/{name}:trail", false, true, true},
 	}
 
 	for _, tc := range cases {
@@ -654,106 +1133,36 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 			t.Fatalf("expected history parameter %q in %q, got %q (%v)", want.name, want.inVal, got, historyParamNames)
 		}
 	}
-}
 
-func TestOpenAPISpecAssignsMetadataFieldsToPersonalResourcePatch(t *testing.T) {
-	r := mux.NewRouter()
-	registerAllRoutes(r)
-
-	specJSON, err := buildOpenAPISpecFromRouter(r)
-	if err != nil {
-		t.Fatalf("build openapi spec: %v", err)
-	}
-
-	var spec map[string]any
-	if err := json.Unmarshal(specJSON, &spec); err != nil {
-		t.Fatalf("decode openapi spec: %v", err)
-	}
-
-	components, ok := spec["components"].(map[string]any)
+	trailItem, ok := paths["/api/core/conversations/{name}:trail"].(map[string]any)
 	if !ok {
-		t.Fatalf("components missing in openapi spec")
+		t.Fatalf("path missing: /api/core/conversations/{name}:trail")
 	}
-	schemas, ok := components["schemas"].(map[string]any)
+	trailGet, ok := trailItem["get"].(map[string]any)
 	if !ok {
-		t.Fatalf("schemas missing in openapi spec")
+		t.Fatalf("get operation missing for conversation trail")
 	}
-
-	schemaProperties := func(schemaName string) map[string]any {
-		t.Helper()
-		schema, ok := schemas[schemaName].(map[string]any)
-		if !ok {
-			t.Fatalf("schema %s missing", schemaName)
-		}
-		properties, ok := schema["properties"].(map[string]any)
-		if !ok {
-			t.Fatalf("schema %s properties missing", schemaName)
-		}
-		return properties
-	}
-
-	draftRequestProps := schemaProperties("personalResourceWriteDraftOpenAPIRequest")
-	for _, name := range []string{"content", "expected_draft_version"} {
-		if _, ok := draftRequestProps[name]; !ok {
-			t.Fatalf("personalResourceWriteDraftOpenAPIRequest expected property %q", name)
-		}
-	}
-	for _, name := range []string{"agent_persona", "preferred_name", "response_style"} {
-		if _, ok := draftRequestProps[name]; ok {
-			t.Fatalf("personalResourceWriteDraftOpenAPIRequest must not include property %q", name)
-		}
-	}
-	patchRequestProps := schemaProperties("personalResourcePatchOpenAPIRequest")
-	for _, name := range []string{"auto_evo", "agent_persona", "preferred_name", "response_style"} {
-		if _, ok := patchRequestProps[name]; !ok {
-			t.Fatalf("personalResourcePatchOpenAPIRequest expected property %q", name)
-		}
-	}
-
-	memoryResponseProps := schemaProperties("managedStateOpenAPIResponse")
-	for _, name := range []string{"agent_persona", "preferred_name", "response_style"} {
-		if _, ok := memoryResponseProps[name]; !ok {
-			t.Fatalf("managedStateOpenAPIResponse expected property %q", name)
-		}
-	}
-
-	paths, ok := spec["paths"].(map[string]any)
+	trailParams, ok := trailGet["parameters"].([]any)
 	if !ok {
-		t.Fatalf("paths missing in openapi spec")
+		t.Fatalf("parameters missing for conversation trail")
 	}
-	assertRequestSchemaRef := func(path, method, wantRef string) {
-		t.Helper()
-		pathItem, ok := paths[path].(map[string]any)
+	trailParamNames := make(map[string]string, len(trailParams))
+	for _, item := range trailParams {
+		p, ok := item.(map[string]any)
 		if !ok {
-			t.Fatalf("path missing from openapi spec: %s", path)
+			continue
 		}
-		op, ok := pathItem[method].(map[string]any)
-		if !ok {
-			t.Fatalf("operation missing from openapi spec: %s %s", method, path)
-		}
-		requestBody, ok := op["requestBody"].(map[string]any)
-		if !ok {
-			t.Fatalf("requestBody missing for %s %s", method, path)
-		}
-		content, ok := requestBody["content"].(map[string]any)
-		if !ok {
-			t.Fatalf("requestBody content missing for %s %s", method, path)
-		}
-		jsonContent, ok := content["application/json"].(map[string]any)
-		if !ok {
-			t.Fatalf("application/json requestBody missing for %s %s", method, path)
-		}
-		schema, ok := jsonContent["schema"].(map[string]any)
-		if !ok {
-			t.Fatalf("requestBody schema missing for %s %s", method, path)
-		}
-		if got, _ := schema["$ref"].(string); got != wantRef {
-			t.Fatalf("requestBody schema ref for %s %s = %q, want %q", method, path, got, wantRef)
+		trailParamNames[p["name"].(string)] = p["in"].(string)
+	}
+	for _, want := range []struct{ name, inVal string }{
+		{"name", "path"},
+		{"page_size", "query"},
+		{"page_token", "query"},
+	} {
+		if got, ok := trailParamNames[want.name]; !ok || got != want.inVal {
+			t.Fatalf("expected trail parameter %q in %q, got %q (%v)", want.name, want.inVal, got, trailParamNames)
 		}
 	}
-
-	assertRequestSchemaRef("/api/core/personal-resource/{resource_type}:file", "put", "#/components/schemas/personalResourceWriteDraftOpenAPIRequest")
-	assertRequestSchemaRef("/api/core/personal-resource/{resource_type}:draft", "put", "#/components/schemas/personalResourceWriteDraftOpenAPIRequest")
 }
 
 func TestOpenAPISpecMarksUIPreferencesPatchFieldsOptional(t *testing.T) {
@@ -786,13 +1195,43 @@ func TestOpenAPISpecMarksUIPreferencesPatchFieldsOptional(t *testing.T) {
 	if !ok {
 		t.Fatalf("userUIPreferencesPatchOpenAPIRequest properties missing")
 	}
-	for _, name := range []string{"chat_preference_notice_dismissed", "developer_mode_active"} {
+	for _, name := range []string{"chat_preference_notice_dismissed", "developer_mode_active", "schedules_enabled", "skills_enabled", "workflows_enabled"} {
 		if _, ok := properties[name]; !ok {
 			t.Fatalf("userUIPreferencesPatchOpenAPIRequest expected property %q", name)
 		}
 	}
 	if required, ok := schema["required"].([]any); ok && len(required) > 0 {
 		t.Fatalf("userUIPreferencesPatchOpenAPIRequest fields should all be optional, got required=%v", required)
+	}
+
+	chatPatch, ok := schemas["userChatSettingsPatchOpenAPIRequest"].(map[string]any)
+	if !ok {
+		t.Fatal("userChatSettingsPatchOpenAPIRequest missing")
+	}
+	chatPatchProperties, ok := chatPatch["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("userChatSettingsPatchOpenAPIRequest properties missing")
+	}
+	for _, name := range []string{"enable_workflow", "workflow_mode", "enable_subagent", "quick_question", "new_task"} {
+		if _, ok := chatPatchProperties[name]; !ok {
+			t.Fatalf("userChatSettingsPatchOpenAPIRequest expected property %q", name)
+		}
+	}
+	if required, ok := chatPatch["required"].([]any); ok && len(required) > 0 {
+		t.Fatalf("userChatSettingsPatchOpenAPIRequest fields should all be optional, got required=%v", required)
+	}
+	chatResponse, ok := schemas["userChatSettingsOpenAPIResponse"].(map[string]any)
+	if !ok {
+		t.Fatal("userChatSettingsOpenAPIResponse missing")
+	}
+	chatResponseProperties, ok := chatResponse["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("userChatSettingsOpenAPIResponse properties missing")
+	}
+	for _, name := range []string{"quick_question", "new_task"} {
+		if _, ok := chatResponseProperties[name]; !ok {
+			t.Fatalf("userChatSettingsOpenAPIResponse expected property %q", name)
+		}
 	}
 }
 
@@ -1237,6 +1676,62 @@ func TestOpenAPISpecIncludesLocaleHeaderForLocalizedCatalogs(t *testing.T) {
 	}
 }
 
+func TestOpenAPIShowcaseCaseIncludesSkillSourceURL(t *testing.T) {
+	schemas := generatedOpenAPISchemas(t)
+	schema := schemas["ShowcaseCase"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	if sourceURL, ok := properties["source_url"].(map[string]any); !ok || sourceURL["type"] != "string" {
+		t.Fatalf("ShowcaseCase source_url = %#v, want required string", properties["source_url"])
+	}
+	if provider, ok := properties["provider"].(map[string]any); !ok || provider["type"] != "string" {
+		t.Fatalf("ShowcaseCase provider = %#v, want required string", properties["provider"])
+	}
+	required := schema["required"].([]any)
+	foundSourceURL := false
+	foundProvider := false
+	for _, field := range required {
+		switch field {
+		case "source_url":
+			foundSourceURL = true
+		case "provider":
+			foundProvider = true
+		}
+	}
+	if !foundSourceURL || !foundProvider {
+		t.Fatalf("ShowcaseCase required fields = %#v", required)
+	}
+}
+
+func generatedOpenAPISchemas(t *testing.T) map[string]any {
+	t.Helper()
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	return spec["components"].(map[string]any)["schemas"].(map[string]any)
+}
+
+func TestOpenAPIBuiltinSkillIncludesOptionalProvider(t *testing.T) {
+	schemas := generatedOpenAPISchemas(t)
+	schema := schemas["builtinSkillOpenAPIResponse"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	provider, ok := properties["provider"].(map[string]any)
+	if !ok || provider["type"] != "string" {
+		t.Fatalf("builtin provider = %#v, want optional string", properties["provider"])
+	}
+	for _, name := range schema["required"].([]any) {
+		if name == "provider" {
+			t.Fatal("builtin provider must remain optional for old catalogs")
+		}
+	}
+}
+
 func TestOpenAPISpecIncludesMCPOperations(t *testing.T) {
 	r := mux.NewRouter()
 	registerAllRoutes(r)
@@ -1265,6 +1760,7 @@ func TestOpenAPISpecIncludesMCPOperations(t *testing.T) {
 	}{
 		{"get", "/api/core/mcp_servers", "", "#/components/schemas/ListServersResponse", false, []string{"keyword", "page", "page_size"}},
 		{"post", "/api/core/mcp_servers", "#/components/schemas/CreateServerRequest", "#/components/schemas/ServerResponse", false, nil},
+		{"patch", "/api/core/mcp_servers:enabled", "#/components/schemas/BulkUpdateServerEnabledRequest", "#/components/schemas/BulkUpdateServerEnabledResponse", false, nil},
 		{"get", "/api/core/mcp_servers/{id}", "", "#/components/schemas/ServerResponse", true, nil},
 		{"patch", "/api/core/mcp_servers/{id}", "#/components/schemas/UpdateServerRequest", "#/components/schemas/ServerResponse", true, nil},
 		{"delete", "/api/core/mcp_servers/{id}", "", "#/components/schemas/mcpDeleteServerOpenAPIResponse", true, nil},

@@ -17,6 +17,7 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/common/secretcrypto"
+	"lazymind/core/settings"
 )
 
 var (
@@ -164,6 +165,80 @@ func UpdateServer(ctx context.Context, db *gorm.DB, userID, id string, req Updat
 	return GetServer(ctx, db, userID, row.ID)
 }
 
+func SetOwnedServersEnabled(ctx context.Context, db *gorm.DB, userID string, enabled bool) (*BulkUpdateServerEnabledResponse, error) {
+	if db == nil {
+		return nil, fmt.Errorf("store not initialized")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("%w: missing user id", errBadRequest)
+	}
+
+	result := &BulkUpdateServerEnabledResponse{Enabled: enabled}
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		ownedServers := func() *gorm.DB {
+			return tx.Model(&orm.MCPServer{}).
+				Where("create_user_id = ? AND deleted_at IS NULL", userID)
+		}
+		if err := ownedServers().Count(&result.TotalCount).Error; err != nil {
+			return err
+		}
+
+		now := time.Now()
+		if enabled {
+			if err := ownedServers().Where("is_verified = ?", false).
+				Count(&result.SkippedUnverifiedCount).Error; err != nil {
+				return err
+			}
+			result.UpdatedCount = result.TotalCount - result.SkippedUnverifiedCount
+			if err := ownedServers().Where("is_verified = ?", true).
+				Updates(map[string]any{"enabled": true, "updated_at": now}).Error; err != nil {
+				return err
+			}
+			// Preserve the invariant that an unverified service is never callable,
+			// including rows created before that validation was introduced.
+			if err := ownedServers().Where("is_verified = ?", false).
+				Updates(map[string]any{"enabled": false, "updated_at": now}).Error; err != nil {
+				return err
+			}
+		} else {
+			result.UpdatedCount = result.TotalCount
+			if err := ownedServers().Updates(map[string]any{"enabled": false, "updated_at": now}).Error; err != nil {
+				return err
+			}
+		}
+
+		return setMCPFeatureControl(ctx, tx, userID, enabled, now)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func setMCPFeatureControl(ctx context.Context, db *gorm.DB, userID string, enabled bool, now time.Time) error {
+	var preferences orm.UserUIPreferences
+	err := db.WithContext(ctx).Where("user_id = ?", userID).Take(&preferences).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return db.WithContext(ctx).Model(&orm.UserUIPreferences{}).Create(map[string]any{
+			"user_id":             userID,
+			"task_center_enabled": true,
+			"schedules_enabled":   true,
+			"skills_enabled":      true,
+			"workflows_enabled":   true,
+			"mcp_enabled":         enabled,
+			"created_at":          now,
+			"updated_at":          now,
+		}).Error
+	}
+	if err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Model(&orm.UserUIPreferences{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]any{"mcp_enabled": enabled, "updated_at": now}).Error
+}
+
 func DeleteServer(ctx context.Context, db *gorm.DB, userID, id string) error {
 	row, err := getOwnedServer(ctx, db, userID, id)
 	if err != nil {
@@ -227,7 +302,11 @@ func UpdateServerTools(ctx context.Context, db *gorm.DB, userID, id string, req 
 	if err != nil {
 		return nil, err
 	}
-	allowedJSON, err := json.Marshal(normalizeStringList(req.AllowedTools))
+	allowedTools, err := canonicalizeAllowedToolNames(ctx, db, row.ID, req.AllowedTools)
+	if err != nil {
+		return nil, err
+	}
+	allowedJSON, err := json.Marshal(allowedTools)
 	if err != nil {
 		return nil, err
 	}
@@ -244,10 +323,16 @@ func LoadRuntimeConfig(ctx context.Context, db *gorm.DB, userID string) ([]Runti
 		return nil, nil
 	}
 	userID = strings.TrimSpace(userID)
+	controls, err := settings.LoadFeatureControls(ctx, db, userID)
+	if err != nil {
+		return nil, err
+	}
 	var rows []orm.MCPServer
 	q := db.WithContext(ctx).Where("enabled = ? AND deleted_at IS NULL AND transport IN ?", true, []string{transportSSE, transportHTTP})
 	if userID == "" {
 		q = q.Where("share = ?", true)
+	} else if !controls.MCPEnabled {
+		q = q.Where("share = ? AND create_user_id <> ?", true, userID)
 	} else {
 		q = q.Where("(create_user_id = ? OR share = ?)", userID, true)
 	}
@@ -256,6 +341,15 @@ func LoadRuntimeConfig(ctx context.Context, db *gorm.DB, userID string) ([]Runti
 	}
 	out := make([]RuntimeConfig, 0, len(rows))
 	for _, row := range dedupeServers(rows) {
+		allowedTools, err := canonicalizeAllowedToolNames(ctx, db, row.ID, parseStringJSON(row.AllowedToolsJSON))
+		if err != nil {
+			return nil, err
+		}
+		if len(allowedTools) == 0 {
+			// A verified service with no authorized tool remains configured but
+			// must not become callable until the user grants a tool explicitly.
+			continue
+		}
 		headers, err := decodeHeaders(row.HeadersJSON)
 		if err != nil {
 			return nil, err
@@ -266,7 +360,7 @@ func LoadRuntimeConfig(ctx context.Context, db *gorm.DB, userID string) ([]Runti
 			Transport:    row.Transport,
 			URL:          row.URL,
 			Headers:      headers,
-			AllowedTools: parseStringJSON(row.AllowedToolsJSON),
+			AllowedTools: allowedTools,
 			Timeout:      normalizedTimeout(row.Timeout),
 		})
 	}
@@ -324,6 +418,33 @@ func normalizeStringList(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func canonicalizeAllowedToolNames(ctx context.Context, db *gorm.DB, serverID string, values []string) ([]string, error) {
+	normalized := normalizeStringList(values)
+	if len(normalized) == 0 {
+		return normalized, nil
+	}
+
+	var tools []orm.MCPServerTool
+	if err := db.WithContext(ctx).
+		Select("id", "tool_name").
+		Where("mcp_server_id = ? AND deleted_at IS NULL AND id IN ?", serverID, normalized).
+		Find(&tools).Error; err != nil {
+		return nil, err
+	}
+	namesByID := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		namesByID[tool.ID] = tool.ToolName
+	}
+	// Values not matching a discovered ID may already be runtime tool names
+	// supplied by older or direct API clients, so preserve them unchanged.
+	for index, value := range normalized {
+		if toolName, ok := namesByID[value]; ok {
+			normalized[index] = toolName
+		}
+	}
+	return normalizeStringList(normalized), nil
 }
 
 func headersJSONFromAPIKey(apiKey string) (json.RawMessage, error) {

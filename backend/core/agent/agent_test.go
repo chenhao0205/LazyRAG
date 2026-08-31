@@ -63,13 +63,7 @@ func (r *testSSERecorder) String() string {
 
 func newAgentTestDB(t *testing.T) *orm.DB {
 	t.Helper()
-
-	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"), time.Now().UnixNano())
-	db, err := orm.Connect(orm.DriverSQLite, dsn)
-	if err != nil {
-		t.Fatalf("connect sqlite: %v", err)
-	}
-	if err := db.AutoMigrate(
+	return orm.MigrateTestDB(t,
 		&orm.AgentThread{},
 		&orm.AgentUserActiveThread{},
 		&orm.AgentThreadRecord{},
@@ -78,10 +72,7 @@ func newAgentTestDB(t *testing.T) *orm.DB {
 		&orm.UserSelectedModel{},
 		&orm.UserModelProviderGroupModel{},
 		&orm.UserModelProviderGroup{},
-	); err != nil {
-		t.Fatalf("auto migrate: %v", err)
-	}
-	return db
+	)
 }
 
 func seedAgentRuntimeModelConfig(t *testing.T, db *orm.DB, userID, role string) {
@@ -116,6 +107,9 @@ func seedAgentRuntimeModelConfig(t *testing.T, db *orm.DB, userID, role string) 
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		},
+	}
+	if role == "evo_llm" {
+		model.Name = "gpt-4o-mini"
 	}
 	selected := orm.UserSelectedModel{
 		UserID:                        userID,
@@ -209,9 +203,13 @@ func TestCreateThreadRequiresConfiguredThreadLLMs(t *testing.T) {
 		},
 		"inputs": {"kb_id": "kb-1", "num_cases": 1}
 	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads", bytes.NewReader(body))
-	req.Header.Set("X-User-Id", "user-1")
-	req.Header.Set("X-User-Name", "User One")
+	newRequest := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads", bytes.NewReader(body))
+		req.Header.Set("X-User-Id", "user-1")
+		req.Header.Set("X-User-Name", "User One")
+		return req
+	}
+	req := newRequest()
 	rec := httptest.NewRecorder()
 
 	CreateThread(rec, req)
@@ -236,6 +234,23 @@ func TestCreateThreadRequiresConfiguredThreadLLMs(t *testing.T) {
 	if activeCount != 0 {
 		t.Fatalf("expected validation to happen before active thread reservation, got %d rows", activeCount)
 	}
+
+	for _, role := range []string{"llm", "embed_main"} {
+		seedAgentRuntimeModelConfig(t, db, "user-1", role)
+	}
+	req = newRequest()
+	rec = httptest.NewRecorder()
+	CreateThread(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected missing evo model to return 422, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	response = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode missing evo response: %v", err)
+	}
+	if int(response["code"].(float64)) != evoModelNotConfiguredCode || response["message"] != "未配置自进化模型" {
+		t.Fatalf("expected specific missing evo model error, body=%s", rec.Body.String())
+	}
 }
 
 func TestAttachThreadModelConfigProvidesRequiredThreadLLMs(t *testing.T) {
@@ -256,7 +271,7 @@ func TestAttachThreadModelConfigProvidesRequiredThreadLLMs(t *testing.T) {
 		t.Fatalf("expected llm_config, got %#v", payload["llm_config"])
 	}
 	evoConfig, ok := llmConfig["evo_llm"].(map[string]any)
-	if !ok || evoConfig["model"] != "gpt-evo-llm" {
+	if !ok || evoConfig["model"] != "gpt-4o-mini" {
 		t.Fatalf("expected evo_llm config, got %#v", llmConfig["evo_llm"])
 	}
 	chatConfig, ok := llmConfig["llm"].(map[string]any)
@@ -1330,7 +1345,7 @@ func TestListThreadsFiltersByUserAndPaginates(t *testing.T) {
 	threads := []orm.AgentThread{
 		{
 			ThreadID:       "thr_old",
-			Status:         "completed",
+			Status:         "running",
 			CreateUserID:   "u1",
 			CreateUserName: "tester",
 			CreatedAt:      now.Add(-2 * time.Hour),
@@ -1355,6 +1370,12 @@ func TestListThreadsFiltersByUserAndPaginates(t *testing.T) {
 	}
 	if err := db.DB.Create(&threads).Error; err != nil {
 		t.Fatalf("create threads: %v", err)
+	}
+	if err := db.DB.Create(&orm.AgentUserActiveThread{
+		UserID: "u1", ThreadID: "thr_old", Status: userActiveThreadStatusActive,
+		LeaseUntil: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create active thread: %v", err)
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1428,6 +1449,20 @@ func TestListThreadsFiltersByUserAndPaginates(t *testing.T) {
 	if secondPage.Data.Threads[0].Status != "failed" {
 		t.Fatalf("expected upstream status failed, got %q", secondPage.Data.Threads[0].Status)
 	}
+	var persisted orm.AgentThread
+	if err := db.DB.First(&persisted, "thread_id = ?", "thr_old").Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != "failed" || persisted.CurrentTaskID != "" {
+		t.Fatalf("terminal upstream status was not persisted: %#v", persisted)
+	}
+	var active orm.AgentUserActiveThread
+	if err := db.DB.First(&active, "user_id = ?", "u1").Error; err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != userActiveThreadStatusFinished {
+		t.Fatalf("terminal upstream status did not release active row: %#v", active)
+	}
 }
 
 func TestListThreadsFallsBackToLocalStatusWhenStatusesFail(t *testing.T) {
@@ -1471,6 +1506,51 @@ func TestListThreadsFallsBackToLocalStatusWhenStatusesFail(t *testing.T) {
 	}
 	if len(response.Data.Threads) != 1 || response.Data.Threads[0].Status != "completed" {
 		t.Fatalf("expected local status fallback, got %#v", response.Data.Threads)
+	}
+}
+
+func TestReconcileThreadAfterEventStreamPersistsTerminalState(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID: "thr_1", CurrentTaskID: "repair", Status: "running",
+		CreateUserID: "u1", CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.Create(&orm.AgentUserActiveThread{
+		UserID: "u1", ThreadID: "thr_1", Status: userActiveThreadStatusActive,
+		LeaseUntil: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(evoThread{
+			ThreadID: "thr_1", Status: "failed", CurrentStep: "repair",
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/events:stream", nil)
+	req.Header.Set("X-User-Id", "u1")
+
+	reconcileThreadAfterEventStream(req, "thr_1")
+
+	var thread orm.AgentThread
+	if err := db.DB.First(&thread, "thread_id = ?", "thr_1").Error; err != nil {
+		t.Fatal(err)
+	}
+	if thread.Status != "failed" || thread.CurrentTaskID != "" {
+		t.Fatalf("terminal stream state was not persisted: %#v", thread)
+	}
+	var active orm.AgentUserActiveThread
+	if err := db.DB.First(&active, "user_id = ?", "u1").Error; err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != userActiveThreadStatusFinished {
+		t.Fatalf("terminal stream state did not release active row: %#v", active)
 	}
 }
 

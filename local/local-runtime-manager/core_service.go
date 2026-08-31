@@ -186,6 +186,10 @@ func coreServiceEnv(cfg RuntimeConfig, paths RuntimePaths) []string {
 		"LAZYMIND_RUNTIME_ROOT=" + paths.RuntimeRoot,
 		"LAZYMIND_UPLOAD_ROOT=" + paths.UploadRoot,
 		"LAZYMIND_SHARED_UPLOAD_DIR=" + paths.UploadRoot,
+		"LAZYMIND_HISTORY_INJECTION_ENABLED=" + envText("LAZYMIND_HISTORY_INJECTION_ENABLED", "true"),
+		"LAZYMIND_HISTORY_INJECTION_ROOT=" + paths.HistoryInjectionRoot,
+		"LAZYMIND_BOOTSTRAP_ADMIN_USERNAME=" + envText("LAZYMIND_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+		"LAZYMIND_BOOTSTRAP_ADMIN_PASSWORD=" + envText("LAZYMIND_BOOTSTRAP_ADMIN_PASSWORD", "admin"),
 		"LAZYLLM_TEMP_DIR=" + paths.LazyLLMTempDir,
 		"LAZYMIND_OCR_CACHE_DIR=" + paths.OCRCacheDir,
 		"LAZYMIND_UPLOAD_TEXT_UTF8_CONVERT_ENABLED=" + envText("LAZYMIND_UPLOAD_TEXT_UTF8_CONVERT_ENABLED", "true"),
@@ -212,6 +216,7 @@ func coreServiceEnv(cfg RuntimeConfig, paths RuntimePaths) []string {
 		"LAZYMIND_READONLY_TABLES=lazyllm_documents,lazyllm_doc_service_tasks,lazyllm_kb_documents",
 		"LAZYMIND_RESOURCE_UPDATE_ENABLED=" + envText("LAZYMIND_RESOURCE_UPDATE_ENABLED", "true"),
 		"LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN=" + envText("LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN", "dev-internal-service-token"),
+		"LAZYMIND_WORKFLOW_EXECUTOR_TOKEN=" + envText("LAZYMIND_WORKFLOW_EXECUTOR_TOKEN", "dev-workflow-executor-token"),
 		"LAZYMIND_MODEL_PROVIDER_SECRET_KEY=" + envText("LAZYMIND_MODEL_PROVIDER_SECRET_KEY", "lazymind-core-model-provider-default-secret"),
 		"LAZYMIND_MCP_SECRET_KEY=" + envText("LAZYMIND_MCP_SECRET_KEY", "lazymind-core-mcp-default-secret"),
 	}

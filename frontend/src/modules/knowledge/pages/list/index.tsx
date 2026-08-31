@@ -1,23 +1,38 @@
-import { FC, useState, useEffect, useRef, useCallback, useMemo, MouseEvent } from "react";
+import {
+  FC,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  MouseEvent,
+  ChangeEvent,
+} from "react";
 import {
   Alert,
   Button,
-  Form,
+  Modal,
   Tooltip,
   Flex,
   message,
+  Input,
   TablePaginationConfig,
-  Select,
   Tag,
   Space,
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import moment from "moment";
-import { EditFilled } from "@ant-design/icons";
+import {
+  AppstoreOutlined,
+  ArrowLeftOutlined,
+  DatabaseOutlined,
+  HistoryOutlined,
+  PlusOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
 
-import ListPageHeader from "@/modules/knowledge/components/ListPageHeader";
 import SyncKnowledgeBaseCreationFlow, {
   useSyncKnowledgeBaseCreation,
 } from "@/modules/knowledge/components/SyncKnowledgeBaseCreationFlow";
@@ -33,23 +48,17 @@ import CreateKnowledgeBaseModal, {
 import UIUtils from "@/modules/knowledge/utils/ui";
 import { runtimeFeatures } from "@/runtime/features";
 import {
-  DocumentServiceApi,
   KnowledgeBaseServiceApi,
 } from "@/modules/knowledge/utils/request";
-import { ALL_TAGS, TIME_FORMAT } from "@/modules/knowledge/constants/common";
+import { ALL_TAGS } from "@/modules/knowledge/constants/common";
 import {
   Dataset,
   DatasetAclEnum,
-  DocDocumentStageEnum,
-  DocTypeEnum,
 } from "@/api/generated/knowledge-client";
 import KnowledgeTag from "@/modules/knowledge/components/KnowledgeTag";
 import FileUtils from "@/modules/knowledge/utils/file";
-import { isDocumentDetailUnsupported } from "@/modules/knowledge/utils/document";
 
 import { ListPageTable } from "@/components/ui";
-import EditTags from "@/modules/knowledge/pages/detail/components/KnowledgeTable/editTags";
-import type { TreeNode } from "@/modules/knowledge/pages/detail/components/KnowledgeTable";
 import { useTranslation } from "react-i18next";
 import { axiosInstance, BASE_URL } from "@/components/request";
 import { AgentAppsAuth } from "@/components/auth";
@@ -64,6 +73,8 @@ import { sourceTypeOptions } from "@/modules/dataSource/constants/sourceTypeOpti
 import { mapScanSourceToDataSource } from "@/modules/dataSource/mappers/scanSourceToDataSource";
 import {
   getFirstScanBinding,
+  getScanSourceId,
+  inferSourceKind,
   type ScanV2Binding,
   type ScanV2Source,
 } from "@/modules/dataSource/utils/scanAccessors";
@@ -74,60 +85,67 @@ import {
   getSyncModeLabel,
   normalizeDataSourceStatus,
 } from "@/modules/dataSource/utils/status";
+import KnowledgeSquare from "./KnowledgeSquare";
+import {
+  mergeKnowledgeMarketDetail,
+  mergeKnowledgeMarketItems,
+  type KnowledgeSquareType,
+  type OfficialKnowledgeBase,
+} from "./knowledgeSquareData";
+import KnowledgeMarketTaskModal from "./KnowledgeMarketTaskModal";
+import KnowledgeMineFilterPopover from "./KnowledgeMineFilterPopover";
+import {
+  getKnowledgeMineOrderBy,
+  sortByDatasetOrder,
+  type KnowledgeMineCloudSource,
+  type KnowledgeMineSort,
+} from "./knowledgeMineFilters";
+import {
+  isKnowledgeMarketTaskFailed,
+  isKnowledgeMarketTaskPartiallyFailed,
+  isKnowledgeMarketTaskTerminal,
+} from "./knowledgeMarketTaskState";
+import {
+  getKnowledgeMarketItem,
+  getKnowledgeMarketTask,
+  installKnowledgeMarketItem,
+  listKnowledgeMarket,
+  listKnowledgeMarketDomains,
+  listKnowledgeMarketInstalls,
+  updateAllKnowledgeMarketItems,
+  updateKnowledgeMarketItem,
+} from "@/modules/knowledge/api/knowledgeMarket";
+import {
+  clearCloudKnowledgeCreateParams,
+  getCloudKnowledgeCreateProvider,
+  isCloudKnowledgeCreateRequest,
+} from "@/modules/modelProvider/utils/cloudDocumentKnowledge";
 
 import "./index.scss";
 import "@/modules/dataSource/index.scss";
 
 const { Text } = Typography;
 
-type SourceCategory = "local" | "cloudArchive";
+type SourceCategory = "local" | "cloudArchive" | "official";
+type KnowledgePageView = "mine" | "square";
 
-type DocRow = {
-  dataset_id?: string;
-  document_id?: string;
-  display_name?: string;
-  rel_path?: string;
-  document_stage?: string;
-  type?: string;
-  document_size?: number | string;
-  update_time?: string;
-  creator?: string;
-  uri?: string;
-  data_source_type?: string;
-  tags?: string[];
-  p_id?: string;
-};
+interface TrackedKnowledgeMarketJob {
+  jobId: string;
+  itemId: string;
+  jobType: "install" | "update" | "updateAll";
+  name: string;
+}
 
-const KnowledgePage: FC = () => {
-  const [form] = Form.useForm();
+interface KnowledgePageProps {
+  modelSettingsPath?: string;
+}
+
+const KnowledgePage: FC<KnowledgePageProps> = ({
+  modelSettingsPath = "/settings?section=models",
+}) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { t } = useTranslation();
-  const knowledgeSourceOptions = [
-    { value: "local", label: t("knowledge.localCreated") },
-    { value: "cloudArchive", label: t("knowledge.cloudArchiveCreated") },
-  ];
-
-  const DocumentStageEnum = {
-    WAITING: t("knowledge.stageParsing"),
-    WORKING: t("knowledge.stageParsing"),
-    SUCCESS: t("knowledge.stageParsed"),
-    FAILED: t("knowledge.stageFailed"),
-    CANCELED: t("knowledge.stageCanceled"),
-    DELETING: t("knowledge.stageDeleting"),
-    DELETED: t("knowledge.stageDeleted"),
-
-    [DocDocumentStageEnum.DocumentUploaded]: t("knowledge.stageUploaded"),
-    [DocDocumentStageEnum.DocumentQueued]: t("knowledge.stageParsing"),
-    [DocDocumentStageEnum.DocumentParsing]: t("knowledge.stageParsing"),
-    [DocDocumentStageEnum.DocumentParseSuccessfully]: t(
-      "knowledge.stageParsed",
-    ),
-    [DocDocumentStageEnum.DocumentParsingFailed]: t("knowledge.stageFailed"),
-    [DocDocumentStageEnum.DocumentParsingCancelled]: t(
-      "knowledge.stageCanceled",
-    ),
-  };
-
   const confirmRef = useRef<TypedConfirmModalRef>(null);
   const createUpdateRef = useRef<UpdateImperativeProps>(null);
   const createKnowledgeRef = useRef<CreateKnowledgeBaseModalRef>(null);
@@ -139,13 +157,31 @@ const KnowledgePage: FC = () => {
     total: 0,
   });
   const [dataSource, setDataSource] = useState<Dataset[] | undefined>([]);
-  // Keep a local default option to avoid label flicker while tags are loading.
-  const [tags, setTags] = useState<string[]>([ALL_TAGS]);
-  const [knowledgeType, setKnowledgeType] = useState<string>("knowledgeBase");
+  const [localTags, setLocalTags] = useState<string[]>([]);
   const [sourceCategory, setSourceCategory] = useState<SourceCategory>("local");
+  const [activeView, setActiveView] = useState<KnowledgePageView>("mine");
+  const [officialItems, setOfficialItems] = useState<OfficialKnowledgeBase[]>([]);
+  const [officialDomains, setOfficialDomains] = useState<
+    Record<KnowledgeSquareType, string[]>
+  >({ industry: [], evaluation: [] });
+  const [officialLoading, setOfficialLoading] = useState(false);
+  const [marketTaskModalOpen, setMarketTaskModalOpen] = useState(false);
+  const [trackedMarketJobs, setTrackedMarketJobs] = useState<
+    Record<string, TrackedKnowledgeMarketJob>
+  >({});
+  const [marketProgress, setMarketProgress] = useState<Record<string, number>>({});
+  const [mineSearch, setMineSearch] = useState("");
+  const [mineLocalTag, setMineLocalTag] = useState(ALL_TAGS);
+  const [mineOfficialTag, setMineOfficialTag] = useState(ALL_TAGS);
+  const [mineSort, setMineSort] = useState<KnowledgeMineSort>("all");
+  const [mineCloudSource, setMineCloudSource] =
+    useState<KnowledgeMineCloudSource>("all");
+  const [mineFilterOpen, setMineFilterOpen] = useState(false);
   const [cloudSources, setCloudSources] = useState<DataSourceItem[]>([]);
-  const [showTagEditModal, setShowTagEditModal] = useState(false);
-  const [tagEditRecord, setTagEditRecord] = useState<DocRow | null>(null);
+  const [officialDatasetOrder, setOfficialDatasetOrder] = useState<
+    string[] | null
+  >(null);
+  const [officialSortLoading, setOfficialSortLoading] = useState(false);
   const [embeddingReady, setEmbeddingReady] = useState<boolean | null>(null);
   const [multimodalEmbeddingReady, setMultimodalEmbeddingReady] = useState<
     boolean | null
@@ -157,9 +193,13 @@ const KnowledgePage: FC = () => {
       createKnowledgeRef.current?.onClose();
     },
   });
-  const cloudSourceRequestSeqRef = useRef(0);
-  const isCloudArchiveView =
-    knowledgeType === "knowledgeBase" && sourceCategory === "cloudArchive";
+  const cloudCreateRequestRef = useRef<string | null>(null);
+  const localTagsRequestSeqRef = useRef(0);
+  const mineTableRequestSeqRef = useRef(0);
+  const officialSortRequestSeqRef = useRef(0);
+  const marketRequestSeqRef = useRef(0);
+  const isCloudArchiveView = sourceCategory === "cloudArchive";
+  const isOfficialView = sourceCategory === "official";
   const createActionDisabled =
     embeddingReady === false || multimodalEmbeddingReady === false;
   const createActionDisabledTooltip = isAdmin ? (
@@ -168,11 +208,11 @@ const KnowledgePage: FC = () => {
         ? t("knowledge.embeddingNotReadyBannerAdmin")
         : t("knowledge.multimodalEmbeddingNotReadyBannerAdmin")}
       <a
-        href="/model-providers"
+        href={modelSettingsPath}
         style={{ marginLeft: 8, color: "#fff", textDecoration: "underline" }}
         onClick={(e: MouseEvent<HTMLAnchorElement>) => {
           e.preventDefault();
-          navigate("/model-providers");
+          navigate(modelSettingsPath);
         }}
       >
         {t("knowledge.goToConfig")}
@@ -185,8 +225,70 @@ const KnowledgePage: FC = () => {
   );
 
   useEffect(() => {
-    getTags();
-    getTableData();
+    if (
+      syncCreateVm.cloudConnectionLoading ||
+      !isCloudKnowledgeCreateRequest(location.search) ||
+      cloudCreateRequestRef.current === location.search
+    ) {
+      return;
+    }
+
+    cloudCreateRequestRef.current = location.search;
+    const provider = getCloudKnowledgeCreateProvider(location.search);
+    setActiveView("mine");
+    setSourceCategory("cloudArchive");
+    if (provider) {
+      syncCreateVm.handleCreateFromCloudDocuments(provider);
+    } else {
+      createKnowledgeRef.current?.onOpen();
+    }
+    navigate(
+      {
+        pathname: location.pathname,
+        search: clearCloudKnowledgeCreateParams(location.search),
+      },
+      { replace: true },
+    );
+  }, [
+    location.pathname,
+    location.search,
+    navigate,
+    syncCreateVm.cloudConnectionLoading,
+    syncCreateVm.handleCreateFromCloudDocuments,
+  ]);
+
+  const loadKnowledgeMarket = useCallback(async (showLoading = false) => {
+    const requestId = ++marketRequestSeqRef.current;
+    if (showLoading) setOfficialLoading(true);
+    try {
+      const [catalog, domainsResponse, installsResponse] = await Promise.all([
+        listKnowledgeMarket(),
+        listKnowledgeMarketDomains(),
+        listKnowledgeMarketInstalls(),
+      ]);
+      if (requestId !== marketRequestSeqRef.current) return;
+      setOfficialItems(
+        mergeKnowledgeMarketItems(catalog, installsResponse.items || []),
+      );
+      setOfficialDomains({
+        industry: domainsResponse.domains?.industry || [],
+        evaluation: domainsResponse.domains?.evaluation || [],
+      });
+    } catch {
+      // The shared request interceptor displays the localized error.
+    } finally {
+      if (showLoading && requestId === marketRequestSeqRef.current) {
+        setOfficialLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadKnowledgeMarket(true);
+  }, [loadKnowledgeMarket]);
+
+  useEffect(() => {
+    void getLocalTags();
     void checkEmbeddingReady();
 
     const onFeaturesChanged = () => {
@@ -200,6 +302,7 @@ const KnowledgePage: FC = () => {
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      localTagsRequestSeqRef.current += 1;
       window.removeEventListener(
         MODEL_FEATURES_CHANGED_EVENT,
         onFeaturesChanged,
@@ -247,42 +350,136 @@ const KnowledgePage: FC = () => {
   }
 
   useEffect(() => {
-    if (knowledgeType) {
+    if (activeView === "mine" && sourceCategory !== "official") {
       getTableData(1, pagination.pageSize);
+    } else {
+      mineTableRequestSeqRef.current += 1;
+      setLoading(false);
     }
-  }, [knowledgeType, sourceCategory]);
+    return () => {
+      mineTableRequestSeqRef.current += 1;
+    };
+  }, [
+    activeView,
+    sourceCategory,
+    mineSearch,
+    mineLocalTag,
+    mineSort,
+    mineCloudSource,
+  ]);
 
   const loadCloudSources = useCallback(
-    async (page = 1, pageSize = 10, keyword = "") => {
-      const requestSeq = cloudSourceRequestSeqRef.current + 1;
-      cloudSourceRequestSeqRef.current = requestSeq;
+    async (
+      page = 1,
+      pageSize = 10,
+      keyword = "",
+      selectedSort: KnowledgeMineSort = "all",
+      selectedCloudSource: KnowledgeMineCloudSource = "all",
+    ) => {
+      const requestSeq = mineTableRequestSeqRef.current + 1;
+      mineTableRequestSeqRef.current = requestSeq;
       setLoading(true);
 
       try {
-        const sourcesResponse = await dataSourceScanApi.listSources({
-          page,
-          pageSize,
-          keyword: keyword.trim() || undefined,
-        });
-        const sourceList = (sourcesResponse.data.items || []) as ScanV2Source[];
-        const nextSources = sourceList
-          .filter((source) => normalizeDataSourceStatus(source.status) !== "deleted")
-          .map((source) => mapScanSourceToDataSource(source, t));
+        const orderBy = getKnowledgeMineOrderBy(selectedSort);
+        const scanOptions = orderBy
+          ? { params: { order_by: orderBy } }
+          : undefined;
+        const needsClientFilter = selectedCloudSource !== "all";
 
-        if (cloudSourceRequestSeqRef.current !== requestSeq) {
-          return;
-        }
+        const sourceListPromise = (async () => {
+          let sourceList: ScanV2Source[] = [];
+          let sourceTotal = 0;
+          if (needsClientFilter) {
+            const scanPageSize = 200;
+            let scanPage = 1;
+            do {
+              const response = await dataSourceScanApi.listSources(
+                {
+                  page: scanPage,
+                  pageSize: scanPageSize,
+                  keyword: keyword.trim() || undefined,
+                },
+                scanOptions,
+              );
+              const pageItems = (response.data.items || []) as ScanV2Source[];
+              sourceList.push(...pageItems);
+              sourceTotal = Number(response.data.total || 0);
+              if (
+                pageItems.length === 0 ||
+                sourceList.length >= sourceTotal
+              ) {
+                break;
+              }
+              scanPage += 1;
+            } while (true);
+          } else {
+            const response = await dataSourceScanApi.listSources(
+              {
+                page,
+                pageSize,
+                keyword: keyword.trim() || undefined,
+              },
+              scanOptions,
+            );
+            sourceList = (response.data.items || []) as ScanV2Source[];
+            sourceTotal = Number(response.data.total || 0);
+          }
+          return { sourceList, sourceTotal };
+        })();
 
+        const { sourceList, sourceTotal } = await sourceListPromise;
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
+        const filteredSourceList = sourceList.filter(
+          (source) =>
+            normalizeDataSourceStatus(source.status) !== "deleted" &&
+            (selectedCloudSource === "all" ||
+              inferSourceKind(source) === selectedCloudSource),
+        );
+        const visibleSourceList = needsClientFilter
+          ? filteredSourceList.slice((page - 1) * pageSize, page * pageSize)
+          : filteredSourceList;
+        const filteredTotal = needsClientFilter
+          ? filteredSourceList.length
+          : sourceTotal;
+
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
+        const nextSources = await Promise.all(
+          visibleSourceList.map(async (source) => {
+            const sourceId = getScanSourceId(source);
+            if (!sourceId) {
+              return mapScanSourceToDataSource(source, t);
+            }
+            try {
+              const detailResponse = await dataSourceScanApi.getSource({ sourceId });
+              const detailSource = {
+                ...source,
+                ...detailResponse.data.source,
+                summary: source.summary,
+              } as ScanV2Source;
+              const bindings = (detailResponse.data.bindings || []) as ScanV2Binding[];
+              return mapScanSourceToDataSource(
+                detailSource,
+                t,
+                undefined,
+                getFirstScanBinding(bindings),
+                bindings,
+              );
+            } catch {
+              return mapScanSourceToDataSource(source, t);
+            }
+          }),
+        );
+
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
         setCloudSources(nextSources);
         setPagination({
           current: page,
           pageSize,
-          total: Number(sourcesResponse.data.total || 0),
+          total: filteredTotal,
         });
-      } catch (error) {
-        if (cloudSourceRequestSeqRef.current !== requestSeq) {
-          return;
-        }
+      } catch {
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
         setCloudSources([]);
         setPagination({
           current: page,
@@ -290,7 +487,7 @@ const KnowledgePage: FC = () => {
           total: 0,
         });
       } finally {
-        if (cloudSourceRequestSeqRef.current === requestSeq) {
+        if (mineTableRequestSeqRef.current === requestSeq) {
           setLoading(false);
         }
       }
@@ -478,85 +675,399 @@ const KnowledgePage: FC = () => {
     [handleCloudArchiveDelete, handleCloudArchiveEdit, navigateToKnowledgeDetail, t],
   );
 
-  const handleOpenTagEdit = (record: DocRow) => {
-    setTagEditRecord(record);
-    setShowTagEditModal(true);
-  };
-  const handleCloseTagEdit = () => {
-    setShowTagEditModal(false);
-    setTagEditRecord(null);
-  };
-  const handleTagEditSuccess = () => {
-    getTableData(pagination.current, pagination.pageSize);
-  };
+  const trackMarketJob = useCallback((job: TrackedKnowledgeMarketJob) => {
+    setTrackedMarketJobs((current) => ({ ...current, [job.jobId]: job }));
+    if (job.itemId) {
+      setMarketProgress((current) => ({ ...current, [job.itemId]: 0 }));
+    }
+  }, []);
+
+  const handleOfficialInstall = useCallback(
+    async (item: OfficialKnowledgeBase) => {
+      try {
+        const task = await installKnowledgeMarketItem(item.id);
+        trackMarketJob({
+          jobId: task.job_id,
+          itemId: item.id,
+          jobType: "install",
+          name: item.name,
+        });
+        message.info(t("knowledge.installSubmitted", { name: item.name }));
+        void loadKnowledgeMarket();
+      } catch {
+        // The shared request interceptor displays the localized error.
+      }
+    },
+    [loadKnowledgeMarket, t, trackMarketJob],
+  );
+
+  const handleOfficialUpdate = useCallback(
+    async (item: OfficialKnowledgeBase) => {
+      try {
+        const task = await updateKnowledgeMarketItem(item.id);
+        trackMarketJob({
+          jobId: task.job_id,
+          itemId: item.id,
+          jobType: "update",
+          name: item.name,
+        });
+        message.info(t("knowledge.updateSubmitted", { name: item.name }));
+        void loadKnowledgeMarket();
+      } catch {
+        // The shared request interceptor displays the localized error.
+      }
+    },
+    [loadKnowledgeMarket, t, trackMarketJob],
+  );
+
+  const handleOfficialOpen = useCallback(
+    (item?: OfficialKnowledgeBase) => {
+      if (item?.datasetId) {
+        navigate(`/lib/knowledge/detail/${item.datasetId}`);
+        return;
+      }
+      setActiveView("mine");
+      setSourceCategory("official");
+    },
+    [navigate],
+  );
+
+  const handleOfficialQuery = useCallback(
+    (item: OfficialKnowledgeBase) => {
+      if (!item.onlineAccessUrl) {
+        message.info(t("knowledge.onlineQueryUnavailable"));
+        return;
+      }
+      navigate({
+        pathname: "/agent/chat/home",
+        search: `?officialKnowledge=${encodeURIComponent(item.id)}`,
+      });
+    },
+    [navigate, t],
+  );
+
+  const handleOfficialLoadDetail = useCallback(
+    async (item: OfficialKnowledgeBase) => {
+      try {
+        const detail = await getKnowledgeMarketItem(item.id);
+        return mergeKnowledgeMarketDetail(item, detail);
+      } catch {
+        return item;
+      }
+    },
+    [],
+  );
+
+  const handleOfficialUninstall = useCallback(
+    (item: OfficialKnowledgeBase) => {
+      if (!item.datasetId) return;
+      Modal.confirm({
+        title: t("knowledge.uninstallConfirmTitle", { name: item.name }),
+        content: t("knowledge.uninstallConfirmContent"),
+        okText: t("knowledge.uninstall"),
+        okButtonProps: { danger: true },
+        cancelText: t("common.cancel"),
+        onOk: async () => {
+          await KnowledgeBaseServiceApi().datasetServiceDeleteDataset({
+            dataset: item.datasetId,
+          });
+          message.success(t("knowledge.uninstallSuccess", { name: item.name }));
+          await loadKnowledgeMarket();
+        },
+      });
+    },
+    [loadKnowledgeMarket, t],
+  );
+
+  const loadOfficialDatasetOrder = useCallback(
+    async (selectedSort: KnowledgeMineSort) => {
+      const requestSeq = officialSortRequestSeqRef.current + 1;
+      officialSortRequestSeqRef.current = requestSeq;
+      const orderBy = getKnowledgeMineOrderBy(selectedSort);
+      if (!orderBy) {
+        setOfficialDatasetOrder(null);
+        setOfficialSortLoading(false);
+        return;
+      }
+
+      setOfficialSortLoading(true);
+      try {
+        const datasetIds: string[] = [];
+        const seenPageTokens = new Set<string>();
+        let pageToken: string | undefined;
+        do {
+          const response = await KnowledgeBaseServiceApi().datasetServiceListDatasets(
+            {
+              pageToken,
+              pageSize: 100,
+              orderBy,
+            },
+            { params: { source: "official_installed" } },
+          );
+          (response.data.datasets || []).forEach((dataset) => {
+            if (dataset.dataset_id) datasetIds.push(dataset.dataset_id);
+          });
+          const nextPageToken = response.data.next_page_token || undefined;
+          if (!nextPageToken || seenPageTokens.has(nextPageToken)) break;
+          seenPageTokens.add(nextPageToken);
+          pageToken = nextPageToken;
+        } while (pageToken);
+
+        if (officialSortRequestSeqRef.current === requestSeq) {
+          setOfficialDatasetOrder(datasetIds);
+        }
+      } catch {
+        if (officialSortRequestSeqRef.current === requestSeq) {
+          setOfficialDatasetOrder(null);
+        }
+      } finally {
+        if (officialSortRequestSeqRef.current === requestSeq) {
+          setOfficialSortLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (activeView !== "mine" || sourceCategory !== "official") {
+      officialSortRequestSeqRef.current += 1;
+      setOfficialSortLoading(false);
+      return;
+    }
+    void loadOfficialDatasetOrder(mineSort);
+  }, [activeView, loadOfficialDatasetOrder, mineSort, sourceCategory]);
+
+  const installedOfficialItems = useMemo(() => {
+    const items = officialItems.filter(
+      (item) => {
+        if (!item.installed) return false;
+        if (
+          mineOfficialTag !== ALL_TAGS &&
+          !item.tags.includes(mineOfficialTag)
+        ) {
+          return false;
+        }
+        const keyword = mineSearch.trim().toLocaleLowerCase();
+        return !keyword || [item.name, item.desc, item.domain, ...item.tags]
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(keyword);
+      },
+    );
+    return sortByDatasetOrder(items, officialDatasetOrder, (item) => item.datasetId);
+  }, [mineOfficialTag, mineSearch, officialDatasetOrder, officialItems]);
+
+  const officialFilterTags = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...officialItems
+            .filter((item) => item.installed)
+            .flatMap((item) => item.tags),
+        ]),
+      ).sort((left, right) => left.localeCompare(right, "zh-CN")),
+    [officialItems],
+  );
+
+  useEffect(() => {
+    if (mineLocalTag !== ALL_TAGS && !localTags.includes(mineLocalTag)) {
+      setMineLocalTag(ALL_TAGS);
+    }
+  }, [localTags, mineLocalTag]);
+
+  useEffect(() => {
+    if (
+      mineOfficialTag !== ALL_TAGS &&
+      !officialFilterTags.includes(mineOfficialTag)
+    ) {
+      setMineOfficialTag(ALL_TAGS);
+    }
+  }, [mineOfficialTag, officialFilterTags]);
+
+  const handleUpdateAllOfficial = useCallback(async () => {
+    try {
+      const task = await updateAllKnowledgeMarketItems();
+      trackMarketJob({
+        jobId: task.job_id,
+        itemId: "",
+        jobType: "updateAll",
+        name: t("knowledge.taskTypeUpdateAll"),
+      });
+      message.info(t("knowledge.updateAllSubmitted"));
+    } catch {
+      // The shared request interceptor displays the localized error.
+    }
+  }, [t, trackMarketJob]);
+
+  useEffect(() => {
+    const jobs = Object.values(trackedMarketJobs);
+    if (jobs.length === 0) return;
+
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const taskResults = await Promise.all(
+        jobs.map(async (job) => {
+          try {
+            const detail = await getKnowledgeMarketTask(job.jobId, {
+              silentError: true,
+            });
+            return { job, detail };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (stopped) return;
+
+      const terminalJobIds = taskResults
+        .filter((result) => {
+          if (!result) return false;
+          return isKnowledgeMarketTaskTerminal(
+            {
+              jobType: result.job.jobType,
+              jobStatus: result.detail.job_status,
+              stage: result.detail.stage,
+              overallPercent: result.detail.overall_percent,
+              progress: result.detail.progress,
+            },
+          );
+        })
+        .map((result) => result!.job.jobId);
+      setMarketProgress((current) => {
+        const next = { ...current };
+        taskResults.forEach((result) => {
+          if (!result) return;
+          const { job, detail } = result;
+          const terminal = isKnowledgeMarketTaskTerminal(
+            {
+              jobType: job.jobType,
+              jobStatus: detail.job_status,
+              stage: detail.stage,
+              overallPercent: detail.overall_percent,
+              progress: detail.progress,
+            },
+          );
+          if (job.itemId) {
+            if (terminal) delete next[job.itemId];
+            else next[job.itemId] = detail.overall_percent;
+          }
+        });
+        return next;
+      });
+
+      taskResults.forEach((result) => {
+        if (!result || !terminalJobIds.includes(result.job.jobId)) return;
+        const failed = isKnowledgeMarketTaskFailed({
+          jobType: result.job.jobType,
+          jobStatus: result.detail.job_status,
+          stage: result.detail.stage,
+          overallPercent: result.detail.overall_percent,
+          progress: result.detail.progress,
+        });
+        const partiallyFailed = isKnowledgeMarketTaskPartiallyFailed({
+          jobType: result.job.jobType,
+          jobStatus: result.detail.job_status,
+          stage: result.detail.stage,
+          overallPercent: result.detail.overall_percent,
+          progress: result.detail.progress,
+        });
+        if (partiallyFailed) {
+          message.warning(
+            t("knowledge.marketTaskPartiallyFailed", { name: result.job.name }),
+          );
+        } else if (failed) {
+          message.error(
+            t("knowledge.marketTaskFailed", { name: result.job.name }),
+          );
+        } else if (result.job.jobType === "install") {
+          message.success(
+            t("knowledge.installSuccess", { name: result.job.name }),
+          );
+        } else if (result.job.jobType === "update") {
+          message.success(
+            t("knowledge.updateCheckComplete", { name: result.job.name }),
+          );
+        } else {
+          message.success(t("knowledge.updateAllChecked"));
+        }
+      });
+
+      if (terminalJobIds.length > 0) {
+        setTrackedMarketJobs((current) => {
+          const next = { ...current };
+          terminalJobIds.forEach((jobId) => delete next[jobId]);
+          return next;
+        });
+        void loadKnowledgeMarket();
+      }
+      if (terminalJobIds.length < jobs.length) {
+        timer = window.setTimeout(poll, 2000);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [loadKnowledgeMarket, t, trackedMarketJobs]);
+
+  useEffect(() => {
+    if (!officialItems.some((item) => item.active)) return;
+    const timer = window.setTimeout(() => {
+      void loadKnowledgeMarket();
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [loadKnowledgeMarket, officialItems]);
 
   const columns: ColumnsType<Dataset> = [
     {
-      title: t("knowledge.nameId"),
+      title: t("knowledge.nameDescription"),
       dataIndex: "display_name",
-      width: 350,
+      width: 300,
       render: (name: string, data: Dataset) => {
         return (
-          <Flex vertical align={"flex-start"}>
-            <Button
-              className="link-btn"
-              type="link"
-              style={{ maxWidth: "100%" }}
-              onClick={() => {
-                navigate({
-                  pathname: `/lib/knowledge/detail/${data.dataset_id}`,
-                });
-              }}
-            >
-              <Tooltip title={name}>
-                <span className="text-ellipsis">{name}</span>
-              </Tooltip>
-            </Button>
-            <Tooltip title={data.dataset_id}>
-              <span
-                className="text-ellipsis"
-                style={{ color: "var(--color-text-description)" }}
+          <div className="knowledge-list-name-cell">
+            <span className="knowledge-list-name-icon"><DatabaseOutlined /></span>
+            <span className="knowledge-list-name-copy">
+              <Button
+                className="knowledge-list-name-button"
+                type="link"
+                onClick={() => {
+                  navigate({ pathname: `/lib/knowledge/detail/${data.dataset_id}` });
+                }}
               >
-                {data.dataset_id}
-              </span>
-            </Tooltip>
-          </Flex>
+                <Tooltip title={name}><span>{name}</span></Tooltip>
+              </Button>
+              <Tooltip title={data.desc} placement="topLeft">
+                <span className="knowledge-list-description">{data.desc || "-"}</span>
+              </Tooltip>
+            </span>
+          </div>
         );
       },
     },
     {
-      title: t("common.description"),
-      dataIndex: "desc",
-      ellipsis: {
-        showTitle: false,
-      },
-      width: 200,
-      render: (desc: string) => (
-        <Tooltip placement="topLeft" title={desc}>
-          <span>{desc}</span>
-        </Tooltip>
-      ),
+      title: t("knowledge.source"),
+      key: "source",
+      width: 132,
+      render: () => <span className="knowledge-list-source">{t("knowledge.localUpload")}</span>,
     },
     {
       title: t("knowledge.tags"),
       dataIndex: "tags",
-      width: 180,
+      width: 170,
       render: (knowledgeBaseTags: string[]) => {
         return (
-          <Flex style={{ overflowX: "auto", padding: "13px 0" }}>
-            {knowledgeBaseTags.map((tag, index) => {
-              return <KnowledgeTag key={index} title={tag} checkable={false} />;
-            })}
-          </Flex>
+          <div className="knowledge-list-tags">
+            {(knowledgeBaseTags || []).slice(0, 2).map((tag, index) => (
+              <KnowledgeTag key={`${tag}-${index}`} title={tag} checkable={false} />
+            ))}
+            {!knowledgeBaseTags?.length ? <span>-</span> : null}
+          </div>
         );
-      },
-    },
-    {
-      title: t("knowledge.updateDate"),
-      dataIndex: "update_time",
-      width: 180,
-      render: (time: string) => {
-        return moment(time).format("YYYY-MM-DD HH:mm:ss");
       },
     },
     {
@@ -568,14 +1079,29 @@ const KnowledgePage: FC = () => {
       },
     },
     {
-      title: t("knowledge.fileCount"),
+      title: t("knowledge.documentCountLabel"),
       dataIndex: "document_count",
-      width: 100,
+      width: 88,
+      render: (count: number) => t("knowledge.documentCount", { count: count || 0 }),
+    },
+    {
+      title: t("knowledge.updateDate"),
+      dataIndex: "update_time",
+      width: 116,
+      render: (time: string) => (time ? moment(time).format("YYYY-MM-DD") : "-"),
+    },
+    {
+      title: t("knowledge.status"),
+      key: "status",
+      width: 116,
+      render: () => (
+        <span className="knowledge-list-status is-ready"><i />{t("knowledge.available")}</span>
+      ),
     },
     {
       title: t("common.actions"),
       key: "action",
-      width: 160,
+      width: 190,
       fixed: "right",
       render: (data: Dataset) => {
         if (!data.acl?.includes(DatasetAclEnum.DatasetWrite)) {
@@ -586,22 +1112,24 @@ const KnowledgePage: FC = () => {
             <Button
               className="link-btn"
               type="link"
-              onClick={() => {
+              onClick={(event: MouseEvent<HTMLElement>) => {
+                event.stopPropagation();
                 createUpdateRef.current?.onOpen(data);
               }}
             >
               {t("common.edit")}
             </Button>
             {!runtimeFeatures.hideUserGroupSurfaces && (
-              <Button
-                className="link-btn"
-                type="link"
-                onClick={() =>
-                  navigate({
-                    pathname: `/lib/knowledge/auth/${data.dataset_id}`,
-                  })
-                }
-              >
+                <Button
+                  className="link-btn"
+                  type="link"
+                  onClick={(event: MouseEvent<HTMLElement>) => {
+                    event.stopPropagation();
+                    navigate({
+                      pathname: `/lib/knowledge/auth/${data.dataset_id}`,
+                    });
+                  }}
+                >
                 {t("knowledge.authorize")}
               </Button>
             )}
@@ -609,7 +1137,8 @@ const KnowledgePage: FC = () => {
               className="link-btn"
               type="link"
               danger
-              onClick={() => {
+              onClick={(event: MouseEvent<HTMLElement>) => {
+                event.stopPropagation();
                 const knowledgeName =
                   data.display_name || data.dataset_id || "";
                 confirmRef.current?.onOpen({
@@ -630,197 +1159,178 @@ const KnowledgePage: FC = () => {
     },
   ];
 
-  const knowledgeColumns: ColumnsType<DocRow> = [
-    {
-      title: t("knowledge.docName"),
-      dataIndex: "display_name",
-      width: 350,
-      render: (name: string, record) => {
-        return (
-          <Flex vertical align={"flex-start"}>
+  const officialColumns = useMemo<ColumnsType<OfficialKnowledgeBase>>(
+    () => [
+      {
+        title: t("knowledge.nameDescription"),
+        dataIndex: "name",
+        width: 300,
+        render: (name, item) => (
+          <div className="knowledge-list-name-cell">
+            <span className="knowledge-list-name-icon is-official"><AppstoreOutlined /></span>
+            <span className="knowledge-list-name-copy">
+              <Button
+                className="knowledge-list-name-button"
+                type="link"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleOfficialOpen(item);
+                }}
+              >
+                <Tooltip title={name}><span>{name}</span></Tooltip>
+              </Button>
+              <Tooltip title={item.desc} placement="topLeft">
+                <span className="knowledge-list-description">{item.desc}</span>
+              </Tooltip>
+            </span>
+          </div>
+        ),
+      },
+      {
+        title: t("knowledge.source"),
+        dataIndex: "source",
+        width: 132,
+        render: (source: string) => {
+          const sourceLabel = source || t("knowledge.officialKnowledge");
+          return (
+            <Tooltip title={sourceLabel} placement="topLeft">
+              <span className="knowledge-list-source is-official">
+                <span className="knowledge-list-source-text">{sourceLabel}</span>
+              </span>
+            </Tooltip>
+          );
+        },
+      },
+      {
+        title: t("knowledge.tags"),
+        dataIndex: "tags",
+        width: 170,
+        render: (itemTags: string[]) => (
+          <div className="knowledge-list-tags">
+            {itemTags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}
+          </div>
+        ),
+      },
+      {
+        title: t("knowledge.domainFilter"),
+        dataIndex: "domain",
+        width: 110,
+      },
+      {
+        title: t("knowledge.updateDate"),
+        dataIndex: "updated",
+        width: 116,
+      },
+      {
+        title: t("knowledge.status"),
+        key: "status",
+        width: 116,
+        render: (_, item) => {
+          const active = item.active || marketProgress[item.id] !== undefined;
+          return (
+            <span
+              className={`knowledge-list-status ${active ? "is-update" : "is-ready"}`}
+            >
+              <i />
+              {active ? t("knowledge.processing") : t("knowledge.available")}
+            </span>
+          );
+        },
+      },
+      {
+        title: t("common.actions"),
+        key: "actions",
+        width: 220,
+        fixed: "right",
+        render: (_, item) => (
+          <Flex gap={10} align="center">
+            {item.onlineAccessUrl ? (
+              <Button
+                className="link-btn"
+                type="link"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleOfficialQuery(item);
+                }}
+              >
+                {t("knowledge.onlineQuery")}
+              </Button>
+            ) : null}
             <Button
               className="link-btn"
               type="link"
-              style={{ maxWidth: "100%" }}
-              onClick={() => {
-                const documentId = record?.document_id;
-                const datasetId = record?.dataset_id;
-                const relPathtype = record?.type;
-                if (relPathtype === "FOLDER") {
-                  navigate({ pathname: `/lib/knowledge/detail/${datasetId}` });
-                } else {
-                  if (isDocumentDetailUnsupported(record?.display_name)) {
-                    message.info(t("knowledge.documentDetailUnsupported"));
-                    return;
-                  }
-                  navigate({
-                    pathname:
-                      documentId && datasetId
-                        ? `/lib/knowledge/knowledge/${datasetId}/${documentId}`
-                        : `/lib/knowledge/detail/${datasetId}`,
-                  });
-                }
+              loading={item.active || marketProgress[item.id] !== undefined}
+              disabled={item.active || marketProgress[item.id] !== undefined}
+              onClick={(event) => {
+                event.stopPropagation();
+                handleOfficialUpdate(item);
               }}
             >
-              <Tooltip title={name}>
-                <span className="text-ellipsis">{name}</span>
-              </Tooltip>
+              {t("knowledge.checkForUpdates")}
+            </Button>
+            <Button
+              className="link-btn"
+              type="link"
+              danger
+              disabled={item.active || marketProgress[item.id] !== undefined}
+              onClick={(event) => {
+                event.stopPropagation();
+                handleOfficialUninstall(item);
+              }}
+            >
+              {t("knowledge.uninstall")}
             </Button>
           </Flex>
-        );
+        ),
       },
-    },
-    {
-      title: t("knowledge.tags"),
-      dataIndex: "tags",
-      width: 120,
-      render: (rowTags: string[] | undefined, record: DocRow) => {
-        if (record.type === DocTypeEnum.Folder) {
-          return <span>-</span>;
-        }
-        if (!rowTags || rowTags.length === 0) {
-          return (
-            <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-              <span>-</span>
-              <Button
-                type="text"
-                size="small"
-                icon={<EditFilled style={{ color: "#1890ff" }} />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleOpenTagEdit(record);
-                }}
-                style={{ padding: 0, minWidth: "auto", height: "auto" }}
-              />
-            </div>
-          );
-        }
-        return (
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <div
-              style={{
-                display: "flex",
-                gap: "4px",
-                overflowX: "auto",
-                overflowY: "hidden",
-                maxWidth: "100%",
-                paddingBottom: "2px",
-                WebkitOverflowScrolling: "touch",
-                flex: 1,
-              }}
-              className="tags-scroll-container"
-            >
-              {rowTags.map((tag) => (
-                <Tag
-                  key={tag}
-                  style={{ flexShrink: 0, margin: 0, whiteSpace: "nowrap" }}
-                >
-                  {tag}
-                </Tag>
-              ))}
-            </div>
-            <Button
-              type="text"
-              size="small"
-              icon={<EditFilled style={{ color: "#1890ff" }} />}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleOpenTagEdit(record);
-              }}
-              style={{
-                padding: 0,
-                minWidth: "auto",
-                height: "auto",
-                flexShrink: 0,
-              }}
-            />
-          </div>
-        );
-      },
-    },
-    {
-      title: t("knowledge.directory"),
-      dataIndex: "rel_path",
-      width: 120,
-      render: (rel_path: string) => {
-        if (rel_path?.length) {
-          const relArr = rel_path?.split("/");
-          if (relArr?.[1]) {
-            return relArr?.[0];
-          }
-          if (
-            ["pdf", "docx", "doc", "pptx", "pptm"].includes(
-              rel_path?.split(".")?.at(-1) ?? "",
-            )
-          ) {
-            return "/";
-          }
-          if (!relArr?.[1]?.length) {
-            return "/";
-          }
-          return rel_path;
-        }
-        return "/";
-      },
-    },
-    {
-      title: t("knowledge.parseStatus"),
-      dataIndex: "document_stage",
-      width: 120,
-      render: (document_stage: string) => {
-        return (
-          DocumentStageEnum[document_stage as keyof typeof DocumentStageEnum] ||
-          "-"
-        );
-      },
-    },
-    {
-      title: t("knowledge.docType"),
-      dataIndex: "type",
-      width: 120,
-      render: (type: string, record: DocRow) => {
-        if (type === DocTypeEnum.Folder) {
-          return t("knowledge.folder");
-        }
-        return (
-          FileUtils.getSuffix(record.display_name || "") ||
-          t("knowledge.unknown")
-        );
-      },
-    },
-    {
-      title: t("knowledge.size"),
-      dataIndex: "document_size",
-      width: 120,
-      render: (_: number, record: DocRow) => {
-        return FileUtils.formatFileSize(record.document_size);
-      },
-    },
-    {
-      title: t("knowledge.updateDate"),
-      dataIndex: "update_time",
-      width: 180,
-      render: (text: string) => moment(text).format(TIME_FORMAT),
-    },
-    {
-      title: t("knowledge.updater"),
-      dataIndex: "creator",
-      width: 120,
-    },
-  ];
+    ],
+    [
+      handleOfficialOpen,
+      handleOfficialQuery,
+      handleOfficialUninstall,
+      handleOfficialUpdate,
+      marketProgress,
+      t,
+    ],
+  );
 
-  function getTags() {
-    KnowledgeBaseServiceApi()
-      .datasetServiceAllDatasetTags()
-      .then((res) => {
-        const uniqueTags = Array.from(
-          new Set((res.data.tags || []).filter(Boolean)),
+  async function getLocalTags() {
+    const requestSeq = localTagsRequestSeqRef.current + 1;
+    localTagsRequestSeqRef.current = requestSeq;
+    const nextTags = new Set<string>();
+    const seenPageTokens = new Set<string>();
+    let pageToken: string | undefined;
+
+    try {
+      do {
+        const response = await KnowledgeBaseServiceApi().datasetServiceListDatasets(
+          { pageToken, pageSize: 100 },
+          { params: { source: "manual" } },
         );
-        setTags([ALL_TAGS, ...uniqueTags.filter((tag) => tag !== ALL_TAGS)]);
-      })
-      .catch(() => {
-        setTags([ALL_TAGS]);
-      });
+        if (localTagsRequestSeqRef.current !== requestSeq) return;
+        (response.data.datasets || []).forEach((dataset) => {
+          (dataset.tags || []).forEach((tag) => {
+            if (tag && tag !== ALL_TAGS) nextTags.add(tag);
+          });
+        });
+        const nextPageToken = response.data.next_page_token || undefined;
+        if (!nextPageToken || seenPageTokens.has(nextPageToken)) break;
+        seenPageTokens.add(nextPageToken);
+        pageToken = nextPageToken;
+      } while (pageToken);
+
+      if (localTagsRequestSeqRef.current === requestSeq) {
+        setLocalTags(
+          Array.from(nextTags).sort((left, right) =>
+            left.localeCompare(right, "zh-CN"),
+          ),
+        );
+      }
+    } catch {
+      if (localTagsRequestSeqRef.current === requestSeq) {
+        setLocalTags([]);
+      }
+    }
   }
 
   const handleSuccess = (
@@ -846,13 +1356,24 @@ const KnowledgePage: FC = () => {
   };
 
   function getTableData(page = 1, pageSize = pagination.pageSize) {
-    const values = form.getFieldsValue();
-
-    if (knowledgeType === "knowledgeBase" && sourceCategory === "cloudArchive") {
-      void loadCloudSources(page, pageSize || 10, values.keyword || "");
+    if (sourceCategory === "official") {
+      setLoading(false);
       return;
     }
 
+    if (sourceCategory === "cloudArchive") {
+      void loadCloudSources(
+        page,
+        pageSize || 10,
+        mineSearch,
+        mineSort,
+        mineCloudSource,
+      );
+      return;
+    }
+
+    const requestSeq = mineTableRequestSeqRef.current + 1;
+    mineTableRequestSeqRef.current = requestSeq;
     const newPagination = {
       ...pagination,
       current: page,
@@ -868,52 +1389,34 @@ const KnowledgePage: FC = () => {
 
     setLoading(true);
 
-    if (knowledgeType === "knowledgeBase") {
-      KnowledgeBaseServiceApi()
-        .datasetServiceListDatasets({
-          pageToken,
-          pageSize: pageSize,
-          keyword: values.keyword,
-          tags: values?.tags && values.tags !== ALL_TAGS ? [values.tags] : [],
-        }, {
-          params: { source: "manual" },
-        })
-        .then((res) => {
-          handleSuccess(
-            (res.data.datasets as unknown as Dataset[]) || [],
-            res.data.total_size || 0,
-            newPagination,
-          );
-        })
-        .catch(() => {
-          initData();
-        })
-        .finally(() => {
+    KnowledgeBaseServiceApi()
+      .datasetServiceListDatasets({
+        pageToken,
+        pageSize: pageSize,
+        orderBy: getKnowledgeMineOrderBy(mineSort),
+        keyword: mineSearch.trim() || undefined,
+        tags: mineLocalTag !== ALL_TAGS ? [mineLocalTag] : [],
+      }, {
+        params: { source: "manual" },
+      })
+      .then((res) => {
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
+        handleSuccess(
+          (res.data.datasets as unknown as Dataset[]) || [],
+          res.data.total_size || 0,
+          newPagination,
+        );
+      })
+      .catch(() => {
+        if (mineTableRequestSeqRef.current !== requestSeq) return;
+        setDataSource([]);
+        setPagination({ ...newPagination, total: 0 });
+      })
+      .finally(() => {
+        if (mineTableRequestSeqRef.current === requestSeq) {
           setLoading(false);
-        });
-    } else {
-      DocumentServiceApi()
-        .documentServiceSearchAllDocuments({
-          searchAllDocumentsRequest: {
-            page_token: pageToken,
-            page_size: pageSize,
-            keyword: values.keyword || "",
-          },
-        })
-        .then((res) => {
-          handleSuccess(
-            (res.data.documents as unknown as Dataset[]) || [],
-            res.data.total_size || 0,
-            newPagination,
-          );
-        })
-        .catch(() => {
-          initData();
-        })
-        .finally(() => {
-          setLoading(false);
-        });
-    }
+        }
+      });
   }
 
   function onDelete(id: string) {
@@ -921,7 +1424,7 @@ const KnowledgePage: FC = () => {
       .datasetServiceDeleteDataset({ dataset: id })
       .then(() => {
         message.success(t("knowledge.deleteSuccess"));
-        getTags();
+        void getLocalTags();
         getTableData();
       });
   }
@@ -937,7 +1440,7 @@ const KnowledgePage: FC = () => {
           })
           .then(() => {
             message.success(t("knowledge.editSuccess"));
-            getTags();
+            void getLocalTags();
             getTableData();
           });
       }
@@ -951,7 +1454,7 @@ const KnowledgePage: FC = () => {
               ? t("knowledge.editSuccess")
               : t("knowledge.createSuccess"),
           );
-          getTags();
+          void getLocalTags();
           getTableData();
         });
     } finally {
@@ -969,9 +1472,45 @@ const KnowledgePage: FC = () => {
 
   return (
     <div className="knowledge-list-page">
-      <h2 className="knowledge-title admin-page-title">
-        {t("layout.knowledgeBase")}
-      </h2>
+      <div className="knowledge-page-header">
+        <div>
+          {new URLSearchParams(location.search).get("from") === "settings-knowledge" ? (
+            <Button
+              className="knowledge-settings-return"
+              icon={<ArrowLeftOutlined />}
+              onClick={() => navigate("/settings?section=knowledge")}
+              type="text"
+            >
+              {t("knowledge.backToKnowledgeSettings")}
+            </Button>
+          ) : null}
+          <h1>{t("layout.knowledgeBase")}</h1>
+          <p>{t("knowledge.pageDescription")}</p>
+        </div>
+        <div className="knowledge-page-header-actions">
+          {activeView === "mine" ? (
+            <Tooltip title={createActionDisabled ? createActionDisabledTooltip : undefined}>
+              <span>
+                <Button
+                  type="primary"
+                  icon={<PlusOutlined />}
+                  disabled={createActionDisabled}
+                  onClick={() => createKnowledgeRef.current?.onOpen()}
+                >
+                  {t("knowledge.createKnowledgeBase")}
+                </Button>
+              </span>
+            </Tooltip>
+          ) : null}
+          <Button
+            icon={<HistoryOutlined />}
+            onClick={() => setMarketTaskModalOpen(true)}
+          >
+            {t("knowledge.backgroundTasks")}
+          </Button>
+        </div>
+      </div>
+
       {embeddingReady === false ? (
         <Alert
           banner
@@ -981,11 +1520,11 @@ const KnowledgePage: FC = () => {
               <span>
                 {t("knowledge.embeddingNotReadyBannerAdmin")}
                 <a
-                  href="/model-providers"
+                  href={modelSettingsPath}
                   style={{ marginLeft: 8, fontWeight: 500 }}
                   onClick={(e: MouseEvent<HTMLAnchorElement>) => {
                     e.preventDefault();
-                    navigate("/model-providers");
+                    navigate(modelSettingsPath);
                   }}
                 >
                   {t("knowledge.goToConfig")}
@@ -1008,11 +1547,11 @@ const KnowledgePage: FC = () => {
               <span>
                 {t("knowledge.multimodalEmbeddingNotReadyBannerAdmin")}
                 <a
-                  href="/model-providers"
+                  href={modelSettingsPath}
                   style={{ marginLeft: 8, fontWeight: 500 }}
                   onClick={(e: MouseEvent<HTMLAnchorElement>) => {
                     e.preventDefault();
-                    navigate("/model-providers");
+                    navigate(modelSettingsPath);
                   }}
                 >
                   {t("knowledge.goToConfig")}
@@ -1026,125 +1565,182 @@ const KnowledgePage: FC = () => {
           type="warning"
         />
       ) : null}
-      <Form className="list-header" form={form}>
-        <ListPageHeader
-          placeholder={
-            isCloudArchiveView
-              ? t("admin.dataSourceAssetSearchPlaceholder")
-              : knowledgeType === "knowledgeBase"
-                ? t("knowledge.searchPlaceholder")
-                : t("knowledge.searchDocPlaceholder")
-          }
-          searchKey="keyword"
-          btnText={t("knowledge.createKnowledgeBase")}
-          btnDisabled={createActionDisabled}
-          btnDisabledTooltip={createActionDisabledTooltip}
+
+      <div className="knowledge-view-tabs" role="tablist" aria-label={t("knowledge.viewTabs")}>
+        <button
+          type="button"
+          role="tab"
+          className={activeView === "mine" ? "is-active" : ""}
+          aria-selected={activeView === "mine"}
           onClick={() => {
-            createKnowledgeRef.current?.onOpen();
+            setMineFilterOpen(false);
+            setActiveView("mine");
           }}
-          onSearch={() => {
-            getTableData();
+        >
+          <span className="knowledge-view-tab-icon"><DatabaseOutlined /></span>
+          <span><strong>{t("knowledge.myKnowledge")}</strong><small>{t("knowledge.myKnowledgeDescription")}</small></span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={activeView === "square" ? "is-active" : ""}
+          aria-selected={activeView === "square"}
+          onClick={() => {
+            setMineFilterOpen(false);
+            setActiveView("square");
           }}
-          extra={
-            <>
-              {knowledgeType === "knowledgeBase" && (
-                <>
-                  {sourceCategory === "local" && (
-                    <Form.Item
-                      label={t("knowledge.tags")}
-                      name="tags"
-                      style={{ marginBottom: 0 }}
-                      initialValue={ALL_TAGS}
-                    >
-                      <Select
-                        className="ghost-custom-border !w-[260px]"
-                        options={tags.map((tag) => ({
-                          label: tag === ALL_TAGS ? t("knowledge.allTags") : tag,
-                          value: tag,
-                        }))}
-                        placeholder={t("knowledge.selectTag")}
-                        allowClear
-                        variant="borderless"
-                        onChange={() => {
-                          getTableData();
-                        }}
-                      />
-                    </Form.Item>
-                  )}
-                  <Form.Item
-                    label={t("knowledge.sourceCategory")}
-                    name="sourceCategory"
-                    style={{ marginBottom: 0 }}
-                    initialValue="local"
-                  >
-                    <Select
-                      className="ghost-custom-border !w-[220px]"
-                      popupMatchSelectWidth={145}
-                      options={knowledgeSourceOptions}
-                      variant="borderless"
-                      onChange={(value: SourceCategory) => {
-                        setSourceCategory(value);
-                        initData();
-                      }}
-                    />
-                  </Form.Item>
-                </>
-              )}
-            </>
-          }
-          prefix={
-            <Select
-              className="ghost-custom-border !w-[100px]"
-              options={[
-                { key: "knowledgeBase", value: t("layout.knowledgeBase") },
-                { key: "knowledge", value: t("knowledge.knowledge") },
-              ].map(({ key, value }) => ({ label: value, value: key }))}
-              variant="borderless"
-              onChange={(key) => {
-                form.resetFields(["keyword", "tags", "sourceCategory"]);
-                initData();
-                form.setFieldsValue({
-                  tags: ALL_TAGS,
-                  sourceCategory: "local",
-                });
-                setSourceCategory("local");
-                setKnowledgeType(key);
-              }}
-              value={knowledgeType}
-            />
-          }
+        >
+          <span className="knowledge-view-tab-icon"><AppstoreOutlined /></span>
+          <span><strong>{t("knowledge.knowledgeSquare")}</strong><small>{t("knowledge.knowledgeSquareDescription")}</small></span>
+        </button>
+      </div>
+
+      {activeView === "square" ? (
+        <KnowledgeSquare
+          items={officialItems}
+          domains={officialDomains}
+          loading={officialLoading}
+          progressByItem={marketProgress}
+          onInstall={handleOfficialInstall}
+          onUpdate={handleOfficialUpdate}
+          onOpen={handleOfficialOpen}
+          onQuery={handleOfficialQuery}
+          onLoadDetail={handleOfficialLoadDetail}
         />
-      </Form>
-      <ListPageTable
-        className={isCloudArchiveView ? "data-source-asset-table" : undefined}
-        rowKey={
-          isCloudArchiveView
-            ? "id"
-            : knowledgeType === "knowledgeBase"
-              ? "dataset_id"
-              : "document_id"
-        }
-        columns={
-          (isCloudArchiveView
-            ? cloudSourceColumns
-            : knowledgeType === "knowledgeBase"
-              ? columns
-              : knowledgeColumns) as ColumnsType<any>
-        }
-        loading={loading}
-        dataSource={isCloudArchiveView ? cloudSources : dataSource}
-        expandable={{ showExpandColumn: false }}
-        pagination={{
-          ...pagination,
-          showSizeChanger: true,
-          showTotal: (total: number) => t("common.totalItems", { total }),
-        }}
-        onChange={onTableChange}
-        scroll={{
-          x: isCloudArchiveView ? 1200 : undefined,
-          y: "calc(100vh - 260px)",
-        }}
-      />
+      ) : (
+        <div className="knowledge-mine-view">
+          <div className="knowledge-source-tabs" role="tablist" aria-label={t("knowledge.sourceCategory")}>
+            {([
+              ["local", t("knowledge.localUpload")],
+              ["cloudArchive", t("knowledge.cloudArchiveCreated")],
+              ["official", t("knowledge.installedOfficialKnowledge")],
+            ] as Array<[SourceCategory, string]>).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                className={sourceCategory === value ? "is-active" : ""}
+                aria-selected={sourceCategory === value}
+                onClick={() => {
+                  setMineFilterOpen(false);
+                  if (value !== sourceCategory && value !== "official") initData();
+                  setSourceCategory(value);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            className={`knowledge-mine-toolbar ${isOfficialView ? "has-update-all" : ""}`}
+          >
+            <Input.Search
+              allowClear
+              prefix={<SearchOutlined />}
+              value={mineSearch}
+              placeholder={
+                isCloudArchiveView
+                  ? t("admin.dataSourceAssetSearchPlaceholder")
+                  : t("knowledge.squareSearchPlaceholder")
+              }
+              onFocus={() => setMineFilterOpen(false)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setMineSearch(event.target.value)
+              }
+            />
+            {isOfficialView ? (
+              <Button
+                type="primary"
+                disabled={
+                  !officialItems.some((item) => item.installed) ||
+                  Object.values(trackedMarketJobs).some(
+                    (job) => job.jobType === "updateAll",
+                  )
+                }
+                onClick={handleUpdateAllOfficial}
+              >
+                {t("knowledge.updateAll")}
+              </Button>
+            ) : null}
+            <KnowledgeMineFilterPopover
+              t={t}
+              tags={isOfficialView ? officialFilterTags : localTags}
+              primaryFilter={isCloudArchiveView ? "cloudSource" : "tags"}
+              open={mineFilterOpen}
+              selectedTag={
+                isOfficialView ? mineOfficialTag : mineLocalTag
+              }
+              selectedSort={mineSort}
+              selectedCloudSource={mineCloudSource}
+              onOpenChange={setMineFilterOpen}
+              onTagChange={(tag) => {
+                if (isOfficialView) setMineOfficialTag(tag);
+                else setMineLocalTag(tag);
+              }}
+              onSortChange={setMineSort}
+              onCloudSourceChange={setMineCloudSource}
+            />
+            <Button
+              onClick={() => {
+                if (sourceCategory !== "local") initData();
+                setMineSearch("");
+                setMineLocalTag(ALL_TAGS);
+                setMineOfficialTag(ALL_TAGS);
+                setMineSort("all");
+                setMineCloudSource("all");
+                setSourceCategory("local");
+                setMineFilterOpen(false);
+              }}
+            >
+              {t("common.reset")}
+            </Button>
+          </div>
+
+          <ListPageTable
+            rootClassName={`knowledge-mine-table ${isCloudArchiveView ? "data-source-asset-table" : ""}`}
+            rowKey={isCloudArchiveView || isOfficialView ? "id" : "dataset_id"}
+            columns={
+              (isCloudArchiveView
+                ? cloudSourceColumns
+                : isOfficialView
+                  ? officialColumns
+                  : columns) as ColumnsType<any>
+            }
+            loading={isOfficialView ? officialLoading || officialSortLoading : loading}
+            dataSource={
+              isCloudArchiveView
+                ? cloudSources
+                : isOfficialView
+                  ? installedOfficialItems
+                  : dataSource
+            }
+            expandable={{ showExpandColumn: false }}
+            pagination={
+              isOfficialView
+                ? false
+                : {
+                    ...pagination,
+                    showSizeChanger: true,
+                    showTotal: (total: number) => t("common.totalItems", { total }),
+                  }
+            }
+            onChange={isOfficialView ? undefined : onTableChange}
+            onRow={(record: any) => ({
+              onClick: () => {
+                if (isOfficialView) {
+                  handleOfficialOpen(record as OfficialKnowledgeBase);
+                  return;
+                }
+                if (!isCloudArchiveView && "dataset_id" in record && record.dataset_id) {
+                  navigate(`/lib/knowledge/detail/${record.dataset_id}`);
+                }
+              },
+            })}
+            scroll={{ x: isCloudArchiveView ? 1240 : 1200 }}
+          />
+        </div>
+      )}
 
       <TypedConfirmModal ref={confirmRef} onClick={onDelete} />
 
@@ -1155,12 +1751,10 @@ const KnowledgePage: FC = () => {
         onCreate={onUpdate}
       />
       <SyncKnowledgeBaseCreationFlow vm={syncCreateVm} hideProviderModal />
-      <EditTags
-        open={showTagEditModal}
-        record={tagEditRecord as TreeNode | null}
-        datasetId={tagEditRecord?.dataset_id ?? ""}
-        onCancel={handleCloseTagEdit}
-        onSuccess={handleTagEditSuccess}
+      <KnowledgeMarketTaskModal
+        open={marketTaskModalOpen}
+        refreshKey={Object.keys(trackedMarketJobs).sort().join(",")}
+        onClose={() => setMarketTaskModalOpen(false)}
       />
     </div>
   );

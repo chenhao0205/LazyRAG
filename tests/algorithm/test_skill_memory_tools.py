@@ -1,27 +1,9 @@
 import importlib
 
-memory_mod = importlib.import_module('lazymind.chat.engine.tools.memory_editor')
-memory_reader_mod = importlib.import_module('lazymind.chat.engine.tools.memory_reader')
+import pytest
+from lazyllm.tools.agent import ToolExecutionError
+
 skill_editor_mod = importlib.import_module('lazymind.chat.engine.tools.skill_editor')
-
-
-class FakeMemoryStore:
-    def __init__(self, contents=None, read_error=None, write_error=None):
-        self.contents = dict(contents or {})
-        self.read_error = read_error
-        self.write_error = write_error
-        self.writes = []
-
-    def read(self, target):
-        if self.read_error:
-            raise self.read_error
-        return self.contents[target]
-
-    def write(self, target, content):
-        if self.write_error:
-            raise self.write_error
-        self.writes.append((target, content))
-        self.contents[target] = content
 
 
 class FakeSkillStore:
@@ -78,165 +60,6 @@ class FakeSkillStore:
         return {'action': 'remove'}
 
 
-def test_memory_editor_operation_writes_remote_fs(monkeypatch):
-    assert not hasattr(memory_mod, 'memory')
-    assert not hasattr(memory_mod, 'insert_memory_review_record')
-
-    store = FakeMemoryStore({'memory': 'old', 'user_preference': 'old'})
-    monkeypatch.setattr(
-        memory_mod,
-        '_validate_generated_content',
-        lambda memory_type, content: content,
-    )
-    monkeypatch.setattr(memory_mod, 'MemoryRemoteStore', lambda: store)
-
-    memory_result = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-    )
-    user_result = memory_mod.memory_editor(
-        'user_preference',
-        op='append',
-        content='newer',
-    )
-
-    assert memory_result['success'] is True
-    assert memory_result['tool'] == 'memory_editor'
-    assert memory_result['result']['target'] == 'memory'
-    assert memory_result['result']['status'] == 'pending_review'
-    assert memory_result['result']['message'] == 'Memory changes were written to draft and are pending review.'
-    assert memory_result['result']['operation_count'] == 1
-    assert user_result['success'] is True
-    assert user_result['tool'] == 'memory_editor'
-    assert user_result['result']['target'] == 'user_preference'
-    assert user_result['result']['status'] == 'pending_review'
-    assert user_result['result']['message'] == 'Memory changes were written to draft and are pending review.'
-    assert store.writes == [
-        ('memory', 'new'),
-        ('user_preference', 'old\nnewer'),
-    ]
-
-
-def test_memory_editor_patch_match_controls(monkeypatch):
-    store = FakeMemoryStore({'memory': 'old and old'})
-    monkeypatch.setattr(memory_mod, 'MemoryRemoteStore', lambda: store)
-    monkeypatch.setattr(memory_mod, '_validate_generated_content', lambda memory_type, content: content)
-
-    ambiguous = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-    )
-    missing = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='missing',
-        new_text='new',
-    )
-    empty_old = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='',
-        new_text='new',
-    )
-    replace_all = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-        replace_all_matches=True,
-    )
-
-    assert ambiguous['success'] is False
-    assert 'matched multiple locations' in ambiguous['error']['reason']
-    assert missing['success'] is False
-    assert 'could not find' in missing['error']['reason']
-    assert empty_old['success'] is False
-    assert "non-empty 'old_text'" in empty_old['error']['reason']
-    assert replace_all['success'] is True
-    assert store.writes == [('memory', 'new and new')]
-
-
-def test_memory_editor_append_requires_content(monkeypatch):
-    store = FakeMemoryStore({'memory': ''})
-    monkeypatch.setattr(memory_mod, 'MemoryRemoteStore', lambda: store)
-
-    empty_append = memory_mod.memory_editor('memory', op='append', content='  ')
-    unknown = memory_mod.memory_editor('memory', op='replace_all', content='new')
-
-    assert empty_append['success'] is False
-    assert 'append requires non-empty content' in empty_append['error']['reason']
-    assert unknown['success'] is False
-    assert "expected 'patch' or 'append'" in unknown['error']['reason']
-    assert store.writes == []
-
-
-def test_memory_editor_remote_fs_errors_return_tool_error(monkeypatch):
-    monkeypatch.setattr(
-        memory_mod,
-        'MemoryRemoteStore',
-        lambda: FakeMemoryStore({'memory': 'old'}, read_error=RuntimeError('backend down')),
-    )
-    read_result = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-    )
-
-    monkeypatch.setattr(
-        memory_mod,
-        'MemoryRemoteStore',
-        lambda: FakeMemoryStore({'memory': 'old'}, write_error=RuntimeError('conflict')),
-    )
-    monkeypatch.setattr(memory_mod, '_validate_generated_content', lambda memory_type, content: content)
-    blocked_write_result = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-    )
-
-    monkeypatch.setattr(
-        memory_mod,
-        'MemoryRemoteStore',
-        lambda: FakeMemoryStore({'memory': 'old'}, write_error=RuntimeError('backend down')),
-    )
-    failed_write_result = memory_mod.memory_editor(
-        'memory',
-        op='patch',
-        old_text='old',
-        new_text='new',
-    )
-
-    assert read_result['success'] is False
-    assert 'Failed to read memory via RemoteFS: backend down' in read_result['error']['reason']
-    assert blocked_write_result['success'] is False
-    assert blocked_write_result['error']['reason'] == (
-        'There are pending changes. Please ask the user to handle them before modifying.'
-    )
-    assert failed_write_result['success'] is False
-    assert 'Failed to write memory via RemoteFS: backend down' in failed_write_result['error']['reason']
-
-
-def test_read_memory_reads_remote_fs(monkeypatch):
-    store = FakeMemoryStore({'memory': 'remote memory'})
-    monkeypatch.setattr(memory_reader_mod, 'MemoryRemoteStore', lambda: store)
-
-    result = memory_reader_mod.read_memory('memory')
-
-    assert result['success'] is True
-    assert result['tool'] == 'read_memory'
-    assert result['result'] == {
-        'target': 'memory',
-        'content': 'remote memory',
-        'content_length': len('remote memory'),
-    }
-
-
 def test_skill_editor_create_file_tools_remove_core_paths():
     existing_content = (
         '---\n'
@@ -286,32 +109,22 @@ def test_skill_editor_create_file_tools_remove_core_paths():
     )
     remove_result = tool_group.remove_skill('internal/existing')
 
-    assert create_result['success'] is True
-    assert create_result['tool'] == 'create_skill'
-    assert patch_result['success'] is True
-    assert patch_result['tool'] == 'patch_file'
-    assert file_create_result['success'] is True
-    assert file_create_result['tool'] == 'create_file'
-    assert delete_result['success'] is True
-    assert delete_result['tool'] == 'delete_file'
-    assert remove_result['success'] is True
-    assert remove_result['tool'] == 'remove_skill'
-    assert create_result['result'] == {
+    assert create_result == {
         'status': 'created',
         'message': 'Skill package change was written.',
     }
-    assert patch_result['result']['status'] == 'patched'
-    assert patch_result['result']['touched_files'] == ['SKILL.md']
-    assert patch_result['result']['written_files'] == ['SKILL.md']
-    assert patch_result['result']['deleted_files'] == []
-    assert patch_result['result']['summary'] == 'patch skill body'
-    assert file_create_result['result']['status'] == 'created'
-    assert file_create_result['result']['written_files'] == ['scripts/check.py']
-    assert file_create_result['result']['deleted_files'] == []
-    assert delete_result['result']['status'] == 'deleted'
-    assert delete_result['result']['written_files'] == []
-    assert delete_result['result']['deleted_files'] == ['references/old.md']
-    assert remove_result['result'] == {
+    assert patch_result['status'] == 'patched'
+    assert patch_result['touched_files'] == ['SKILL.md']
+    assert patch_result['written_files'] == ['SKILL.md']
+    assert patch_result['deleted_files'] == []
+    assert patch_result['summary'] == 'patch skill body'
+    assert file_create_result['status'] == 'created'
+    assert file_create_result['written_files'] == ['scripts/check.py']
+    assert file_create_result['deleted_files'] == []
+    assert delete_result['status'] == 'deleted'
+    assert delete_result['written_files'] == []
+    assert delete_result['deleted_files'] == ['references/old.md']
+    assert remove_result == {
         'status': 'removed',
         'message': 'Skill package change was written.',
     }
@@ -371,8 +184,7 @@ def test_skill_editor_removes_full_key_from_any_safe_category():
 
     result = tool_group.remove_skill('research3/web-research')
 
-    assert result['success'] is True
-    assert result['tool'] == 'remove_skill'
+    assert result['status'] == 'removed'
     assert store.calls == [('remove', 'research3', 'web-research')]
 
 
@@ -394,10 +206,9 @@ def test_skill_editor_renames_package():
         new_name='renamed',
     )
 
-    assert result['success'] is True
-    assert result['result']['status'] == 'renamed'
-    assert result['result']['old'] == {'category': 'internal', 'name': 'existing'}
-    assert result['result']['new'] == {'category': 'internal', 'name': 'renamed'}
+    assert result['status'] == 'renamed'
+    assert result['old'] == {'category': 'internal', 'name': 'existing'}
+    assert result['new'] == {'category': 'internal', 'name': 'renamed'}
     rename_calls = [call for call in store.calls if call[0] == 'rename']
     assert rename_calls[0][1:5] == ('internal', 'existing', 'internal', 'renamed')
     assert 'name: renamed' in rename_calls[0][5]
@@ -416,13 +227,13 @@ def test_skill_editor_create_accepts_missing_category_and_rejects_multilevel_nam
     toolkit = skill_editor_mod.SkillManagementToolkit(store=store)
 
     created = toolkit.create_skill('category-free', content=content)
-    slash = toolkit.create_skill('internal/category-free', content=content)
-    backslash = toolkit.create_skill(r'internal\category-free', content=content)
+    with pytest.raises(ToolExecutionError):
+        toolkit.create_skill('internal/category-free', content=content)
+    with pytest.raises(ToolExecutionError):
+        toolkit.create_skill(r'internal\category-free', content=content)
 
-    assert created['success'] is True
+    assert created['status'] == 'created'
     assert ('create', 'internal', 'category-free', content) in store.calls
-    assert slash['success'] is False
-    assert backslash['success'] is False
 
 
 def test_skill_editor_patch_allows_frontmatter_category_changes_without_moving_package():
@@ -445,7 +256,7 @@ def test_skill_editor_patch_allows_frontmatter_category_changes_without_moving_p
         new_text='category: arbitrary-upstream-value',
     )
 
-    assert result['success'] is True
+    assert result['status'] == 'patched'
     assert ('internal', 'existing') in store.packages
     assert 'category: arbitrary-upstream-value' in store.packages[('internal', 'existing')]['SKILL.md']
 
@@ -478,12 +289,13 @@ def test_skill_editor_patch_resolves_unique_name_and_requires_full_key_when_ambi
         old_text='Before unique.',
         new_text='After unique.',
     )
-    ambiguous_result = toolkit.patch_file(
-        'shared',
-        path='SKILL.md',
-        old_text='Before shared.',
-        new_text='Wrong target.',
-    )
+    with pytest.raises(ToolExecutionError, match="Ambiguous skill name 'shared'"):
+        toolkit.patch_file(
+            'shared',
+            path='SKILL.md',
+            old_text='Before shared.',
+            new_text='Wrong target.',
+        )
     exact_result = toolkit.patch_file(
         'external/shared',
         path='SKILL.md',
@@ -491,12 +303,10 @@ def test_skill_editor_patch_resolves_unique_name_and_requires_full_key_when_ambi
         new_text='After external.',
     )
 
-    assert unique_result['success'] is True
+    assert unique_result['status'] == 'patched'
     assert 'After unique.' in store.packages[('internal', 'unique')]['SKILL.md']
-    assert ambiguous_result['success'] is False
-    assert "Ambiguous skill name 'shared'" in ambiguous_result['error']['reason']
     assert 'Wrong target.' not in store.packages[('internal', 'shared')]['SKILL.md']
     assert 'Wrong target.' not in store.packages[('external', 'shared')]['SKILL.md']
-    assert exact_result['success'] is True
+    assert exact_result['status'] == 'patched'
     assert 'Before shared.' in store.packages[('internal', 'shared')]['SKILL.md']
     assert 'After external.' in store.packages[('external', 'shared')]['SKILL.md']

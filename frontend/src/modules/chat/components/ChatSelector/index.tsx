@@ -1,4 +1,4 @@
-import { Button, Input, Popover, Tooltip } from "antd";
+import { Button, Input, message, Popover, Tooltip } from "antd";
 import {
   SearchOutlined,
   CheckOutlined,
@@ -33,6 +33,8 @@ export interface ChatSelectorProps {
   embeddingReady?: boolean | null;
   multimodalEmbeddingReady?: boolean | null;
   rerankReady?: boolean | null;
+  disabled?: boolean;
+  disabledReason?: ReactNode;
   onChange?: (
     knowledgeIds: string[],
     creators: string[],
@@ -47,18 +49,28 @@ export interface ChatSelectorImperativeProps {
 
 const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
   (props, ref) => {
-  const { chatConfig, refreshKey, onChange, embeddingReady, multimodalEmbeddingReady, rerankReady } = props;
+  const {
+    chatConfig,
+    refreshKey,
+    onChange,
+    embeddingReady,
+    multimodalEmbeddingReady,
+    rerankReady,
+    disabled = false,
+    disabledReason,
+  } = props;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const isAdmin = AgentAppsAuth.getUserInfo()?.role === 'system-admin';
   const isEmbeddingDisabled = embeddingReady === false || multimodalEmbeddingReady === false || rerankReady === false;
+  const isSelectorDisabled = disabled || isEmbeddingDisabled;
 
   const buildKnowledgeDisabledReason = (): ReactNode => {
     const goConfig = (
       <a
-        href="/model-providers"
+        href="/settings?section=models"
         style={{ marginLeft: 6, color: '#fff', textDecoration: 'underline' }}
-        onClick={(e: MouseEvent<HTMLAnchorElement>) => { e.preventDefault(); navigate('/model-providers'); }}
+        onClick={(e: MouseEvent<HTMLAnchorElement>) => { e.preventDefault(); navigate('/settings?section=models'); }}
       >
         {t("knowledge.goToConfig")}
       </a>
@@ -79,6 +91,7 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
     return undefined;
   };
   const knowledgeDisabledReason = buildKnowledgeDisabledReason();
+  const selectorDisabledReason = disabled ? disabledReason : knowledgeDisabledReason;
 
     const [knowledgeBaseList, setKnowledgeBaseList] = useState<Dataset[]>([]);
     const [filteredList, setFilteredList] = useState<Dataset[]>([]);
@@ -90,6 +103,10 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
     const [defaultUpdatingId, setDefaultUpdatingId] = useState("");
     const isResettingSelectionRef = useRef(false);
     const previousRefreshKeyRef = useRef(refreshKey);
+
+    useEffect(() => {
+      if (isSelectorDisabled) setOpen(false);
+    }, [isSelectorDisabled]);
 
     function getDefaultDatasetIds(datasets: Dataset[]) {
       return (datasets
@@ -133,11 +150,14 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
 
     useImperativeHandle(ref, () => ({
       open: () => {
-        if (isEmbeddingDisabled) return;
+        if (isSelectorDisabled) {
+          message.warning(selectorDisabledReason ?? t("chat.knowledgeBase"));
+          return;
+        }
         setOpen(true);
       },
       close: () => setOpen(false),
-    }), [isEmbeddingDisabled]);
+    }), [isSelectorDisabled, selectorDisabledReason, t]);
 
     useEffect(() => {
       getKnowledgeBaseList();
@@ -452,16 +472,16 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
           align={{ offset: [-12, -10] }}
           open={open}
           onOpenChange={(bool) => {
-            if (isEmbeddingDisabled) return;
+            if (isSelectorDisabled) return;
             setOpen(bool);
           }}
         >
-          <Tooltip title={isEmbeddingDisabled ? knowledgeDisabledReason : undefined}>
+          <Tooltip title={isSelectorDisabled ? selectorDisabledReason : undefined}>
             <div
-              className={`input-bottom-actions-left-item ${open || selectedIds.length > 0 ? "selected" : ""}${isEmbeddingDisabled ? " is-disabled" : ""}`}
-              aria-disabled={isEmbeddingDisabled}
+              className={`input-bottom-actions-left-item ${open || selectedIds.length > 0 ? "selected" : ""}${isSelectorDisabled ? " is-disabled" : ""}`}
+              aria-disabled={isSelectorDisabled}
               onClick={(e) => {
-                if (isEmbeddingDisabled) {
+                if (isSelectorDisabled) {
                   e.stopPropagation();
                 }
               }}

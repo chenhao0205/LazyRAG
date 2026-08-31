@@ -1,8 +1,13 @@
-import { Button, Empty, Input, Select, Table } from "antd";
+import { Button, Empty, Input, Popconfirm, Select, Table } from "antd";
 import { ApartmentOutlined } from "@ant-design/icons";
 import { getLocalizedTablePagination } from "@/components/ui/pagination";
 import type { ColumnsType } from "antd/es/table";
 import type { SkillTreeNode, StructuredAsset } from "../../shared";
+import {
+  canSubmitSkillOrganize,
+  isSkillOrganizeEligible,
+  MAX_SKILL_ORGANIZE_SELECTION,
+} from "./skillOrganizeRules";
 
 interface SkillInstalledViewProps {
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -16,8 +21,6 @@ interface SkillInstalledViewProps {
   onCategoryChange: (value?: string) => void;
   categories: string[];
   categoriesLoading: boolean;
-  source: "all" | "builtin" | "admin" | "personal";
-  onSourceChange: (value: "all" | "builtin" | "admin" | "personal") => void;
   onReset: () => void;
   organizeMode: boolean;
   organizeLoading: boolean;
@@ -50,8 +53,6 @@ export default function SkillInstalledView({
   onCategoryChange,
   categories,
   categoriesLoading,
-  source,
-  onSourceChange,
   onReset,
   organizeMode,
   organizeLoading,
@@ -80,6 +81,10 @@ export default function SkillInstalledView({
     },
     t,
   );
+  const visibleColumns = columns.filter((column) => column.key !== "tags");
+  const canSubmitOrganize = canSubmitSkillOrganize(
+    selectedOrganizeSkillIds.length,
+  );
 
   return (
     <div className="memory-skill-installed">
@@ -104,17 +109,6 @@ export default function SkillInstalledView({
           className="memory-skill-installed-select"
           onChange={onCategoryChange}
         />
-        <Select
-          value={source}
-          className="memory-skill-installed-select"
-          options={[
-            { value: "all", label: t("admin.memorySkillInstalledSourceAll") },
-            { value: "builtin", label: t("admin.memorySkillSourceBuiltin") },
-            { value: "admin", label: t("admin.memorySkillSourceAdmin") },
-            { value: "personal", label: t("admin.memorySkillSourcePersonal") },
-          ]}
-          onChange={onSourceChange}
-        />
         <Button type="default" className="memory-skill-reset-button" onClick={onReset}>
           {t("admin.memoryReset")}
         </Button>
@@ -136,22 +130,34 @@ export default function SkillInstalledView({
                   count: selectedOrganizeSkillIds.length,
                 })}
               </strong>
-              <span>{t("admin.memorySkillOrganizeLimit")}</span>
+              <span>{t("admin.memorySkillOrganizeRequirement")}</span>
             </span>
           </div>
           <div className="memory-skill-organize-bar__actions">
             <Button onClick={onOrganizeCancel} disabled={organizeLoading}>
               {t("common.cancel")}
             </Button>
-            <Button
-              type="primary"
-              icon={<ApartmentOutlined />}
-              loading={organizeLoading}
-              disabled={selectedOrganizeSkillIds.length === 0}
-              onClick={onOrganizeSubmit}
+            <Popconfirm
+              title={t("admin.memorySkillOrganizeConfirmTitle", {
+                count: selectedOrganizeSkillIds.length,
+              })}
+              description={t("admin.memorySkillOrganizeConfirmContent")}
+              okText={t("admin.memorySkillOrganizeConfirmSubmit")}
+              cancelText={t("common.cancel")}
+              disabled={!canSubmitOrganize || organizeLoading}
+              onConfirm={() => {
+                void onOrganizeSubmit();
+              }}
             >
-              {t("admin.memorySkillOrganizeSubmit")}
-            </Button>
+              <Button
+                type="primary"
+                icon={<ApartmentOutlined />}
+                loading={organizeLoading}
+                disabled={!canSubmitOrganize}
+              >
+                {t("admin.memorySkillOrganizeSubmit")}
+              </Button>
+            </Popconfirm>
           </div>
         </div>
       ) : null}
@@ -162,7 +168,7 @@ export default function SkillInstalledView({
           rowKey="id"
           loading={loading}
           dataSource={dataSource}
-          columns={columns}
+          columns={visibleColumns}
           rowSelection={
             organizeMode
               ? {
@@ -177,14 +183,22 @@ export default function SkillInstalledView({
                     changedRows: StructuredAsset[],
                   ) =>
                     onOrganizeSelectionChange(changedRows, selected),
-                  getCheckboxProps: (record: StructuredAsset) => ({
-                    disabled:
-                      selectedOrganizeSkillIds.length >= 20 &&
-                      !selectedOrganizeSkillIds.includes(record.id),
-                    "aria-label": t("admin.memorySkillOrganizeSelectRow", {
-                      name: record.name,
-                    }),
-                  }),
+                  getCheckboxProps: (record: StructuredAsset) => {
+                    const eligible = isSkillOrganizeEligible(record);
+                    return {
+                      disabled:
+                        !eligible ||
+                        (selectedOrganizeSkillIds.length >=
+                          MAX_SKILL_ORGANIZE_SELECTION &&
+                          !selectedOrganizeSkillIds.includes(record.id)),
+                      "aria-label": t(
+                        eligible
+                          ? "admin.memorySkillOrganizeSelectRow"
+                          : "admin.memorySkillOrganizeInternalOnlyRow",
+                        { name: record.name },
+                      ),
+                    };
+                  },
                 }
               : undefined
           }

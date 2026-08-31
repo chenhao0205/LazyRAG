@@ -42,11 +42,25 @@ test("maps bridge methods to their exact IPC channels and arguments", async () =
     ["openLogsDir", [], "lazymind:openLogsDir", []],
     ["openDataDir", [], "lazymind:openDataDir", []],
     ["runtimeStatus", [], "lazymind:runtimeStatus", []],
+    ["agentIntegrationStatuses", [], "lazymind:agentIntegrationStatuses", []],
+    ["agentIntegrationAction", ["cursor", "connect"], "lazymind:agentIntegrationAction", ["cursor", "connect"]],
+    ["executorIntegrationPolicies", [], "lazymind:executorIntegrationPolicies", []],
+    ["executorIntegrationAction", ["codex", "disable"], "lazymind:executorIntegrationAction", ["codex", "disable"]],
+    ["agentExecutableBindings", [], "lazymind:agentExecutableBindings", []],
+    ["agentExecutableBind", ["codex-cli", "D:\\Agents\\codex.exe"], "lazymind:agentExecutableBind", ["codex-cli", "D:\\Agents\\codex.exe"]],
+    ["agentExecutableClear", ["codex-cli"], "lazymind:agentExecutableClear", ["codex-cli"]],
     ["restartRuntime", [], "lazymind:restartRuntime", []],
     ["resetRuntime", ["all"], "lazymind:resetRuntime", ["all"]],
+    ["localFolderAccessStatus", [], "lazymind:localFolderAccessStatus", []],
+    ["chooseLocalDiscoveryRoots", [], "lazymind:chooseLocalDiscoveryRoots", []],
+    ["discoverLocalFolders", [], "lazymind:discoverLocalFolders", []],
+    ["authorizeLocalFolders", [["/tmp/docs"]], "lazymind:authorizeLocalFolders", [["/tmp/docs"]]],
     ["selectFolder", [], "lazymind:selectFolder", []],
-    ["selectExecutable", [], "lazymind:selectExecutable", []],
+    ["selectExecutable", ["codex-cli"], "lazymind:selectExecutable", ["codex-cli"]],
     ["exportDiagnostics", [], "lazymind:exportDiagnostics", []],
+    ["showItemInFolder", [{ source: "/static-files/a.txt" }], "lazymind:showItemInFolder", [{ source: "/static-files/a.txt" }]],
+    ["saveFileAs", [{ source: "https://x/a", filename: "a.txt" }], "lazymind:saveFileAs", [{ source: "https://x/a", filename: "a.txt" }]],
+    ["downloadFile", [{ source: "https://x/a", filename: "a.txt" }], "lazymind:downloadFile", [{ source: "https://x/a", filename: "a.txt" }]],
     ["startupDiagnostics", [], "lazymind:startupDiagnostics", []],
     ["copyStartupLogs", [], "lazymind:copyStartupLogs", []],
   ];
@@ -54,6 +68,7 @@ test("maps bridge methods to their exact IPC channels and arguments", async () =
     const result = await bridge[method](...args);
     assert.deepEqual(result, { channel, arguments: expectedArgs });
   }
+  assert.equal(bridge.platform, process.platform);
   bridge.notifyAppReady();
   assert.deepEqual(ipc.sends, [["lazymind:renderer-ready"]]);
 });

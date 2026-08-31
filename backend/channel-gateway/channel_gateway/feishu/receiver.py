@@ -1,4 +1,5 @@
 import multiprocessing
+import logging
 import queue
 import threading
 import time
@@ -9,6 +10,7 @@ from dataclasses import asdict
 from channel_gateway.feishu.domain import (
     FeishuAppCredentials,
     FeishuInboundAction,
+    FeishuInboundMenu,
     FeishuInboundMessage,
     FeishuRuntimeError,
 )
@@ -17,6 +19,46 @@ from channel_gateway.feishu.sdk import LarkChannelClient
 
 _ACK_TIMEOUT_SECONDS = 10
 _ACTION_ACK_TIMEOUT_SECONDS = 2.0
+_logger = logging.getLogger(__name__)
+
+
+def _dispatch_parent_event(
+    kind: str,
+    payload: dict,
+    acknowledgements,
+    *,
+    on_message: Callable[[FeishuInboundMessage], None],
+    on_action: Callable[[FeishuInboundAction], dict | None],
+    on_menu: Callable[[FeishuInboundMenu], None],
+) -> None:
+    """Dispatch one SDK event without turning event failure into WS failure."""
+    acknowledgement_id = str(payload['acknowledgement_id'])
+    response = None
+    try:
+        if kind == 'message':
+            on_message(FeishuInboundMessage(**payload['message']))
+        elif kind == 'action':
+            response = on_action(FeishuInboundAction(**payload['action']))
+        elif kind == 'menu':
+            on_menu(FeishuInboundMenu(**payload['menu']))
+        else:
+            raise ValueError(f'Unsupported Feishu event kind: {kind}')
+    except Exception as exc:
+        acknowledgements.put(
+            (
+                acknowledgement_id,
+                False,
+                exc.__class__.__name__,
+                None,
+            )
+        )
+        _logger.warning(
+            'feishu_event_rejected kind=%s error=%s',
+            kind,
+            exc.__class__.__name__,
+        )
+        return
+    acknowledgements.put((acknowledgement_id, True, '', response))
 
 
 def _await_persistence_ack(
@@ -24,7 +66,7 @@ def _await_persistence_ack(
     stop_event,
     acknowledgement_id: str,
     timeout_seconds: float = _ACK_TIMEOUT_SECONDS,
-) -> None:
+):
     deadline = time.monotonic() + timeout_seconds
     while not stop_event.is_set():
         remaining = deadline - time.monotonic()
@@ -33,7 +75,7 @@ def _await_persistence_ack(
                 'Gateway persistence acknowledgement timed out'
             )
         try:
-            ack_id, succeeded, error = acknowledgements.get(
+            ack_id, succeeded, error, response = acknowledgements.get(
                 timeout=min(0.5, remaining)
             )
         except queue.Empty:
@@ -45,7 +87,7 @@ def _await_persistence_ack(
             raise FeishuRuntimeError(
                 str(error or 'Gateway persistence failed')
             )
-        return
+        return response
     raise FeishuRuntimeError(
         'Feishu receiver stopped before message persistence'
     )
@@ -81,7 +123,7 @@ def _receiver_process_main(
                 acknowledgement_id,
             )
 
-    def on_action(action: FeishuInboundAction) -> None:
+    def on_action(action: FeishuInboundAction):
         acknowledgement_id = uuid.uuid4().hex
         with delivery_lock:
             events.put(
@@ -93,17 +135,36 @@ def _receiver_process_main(
                     },
                 )
             )
-            _await_persistence_ack(
+            return _await_persistence_ack(
                 acknowledgements,
                 stop_event,
                 acknowledgement_id,
                 timeout_seconds=_ACTION_ACK_TIMEOUT_SECONDS,
             )
 
+    def on_menu(menu: FeishuInboundMenu) -> None:
+        acknowledgement_id = uuid.uuid4().hex
+        with delivery_lock:
+            events.put(
+                (
+                    'menu',
+                    {
+                        'acknowledgement_id': acknowledgement_id,
+                        'menu': asdict(menu),
+                    },
+                )
+            )
+            _await_persistence_ack(
+                acknowledgements,
+                stop_event,
+                acknowledgement_id,
+            )
+
     client = LarkChannelClient(
         credentials,
         on_message,
         on_action=on_action,
+        on_menu=on_menu,
     )
 
     def watch() -> None:
@@ -144,7 +205,11 @@ class ProcessLarkReceiverClient:
         self,
         credentials: FeishuAppCredentials,
         on_message: Callable[[FeishuInboundMessage], None],
-        on_action: Callable[[FeishuInboundAction], None],
+        on_action: Callable[
+            [FeishuInboundAction],
+            dict | None,
+        ],
+        on_menu: Callable[[FeishuInboundMenu], None],
     ):
         context = multiprocessing.get_context('spawn')
         self._events = context.Queue()
@@ -152,6 +217,7 @@ class ProcessLarkReceiverClient:
         self._stop_event = context.Event()
         self._on_message = on_message
         self._on_action = on_action
+        self._on_menu = on_menu
         self._process = context.Process(
             target=_receiver_process_main,
             args=(
@@ -177,54 +243,15 @@ class ProcessLarkReceiverClient:
                 if not self._process.is_alive():
                     break
                 continue
-            if kind == 'message':
-                acknowledgement_id = str(
-                    payload['acknowledgement_id']
+            if kind in {'message', 'action', 'menu'}:
+                _dispatch_parent_event(
+                    kind,
+                    payload,
+                    self._acknowledgements,
+                    on_message=self._on_message,
+                    on_action=self._on_action,
+                    on_menu=self._on_menu,
                 )
-                try:
-                    self._on_message(
-                        FeishuInboundMessage(
-                            **payload['message']
-                        )
-                    )
-                except Exception as exc:
-                    self._acknowledgements.put(
-                        (
-                            acknowledgement_id,
-                            False,
-                            exc.__class__.__name__,
-                        )
-                    )
-                    terminal_error = str(exc)
-                    break
-                else:
-                    self._acknowledgements.put(
-                        (acknowledgement_id, True, '')
-                    )
-            elif kind == 'action':
-                acknowledgement_id = str(
-                    payload['acknowledgement_id']
-                )
-                try:
-                    self._on_action(
-                        FeishuInboundAction(
-                            **payload['action']
-                        )
-                    )
-                except Exception as exc:
-                    self._acknowledgements.put(
-                        (
-                            acknowledgement_id,
-                            False,
-                            exc.__class__.__name__,
-                        )
-                    )
-                    terminal_error = str(exc)
-                    break
-                else:
-                    self._acknowledgements.put(
-                        (acknowledgement_id, True, '')
-                    )
             elif kind == 'ready':
                 with self._lock:
                     self._ready = True
@@ -277,12 +304,14 @@ class LarkChannelFactory:
         self,
         credentials: FeishuAppCredentials,
         on_message: Callable[[FeishuInboundMessage], None],
-        on_action: Callable[[FeishuInboundAction], None],
+        on_action: Callable[[FeishuInboundAction], dict | None],
+        on_menu: Callable[[FeishuInboundMenu], None],
     ) -> ProcessLarkReceiverClient:
         return ProcessLarkReceiverClient(
             credentials,
             on_message,
             on_action,
+            on_menu,
         )
 
     def create_sender(

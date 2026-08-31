@@ -11,17 +11,16 @@ from channel_gateway.common.domain.commands import (
     CapabilityConfigureCommand,
     CapabilityListCommand,
     ChatCommand,
-    ClarifyCommand,
     CommandEnvelope,
     ConversationCurrentCommand,
     ConversationListCommand,
     ConversationNewCommand,
     ConversationSettingsCommand,
     ConversationSettingsUpdateCommand,
+    ConversationStopCommand,
     ConversationSwitchCommand,
     HistoryMoreCommand,
     SelectionChooseCommand,
-    WorkflowInvokeCommand,
 )
 from channel_gateway.common.application.conversations import (
     ConversationActions,
@@ -33,8 +32,7 @@ from channel_gateway.common.application.replies import (
 from channel_gateway.common.ports.core import LazyMindCore
 from channel_gateway.common.ports.repository import NavigationRepository
 from channel_gateway.common.domain.chat import (
-    BASIC_CHAT_FEATURES,
-    ChannelFeatureProfile,
+    ChannelExecutionContext,
     CoreStreamUpdate,
 )
 from channel_gateway.common.domain.outbound import ReplyPresentation
@@ -48,9 +46,6 @@ class ChannelActionExecutor:
         *,
         store: NavigationRepository,
         client: LazyMindCore,
-        feature_resolver: (
-            Callable[[str], ChannelFeatureProfile] | None
-        ) = None,
     ):
         self._store = store
         self._client = client
@@ -61,10 +56,6 @@ class ChannelActionExecutor:
             capabilities=self._capabilities,
         )
         self._replies = ChannelReplyBuilder(store)
-        self._feature_resolver = (
-            feature_resolver
-            or (lambda _provider: BASIC_CHAT_FEATURES)
-        )
 
     def execute(
         self,
@@ -76,11 +67,12 @@ class ChannelActionExecutor:
         request_id: str,
         grounding_messages: Sequence[str],
         catalog: dict[str, Any],
-        provider: str = '',
         provider_context: dict[str, Any] | None = None,
         on_stream: Callable[[CoreStreamUpdate], None] | None = None,
     ) -> ChannelReply:
-        features = self._feature_resolver(provider)
+        execution = ChannelExecutionContext.from_provider_context(
+            provider_context
+        )
         context = {
             'account_id': account_id,
             'external_address_hash': external_address_hash,
@@ -92,15 +84,21 @@ class ChannelActionExecutor:
             if isinstance(command, ChatCommand):
                 parameters = command.parameters
                 text = self._conversations.chat(
+                    recover_missing_route=(
+                        execution.interaction_mode == 'plain_text'
+                    ),
                     message=parameters.message,
                     changes=parameters.resource_changes,
                     source_command=command,
                     source_messages=grounding_messages,
                     catalog=catalog,
-                    features=features,
                     ask_answers_structured=(
-                        self._ask_answers(provider_context)
+                        execution.ask_answers_structured
                     ),
+                    inputs=tuple(
+                        item.to_dict() for item in execution.attachments
+                    ),
+                    thinking_depth=execution.thinking_depth,
                     on_stream=on_stream,
                     **context,
                 )
@@ -112,27 +110,36 @@ class ChannelActionExecutor:
                     source_command=command,
                     source_messages=grounding_messages,
                     catalog=catalog,
-                    features=features,
                     on_stream=on_stream,
                     **context,
                 )
             elif isinstance(command, ConversationListCommand):
-                text = self._conversations.list_conversations(**context)
+                text = self._conversations.list_conversations(
+                    assistant=command.parameters.assistant,
+                    **context,
+                )
+                if execution.include_assistant_catalog:
+                    presentations = (
+                        self._capabilities.assistant_catalog(
+                            owner_user_id=owner_user_id,
+                            request_id=f'{request_id}_assistant_catalog',
+                        ),
+                    )
             elif isinstance(command, ConversationSwitchCommand):
                 text = self._conversations.switch(
                     command=command,
                     source_messages=grounding_messages,
                     selection_external_address_hash=external_address_hash,
                     catalog=catalog,
-                    features=features,
                     on_stream=on_stream,
                     **context,
                 )
             elif isinstance(command, ConversationCurrentCommand):
                 text = self._conversations.current(
-                    features=features,
                     **context,
                 )
+            elif isinstance(command, ConversationStopCommand):
+                text = self._conversations.stop(**context)
             elif isinstance(command, HistoryMoreCommand):
                 text = self._conversations.more_history(**context)
             elif isinstance(command, CapabilityListCommand):
@@ -142,10 +149,35 @@ class ChannelActionExecutor:
                         catalog=catalog,
                         account_id=account_id,
                         external_address_hash=external_address_hash,
-                        features=features,
+                        save_selection=(
+                            str(
+                                (provider_context or {}).get(
+                                    'workspace_surface'
+                                )
+                                or ''
+                            )
+                            != 'management'
+                        ),
                     )
                 )
                 presentations = (capability_presentation,)
+                if execution.include_capability_settings:
+                    try:
+                        _settings_text, settings_presentation = (
+                            self._capabilities.conversation_settings(
+                                account_id=account_id,
+                                external_address_hash=external_address_hash,
+                                owner_user_id=owner_user_id,
+                                request_id=request_id,
+                            )
+                        )
+                    except ActionMessage:
+                        pass
+                    else:
+                        presentations = (
+                            capability_presentation,
+                            settings_presentation,
+                        )
             elif isinstance(command, CapabilityConfigureCommand):
                 text = self._capabilities.configure_capabilities(
                     changes=command.parameters.resource_changes,
@@ -157,9 +189,6 @@ class ChannelActionExecutor:
             elif isinstance(command, ConversationSettingsCommand):
                 text, settings_presentation = (
                     self._capabilities.conversation_settings(
-                        section=command.parameters.section,
-                        catalog=catalog,
-                        features=features,
                         account_id=account_id,
                         external_address_hash=external_address_hash,
                         owner_user_id=owner_user_id,
@@ -174,51 +203,35 @@ class ChannelActionExecutor:
                 text, settings_presentation = (
                     self._capabilities.update_conversation_setting(
                         change=command.parameters.change,
+                        expected_conversation_id=(
+                            command.parameters.expected_conversation_id
+                        ),
                         catalog=catalog,
-                        features=features,
                         account_id=account_id,
                         external_address_hash=external_address_hash,
                         owner_user_id=owner_user_id,
                         request_id=request_id,
                     )
                 )
-                presentations = (settings_presentation,)
-            elif isinstance(command, WorkflowInvokeCommand):
-                if not features.enable_plugin:
-                    raise ActionMessage(
-                        '当前渠道没有开放工作流功能，配置没有改变。'
+                _capability_text, capability_presentation = (
+                    self._capabilities.list_capabilities(
+                        kinds=[
+                            'knowledge_base',
+                            'skill',
+                            'workflow',
+                            'tool',
+                        ],
+                        catalog=catalog,
+                        account_id=account_id,
+                        external_address_hash=external_address_hash,
                     )
-                parameters = command.parameters
-                workflow = self._workflow(
-                    parameters.workflow_ref,
-                    catalog,
                 )
-                conversation_id = self._store.get_route(
-                    account_id,
-                    external_address_hash,
-                )
-                if conversation_id:
-                    self._client.dismiss_terminal_plugin_session(
-                        owner_user_id=owner_user_id,
-                        conversation_id=conversation_id,
-                        request_id=request_id,
+                presentations = (capability_presentation,)
+                if settings_presentation is not None:
+                    presentations = (
+                        capability_presentation,
+                        settings_presentation,
                     )
-                text = self._conversations.chat(
-                    message=parameters.message,
-                    changes=[],
-                    source_command=command,
-                    source_messages=grounding_messages,
-                    catalog=catalog,
-                    features=features,
-                    mentions=(
-                        self._client.mention('plugin', workflow),
-                    ),
-                    plugin_mode='auto',
-                    on_stream=on_stream,
-                    **context,
-                )
-            elif isinstance(command, ClarifyCommand):
-                text = command.parameters.clarification_question
             elif isinstance(command, SelectionChooseCommand):
                 raise RuntimeError(
                     'selection.choose must be resolved before execution'
@@ -236,28 +249,3 @@ class ChannelActionExecutor:
             external_address_hash=external_address_hash,
             extra_presentations=presentations,
         )
-
-    @staticmethod
-    def _ask_answers(
-        provider_context: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if not isinstance(provider_context, dict):
-            return None
-        value = provider_context.get('ask_answers_structured')
-        return dict(value) if isinstance(value, dict) else None
-
-    @staticmethod
-    def _workflow(
-        workflow_ref: str,
-        catalog: dict[str, Any],
-    ) -> dict[str, Any]:
-        workflows = catalog.get('workflow')
-        if isinstance(workflows, list):
-            for item in workflows:
-                if (
-                    isinstance(item, dict)
-                    and bool(item.get('enabled', False))
-                    and str(item.get('id') or '') == workflow_ref
-                ):
-                    return item
-        raise ActionMessage('所选工作流当前不可用，请重新查看可用能力。')

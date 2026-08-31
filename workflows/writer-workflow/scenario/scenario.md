@@ -1,0 +1,156 @@
+# Unified AI Writer Workflow
+
+## Scope
+
+Use one artifact-backed writing workflow for compound creation and revision. The same
+steps operate on either Markdown or WriterDocument IR:
+
+- read Feishu/Lark documents, uploaded files, and selected knowledge bases;
+- generate an outline or use a supplied outline;
+- generate, regenerate, or revise that same outline artifact;
+- plan sections and write a complete document;
+- generate, rewrite, revise, and explicitly deliver that same full-document artifact.
+
+Do not route users between separate creation and revision workflows or expose separate
+revision cards. The ChatAgent chooses the applicable mode inside the current product step.
+
+## Steps
+
+### prepare
+
+Always begin a new workflow with `prepare`. It preserves the complete request, retrieves
+requested sources, constructs writing context, and classifies a new document from the immutable
+user request as `flat` or `sectioned`. A clear flat result skips the outline; a clear sectioned
+result keeps the existing outline path. An unclear result or classifier failure defaults to
+`sectioned`. This decision is internal to Writer prepare and never asks the user.
+
+Cloud document URLs are resource identity, not optional prose context. The trigger and
+normalized request must preserve every source/destination URL supplied in the original
+request or a clarification answer. Reading a document before triggering does not replace
+passing its URL into the workflow. If the request refers to "this/my/original Feishu
+document" but the consolidated request contains no locator, do not start an unbound
+writing flow; require the missing URL.
+
+### outline
+
+`outline` owns the single user-visible `outline_document` slot.
+
+- First run with a supplied outline → preserve its Markdown or IR representation.
+- First run without a supplied outline → generate it.
+- User asks “change section X of the outline” → rerun `outline` and internally apply a
+  PatchSet for IR or StringReplaceSet for Markdown to the latest selected outline.
+- User edits in the frontend → the frontend saves a human revision of the same
+  `outline_document` slot.
+
+IR results have stage="outline" and are not UI-editable; Markdown results remain `.md`.
+If the IR is bound to a cloud
+document, AI or frontend revision synchronizes that document and stores the
+provider-confirmed IR as the next artifact revision.
+
+### write_flat_document
+
+`write_flat_document` is the isolated flat-creation path and owns the user-visible
+`flat_draft_document` slot.
+
+1. skip `outline`;
+2. generate one whole-document `short_writing_plan` and derive its document-root `visual_plan`;
+3. resolve any planned visuals with the shared media pipeline;
+4. generate the complete Markdown article in one pass, using controlled media placeholders;
+5. replace resolved placeholders and save an H1 title followed by continuous body text as
+   `flat_draft_document`.
+
+It must not produce an outline, section instructions, or draft blocks.
+
+### write_document
+
+`write_document` owns the single user-visible `draft_document` slot and has three modes.
+
+Sectioned generation/rewrite mode:
+
+1. read the latest selected `outline_document`;
+2. regenerate section instructions;
+3. draft sections in the outline's representation;
+4. assemble the complete draft without changing representation;
+5. save `draft_document`.
+
+Targeted revision mode:
+
+1. use the latest selected `draft_document`, or `source_document` for direct revision;
+2. locate the requested content;
+3. generate and apply a PatchSet for IR or StringReplaceSet for Markdown;
+4. save the result as the next revision of `draft_document`.
+
+Image insertion, replacement, movement, and deletion in the current document are
+targeted revisions owned by this mode. Rerun the previously completed `write_document`
+step and let `writer_resolve_revision_media` acquire any newly requested image. Do not
+start a standalone image task, call generic image/file/artifact tools, invoke Writer
+toolkit methods directly, or create a generic subagent for these requests.
+
+Full-document rewrite mode:
+
+1. use the latest selected `draft_document`, falling back to the complete
+   `source_document`;
+2. generate section instructions directly, without generating or exposing an outline;
+3. stream newly generated draft sections in the source's IR or Markdown representation;
+4. assemble and save the new `draft_document`;
+5. for cloud-bound IR, replace the provider document once and save the provider-confirmed
+   IR; keep Markdown local.
+
+Do not run section planning for a targeted body revision. Do run it again whenever the
+body is generated or rewritten from a changed outline.
+
+When the first full `.lmd` draft is derived from a cloud-bound Feishu source, generation
+or direct revision writes it back once and replaces `draft_document` with the
+provider-confirmed IR. Every cloud-bound IR full rewrite also writes back exactly once.
+Markdown rewrites stay local. Frontend edits and later targeted AI body revisions are
+revisions of the same `draft_document` slot and remain local until the user explicitly
+writes them back.
+The initial provider write receives `resolved_media_assets` whenever the generated IR
+contains Image WriterBlocks.
+
+## Supported paths
+
+- From scratch: `prepare → outline → write_document`
+- Flat article: `prepare → write_flat_document`
+- Supplied Feishu outline: `prepare → outline → write_document`
+- Existing Feishu document revision: `prepare → write_document`
+- Existing Feishu document full rewrite: `prepare → write_document`
+- Outline only: `prepare → outline`
+
+Repeated AI changes rerun/rewind the applicable document step. Repeated frontend changes
+create human revisions in the same slot. Do not create a second document-version store or
+a hidden current-document pointer.
+
+## Artifact contract
+
+- From-scratch and Markdown inputs remain Markdown. Feishu and `.lmd` inputs remain IR.
+- `outline_document`, `flat_draft_document`, and `draft_document` preserve that representation
+  across steps.
+- IR draft documents have ui_editable=true; outline documents are not currently UI-editable.
+- During `write_document`, `writer_apply_revision` returns the authoritative next draft
+  under `draft_document`, using the canonical `.md` or `.lmd` filename. Save that exact path immediately; do not
+  query it as an artifact key or reconstruct the document with generic file tools.
+- A successful Feishu write produces a new provider-confirmed `draft_document` revision;
+  provider result metadata remains internal to the step.
+- An IR draft does not produce a parallel Markdown artifact. Markdown export from IR is
+  handled only by a separate user-initiated download flow.
+- Internal locate results, modify plans, revision sets, section plans, and draft blocks are
+  persisted but are not exposed as separate product cards.
+- Workflow tools pass artifact paths and do not copy complete documents into ChatAgent
+  responses.
+
+## Active-session intent mapping
+
+| User intent | Step and mode |
+|---|---|
+| Read new sources or restart from changed requirements | `prepare` |
+| Generate/use/regenerate an outline | `outline`, prepare/generate mode |
+| Modify the current outline with AI | rerun `outline`, revision mode |
+| Generate a new flat article | `write_flat_document` |
+| Write/rewrite the body from the current outline | `write_document`, generation mode |
+| Modify an existing/generated body with AI | rerun `write_document`, revision mode |
+| Insert/replace/move/delete an image in the current body | rerun `write_document`, targeted revision mode |
+
+When an outline change invalidates an existing body, rewind to `outline`; the next
+`write_document` execution replans sections from the newly selected outline revision.
+Use only step IDs currently reported as reachable by the runtime.

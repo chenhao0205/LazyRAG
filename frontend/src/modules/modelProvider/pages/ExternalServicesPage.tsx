@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Alert, AutoComplete, Button, Empty, Form, Input, Modal, Space, Spin, Tag, Tooltip, message } from "antd";
 import {
   CloudServerOutlined,
@@ -132,7 +132,7 @@ const externalServiceConfigs: ExternalServiceConfig[] = [
     category: "parsing",
     fields: ["baseUrl", "apiKey"],
     logo: <FilePdfOutlined />,
-    logoUrl: "https://www.google.com/s2/favicons?domain=mineru.net&sz=96",
+    logoUrl: "https://mineru.net/favicon-96x96.png",
     tone: "blue",
     status: "configured",
   },
@@ -325,6 +325,27 @@ function serviceMatchesKeyword(service: ExternalServiceConfig, keyword: string) 
   return [service.name, service.description, service.summary].some((value) =>
     value.toLowerCase().includes(normalizedKeyword),
   );
+}
+
+export function renderExternalServiceDescription(description: string) {
+  const parts = description.split(/(https?:\/\/[^\s，。；、）)]+)/g);
+
+  return parts.map((part, index) => {
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          href={part}
+          key={`${part}-${index}`}
+          rel="noreferrer"
+          target="_blank"
+        >
+          {part}
+        </a>
+      );
+    }
+
+    return <span key={`${part}-${index}`}>{part}</span>;
+  });
 }
 
 function getBaseUrlPresetLabelKey(serviceName: string, presetKey?: string) {
@@ -527,7 +548,129 @@ function ExternalServiceLogo({ service }: { service: ExternalServiceConfig }) {
   );
 }
 
-export default function ExternalServicesPage() {
+interface ExternalServiceCardProps {
+  ariaLabel: string;
+  onOpen: (service: ExternalServiceConfig) => void;
+  service: ExternalServiceConfig;
+  statusLabel: string;
+}
+
+export function ExternalServiceCard({
+  ariaLabel,
+  onOpen,
+  service,
+  statusLabel,
+}: ExternalServiceCardProps) {
+  const summaryRef = useRef<HTMLParagraphElement>(null);
+  const [summaryOverflowing, setSummaryOverflowing] = useState(false);
+  const overflowAware = service.category === "parsing";
+
+  useLayoutEffect(() => {
+    if (!overflowAware) return;
+    const summary = summaryRef.current;
+    if (!summary) return;
+
+    const measure = () => {
+      setSummaryOverflowing(
+        summary.scrollHeight > summary.clientHeight + 1
+        || summary.scrollWidth > summary.clientWidth + 1,
+      );
+    };
+    measure();
+    const deferredMeasure = window.setTimeout(measure, 0);
+    window.addEventListener("resize", measure);
+
+    const observer = typeof ResizeObserver === "undefined"
+      ? undefined
+      : new ResizeObserver(measure);
+    observer?.observe(summary);
+    return () => {
+      window.clearTimeout(deferredMeasure);
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, [overflowAware, service.summary]);
+
+  const summary = (
+    <span className="model-provider-service-summary-wrap">
+      <p
+        className="model-provider-service-summary"
+        ref={overflowAware ? summaryRef : undefined}
+      >
+        {service.summary}
+      </p>
+    </span>
+  );
+  const card = (
+    <button
+      aria-label={ariaLabel}
+      className="model-provider-service-card"
+      onClick={() => onOpen(service)}
+      type="button"
+    >
+      <ExternalServiceLogo service={service} />
+      <div className="model-provider-service-card-copy">
+        <div>
+          <div className="model-provider-service-title-row">
+            <h4>{service.name}</h4>
+            <Tag
+              className="model-provider-service-status"
+              color={
+                service.status === "configured"
+                  ? "success"
+                  : service.status === "tbd"
+                    ? "warning"
+                    : "default"
+              }
+            >
+              {statusLabel}
+            </Tag>
+          </div>
+          {overflowAware ? (
+            summary
+          ) : (
+            <Tooltip placement="topLeft" title={service.summary}>
+              {summary}
+            </Tooltip>
+          )}
+        </div>
+      </div>
+      <span className="model-provider-service-card-arrow" aria-hidden="true">
+        <RightOutlined />
+      </span>
+    </button>
+  );
+
+  if (!overflowAware) return card;
+  return (
+    <Tooltip
+      classNames={{ root: "model-provider-tool-popover" }}
+      placement="bottomLeft"
+      trigger={["hover", "focus"]}
+      title={
+        summaryOverflowing
+          ? <div className="model-provider-tool-popover-content">{service.summary}</div>
+          : undefined
+      }
+    >
+      {card}
+    </Tooltip>
+  );
+}
+
+interface ExternalServicesPageProps {
+  includeMcp?: boolean;
+  includeBuiltinTools?: boolean;
+  includeDependencies?: boolean;
+  visibleCategories?: ServiceCategoryKey[];
+}
+
+export default function ExternalServicesPage({
+  includeMcp = true,
+  includeBuiltinTools = true,
+  includeDependencies = true,
+  visibleCategories,
+}: ExternalServicesPageProps = {}) {
   const { t, i18n } = useTranslation();
   const currentLanguage = i18n.resolvedLanguage || i18n.language || "zh-CN";
   const [form] = Form.useForm<Record<string, ExternalServiceFormValues>>();
@@ -1010,6 +1153,9 @@ export default function ExternalServicesPage() {
   };
 
   const renderServiceCategory = (categoryKey: ServiceCategoryKey) => {
+    if (visibleCategories && !visibleCategories.includes(categoryKey)) {
+      return null;
+    }
     const category = serviceCategories.find((item) => item.key === categoryKey);
     if (!category) {
       return null;
@@ -1037,42 +1183,13 @@ export default function ExternalServicesPage() {
         {visibleServices.length ? (
           <div className="model-provider-service-grid">
             {visibleServices.map((service) => (
-              <button
-                aria-label={t("modelProvider.external.configModalTitle", { name: service.name })}
-                className="model-provider-service-card"
+              <ExternalServiceCard
+                ariaLabel={t("modelProvider.external.configModalTitle", { name: service.name })}
                 key={service.key}
-                onClick={() => openConfigModal(service)}
-                type="button"
-              >
-                <ExternalServiceLogo service={service} />
-                <div className="model-provider-service-card-copy">
-                  <div>
-                    <div className="model-provider-service-title-row">
-                      <h4>{service.name}</h4>
-                      <Tag
-                        className="model-provider-service-status"
-                        color={
-                          service.status === "configured"
-                            ? "success"
-                            : service.status === "tbd"
-                              ? "warning"
-                              : "default"
-                        }
-                      >
-                        {t(`modelProvider.external.status.${service.status}`)}
-                      </Tag>
-                    </div>
-                    <Tooltip placement="topLeft" title={service.summary}>
-                      <span className="model-provider-service-summary-wrap">
-                        <p className="model-provider-service-summary">{service.summary}</p>
-                      </span>
-                    </Tooltip>
-                  </div>
-                </div>
-                <span className="model-provider-service-card-arrow" aria-hidden="true">
-                  <RightOutlined />
-                </span>
-              </button>
+                onOpen={openConfigModal}
+                service={service}
+                statusLabel={t(`modelProvider.external.status.${service.status}`)}
+              />
             ))}
           </div>
         ) : (
@@ -1115,11 +1232,11 @@ export default function ExternalServicesPage() {
 
           <div className="model-provider-tools-substack">
             {renderServiceCategory("parsing")}
-            <DependencyInstallSection />
+            {includeDependencies ? <DependencyInstallSection /> : null}
             {renderServiceCategory("search")}
             {renderServiceCategory("academic")}
-            {developerActive ? <ToolManagementSection view="builtin" /> : null}
-            <ToolManagementSection view="mcp" />
+            {developerActive && includeBuiltinTools ? <ToolManagementSection view="builtin" /> : null}
+            {includeMcp ? <ToolManagementSection view="mcp" /> : null}
           </div>
         </div>
       </Spin>
@@ -1166,7 +1283,7 @@ export default function ExternalServicesPage() {
                     {t(`modelProvider.external.status.${activeServiceDisplayStatus}`)}
                   </Tag>
                 </div>
-                <p>{activeService.description}</p>
+                <p>{renderExternalServiceDescription(activeService.description)}</p>
               </div>
             </div>
             <Form form={form} layout="vertical">

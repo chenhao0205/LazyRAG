@@ -1,4 +1,5 @@
 import { axiosInstance, getLocalizedErrorMessage } from "@/components/request";
+import type { RouterTrafficStatsResponse } from "@/api/generated/core-client";
 import { AGENT_API_BASE } from "./constants";
 
 const ROUTER_API_BASE = `${AGENT_API_BASE}/router`;
@@ -52,6 +53,8 @@ export type RouterABStrategy = {
   router_response?: Record<string, unknown>;
 };
 
+export type RouterTrafficStats = RouterTrafficStatsResponse;
+
 export type RegisterRouterAlgorithmPayload = {
   algorithm_id: string;
   code_path: string;
@@ -95,12 +98,12 @@ function asIntMap(value: unknown): Record<string, number> {
   return result;
 }
 
-function normalizeOwner(value: unknown): RouterOwner {
+function normalizeOwner(value: unknown, fallbackThreadId = ""): RouterOwner {
   if (!isRecord(value)) {
-    return { thread_id: "" };
+    return { thread_id: fallbackThreadId };
   }
   return {
-    thread_id: asString(value.thread_id),
+    thread_id: asString(value.thread_id) || fallbackThreadId,
     run_id: asString(value.run_id) || undefined,
     candidate_ref: asString(value.candidate_ref) || undefined,
   };
@@ -120,7 +123,7 @@ export function normalizeRouterAlgorithm(value: unknown): RouterAlgorithm | unde
     expected_state: asString(value.expected_state),
     healthy_instances: asNumber(value.healthy_instances),
     instance_count: asNumber(value.instance_count),
-    owner: normalizeOwner(value.owner),
+    owner: normalizeOwner(value.owner, asString(value.thread_id)),
     router_chat_url: asString(value.router_chat_url),
     router_admin_url: asString(value.router_admin_url),
   };
@@ -172,6 +175,72 @@ export function normalizeRouterABStrategy(value: unknown): RouterABStrategy | nu
       reason: asString(updatedBy.reason) || undefined,
     },
     router_response: isRecord(value.router_response) ? value.router_response : undefined,
+  };
+}
+
+export function normalizeRouterTrafficStats(value: unknown): RouterTrafficStats | null {
+  const envelope = isRecord(value) && isRecord(value.data) ? value.data : value;
+  if (!isRecord(envelope) || !isRecord(envelope.range) || !isRecord(envelope.summary)) {
+    return null;
+  }
+  const range = envelope.range;
+  const summary = envelope.summary;
+  const granularity = asString(range.granularity);
+  if (granularity !== "hour" && granularity !== "day") {
+    return null;
+  }
+  return {
+    range: {
+      start_time: asString(range.start_time),
+      end_time: asString(range.end_time),
+      granularity,
+    },
+    summary: {
+      answer_count: asNumber(summary.answer_count),
+      user_count: asNumber(summary.user_count),
+      conversation_count: asNumber(summary.conversation_count),
+      feedback_count: asNumber(summary.feedback_count),
+      feedback_rate: asNumber(summary.feedback_rate),
+    },
+    algorithms: Array.isArray(envelope.algorithms)
+      ? envelope.algorithms.flatMap((item) => {
+        if (!isRecord(item) || !asString(item.algorithm_id)) {
+          return [];
+        }
+        return [{
+          algorithm_id: asString(item.algorithm_id),
+          answer_count: asNumber(item.answer_count),
+          actual_ratio: asNumber(item.actual_ratio),
+          user_count: asNumber(item.user_count),
+          conversation_count: asNumber(item.conversation_count),
+          like_count: asNumber(item.like_count),
+          dislike_count: asNumber(item.dislike_count),
+          feedback_rate: asNumber(item.feedback_rate),
+          positive_rate: typeof item.positive_rate === "number" && Number.isFinite(item.positive_rate)
+            ? item.positive_rate
+            : null,
+        }];
+      })
+      : [],
+    trend: Array.isArray(envelope.trend)
+      ? envelope.trend.flatMap((item) => (
+        isRecord(item) && asString(item.time)
+          ? [{ time: asString(item.time), counts: asIntMap(item.counts) }]
+          : []
+      ))
+      : [],
+    dislike_reasons: Array.isArray(envelope.dislike_reasons)
+      ? envelope.dislike_reasons.flatMap((item) => (
+        isRecord(item) && asString(item.algorithm_id)
+          ? [{
+            algorithm_id: asString(item.algorithm_id),
+            reason: asString(item.reason),
+            count: asNumber(item.count),
+            ratio: asNumber(item.ratio),
+          }]
+          : []
+      ))
+      : [],
   };
 }
 
@@ -251,6 +320,22 @@ export async function deleteRouterAlgorithm(algorithmId: string) {
 export async function fetchRouterABStrategy() {
   const response = await axiosInstance.get(`${ROUTER_API_BASE}/ab-strategy`, silentConfig);
   return normalizeRouterABStrategy(response.data);
+}
+
+export async function fetchRouterTrafficStats(params: {
+  startTime: string;
+  endTime: string;
+  granularity: "hour" | "day";
+}) {
+  const response = await axiosInstance.get(`${ROUTER_API_BASE}/traffic-stats`, {
+    params: {
+      start_time: params.startTime,
+      end_time: params.endTime,
+      granularity: params.granularity,
+    },
+    ...silentConfig,
+  });
+  return normalizeRouterTrafficStats(response.data);
 }
 
 export async function putRouterABStrategy(payload: PutRouterABStrategyPayload) {

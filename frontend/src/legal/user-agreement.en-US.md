@@ -4,7 +4,7 @@
 
 ## Article 1 Please Read Carefully
 
-Welcome to LazyMind. LazyMind is an AI Skill Runtime for knowledge-intensive work. On supported devices or team environments, it may provide knowledge bases, document processing, retrieval, model calls, Skills/Plugins, task orchestration, Agent tool calls, content generation, and related capabilities.
+Welcome to LazyMind. LazyMind is an AI Skill Runtime for knowledge-intensive work. On supported devices or team environments, it may provide knowledge bases, document processing, retrieval, model calls, Skills/Workflows, task orchestration, Agent tool calls, content generation, and related capabilities.
 
 Please read this agreement package in full before installing, registering for, enabling, or using LazyMind. Matters that materially affect your rights—including personal information processing, third-party services, Agent external actions, AI output limitations, disclaimers and liability limits, service suspension or termination, and dispute resolution—will be highlighted through bold text, dialogs, dedicated pages, or other conspicuous means. You may ask the operator to explain relevant terms.
 
@@ -18,7 +18,7 @@ This agreement package consists of:
 
 - the LazyMind User Agreement;
 - the LazyMind Privacy Policy;
-- the LazyMind AI/Agent and Skill/Plugin Safety Rules;
+- the LazyMind AI/Agent and Skill/Workflow Safety Rules;
 - the LazyMind Third-Party Services and Open-Source Software Notice; and
 - rules or special terms separately shown in installation screens, feature pages, permission dialogs, and specific services.
 
@@ -308,4 +308,4 @@ Depending on features you use, LazyMind may process:
 
 1. This Part assumes “user-selected third-party services.” Third-party connectors and custom tools are governed by their own agreements and privacy rules. Confirm you are authorized to grant related accounts and data, choose permissions under least necessity, and promptly disconnect or revoke authorization when no longer used.
 2. If LazyMind later provides new online services or default third-party services decided by us, we will update this agreement based on actual circumstances, separately explain related data-processing rules, and obtain your consent again when legally required. Even when third-party services are selected by you, LazyMind will explain in the UI the service type about to be called and data that may be sent. For processing that law requires to be separately notified or separately consented to, acceptance of this agreement alone is not a substitute.
-3. Agreement version: V0.2; applicable client version: V0.2; publication date: July 28, 2026.
+3. Agreement version: V0.3; applicable client version: V0.2; publication date: July 28, 2026.

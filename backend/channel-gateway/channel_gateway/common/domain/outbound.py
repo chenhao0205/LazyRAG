@@ -12,6 +12,11 @@ from channel_gateway.common.domain.channel import ClaimedOutbound
 _MARKDOWN_IMAGE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+)\)')
 
 
+def is_image_content_type(value: Any) -> bool:
+    content_type = str(value or '').strip().lower()
+    return content_type == 'image' or content_type.startswith('image/')
+
+
 @dataclass(frozen=True, slots=True)
 class SelectionOption:
     label: str
@@ -41,62 +46,85 @@ class SelectionPresentation:
 class CapabilityPresentation:
     kind: Literal['capability']
     groups: tuple[dict[str, Any], ...]
-    enabled_features: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             'kind': self.kind,
             'groups': [dict(group) for group in self.groups],
-            'enabled_features': list(self.enabled_features),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationExecutorPresentation:
+    id: str
+    display_name: str
+    kind: Literal['internal', 'external']
+    installed: bool
+    host_online: bool
+    available: bool
+    unavailable_reason: str = ''
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'id': self.id,
+            'display_name': self.display_name,
+            'kind': self.kind,
+            'installed': self.installed,
+            'host_online': self.host_online,
+            'available': self.available,
+            'unavailable_reason': self.unavailable_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantPresentation:
+    id: str
+    display_name: str
+    available: bool
+    unavailable_reason: str = ''
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'id': self.id,
+            'display_name': self.display_name,
+            'available': self.available,
+            'unavailable_reason': self.unavailable_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantCatalogPresentation:
+    kind: Literal['assistant_catalog']
+    assistants: tuple[AssistantPresentation, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'kind': self.kind,
+            'assistants': [assistant.to_dict() for assistant in self.assistants],
         }
 
 
 @dataclass(frozen=True, slots=True)
 class ConversationSettingsPresentation:
     kind: Literal['conversation_settings']
-    conversation_id: str
-    section: Literal[
-        'overview',
-        'knowledge_base',
-        'plugin',
-        'subagent',
-        'skill',
-        'tool',
-        'personalization',
-        'workflow',
-    ]
-    knowledge_bases: tuple[dict[str, Any], ...]
-    plugin_enabled: bool
-    plugin_mode: Literal['auto', 'dynamic']
+    dataset_ids: tuple[str, ...]
+    workflow_enabled: bool
+    workflow_mode: Literal['auto', 'dynamic']
     subagent_enabled: bool
-    skills: tuple[dict[str, Any], ...] = ()
-    tools: tuple[dict[str, Any], ...] = ()
-    personalization_enabled: bool = True
-    workflows: tuple[dict[str, Any], ...] = ()
-    channel_features: tuple[str, ...] = ()
-    updated: bool = False
+    chat_executor: str
+    executors: tuple[ConversationExecutorPresentation, ...]
+    assistant: str = 'lazymind'
 
     def to_dict(self) -> dict[str, Any]:
         return {
             'kind': self.kind,
-            'conversation_id': self.conversation_id,
-            'section': self.section,
-            'knowledge_bases': [
-                dict(item) for item in self.knowledge_bases
-            ],
-            'plugin_enabled': self.plugin_enabled,
-            'plugin_mode': self.plugin_mode,
+            'dataset_ids': list(self.dataset_ids),
+            'workflow_enabled': self.workflow_enabled,
+            'workflow_mode': self.workflow_mode,
             'subagent_enabled': self.subagent_enabled,
-            'skills': [dict(item) for item in self.skills],
-            'tools': [dict(item) for item in self.tools],
-            'personalization_enabled': (
-                self.personalization_enabled
-            ),
-            'workflows': [
-                dict(item) for item in self.workflows
-            ],
-            'channel_features': list(self.channel_features),
-            'updated': self.updated,
+            'chat_executor': self.chat_executor,
+            'executors': [executor.to_dict() for executor in self.executors],
+            'assistant': self.assistant,
         }
 
 
@@ -121,6 +149,7 @@ class AskPresentation:
     title: str
     description: str
     questions: tuple[AskQuestionPresentation, ...]
+    submittable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +161,7 @@ class AskPresentation:
                 question.to_dict()
                 for question in self.questions
             ],
+            'submittable': self.submittable,
         }
 
 
@@ -166,6 +196,38 @@ class TaskPresentation:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionPresentation:
+    kind: Literal['execution']
+    provider: str
+    status: str
+    host_id: str = ''
+    host_online: bool = False
+    recovery_count: int = 0
+    invocation_count: int = 0
+    tools: tuple[str, ...] = ()
+    workflows: tuple[str, ...] = ()
+    artifact_count: int = 0
+    artifact_revision_count: int = 0
+    error_message: str = ''
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'kind': self.kind,
+            'provider': self.provider,
+            'status': self.status,
+            'host_id': self.host_id,
+            'host_online': self.host_online,
+            'recovery_count': self.recovery_count,
+            'invocation_count': self.invocation_count,
+            'tools': list(self.tools),
+            'workflows': list(self.workflows),
+            'artifact_count': self.artifact_count,
+            'artifact_revision_count': self.artifact_revision_count,
+            'error_message': self.error_message,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationTurnPresentation:
     query: str
     answer: str
@@ -179,12 +241,7 @@ class ConversationPresentation:
     kind: Literal['conversation']
     state: Literal['new', 'current', 'switched', 'history']
     title: str
-    previous_title: str = ''
-    updated_at: str = ''
-    feature_labels: tuple[str, ...] = ()
-    history_label: str = ''
     turns: tuple[ConversationTurnPresentation, ...] = ()
-    footer: str = ''
     reached_start: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,23 +249,59 @@ class ConversationPresentation:
             'kind': self.kind,
             'state': self.state,
             'title': self.title,
-            'previous_title': self.previous_title,
-            'updated_at': self.updated_at,
-            'feature_labels': list(self.feature_labels),
-            'history_label': self.history_label,
             'turns': [turn.to_dict() for turn in self.turns],
-            'footer': self.footer,
             'reached_start': self.reached_start,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationCatalogItemPresentation:
+    index: int
+    conversation_id: str
+    provider_thread_id: str
+    display_name: str
+    update_time: str
+    project_key: str
+    project_name: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'index': self.index,
+            'conversation_id': self.conversation_id,
+            'provider_thread_id': self.provider_thread_id,
+            'display_name': self.display_name,
+            'update_time': self.update_time,
+            'project_key': self.project_key,
+            'project_name': self.project_name,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationCatalogPresentation:
+    kind: Literal['conversation_catalog']
+    selection_id: str
+    assistant: str
+    items: tuple[ConversationCatalogItemPresentation, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'kind': self.kind,
+            'selection_id': self.selection_id,
+            'assistant': self.assistant,
+            'items': [item.to_dict() for item in self.items],
         }
 
 
 ReplyPresentation: TypeAlias = (
     SelectionPresentation
     | CapabilityPresentation
+    | AssistantCatalogPresentation
     | ConversationSettingsPresentation
     | AskPresentation
     | TaskPresentation
+    | ExecutionPresentation
     | ConversationPresentation
+    | ConversationCatalogPresentation
 )
 
 
@@ -280,10 +373,7 @@ class OutboundRenderer:
                     }
                 )
                 continue
-            rendered.extend(
-                {'kind': 'text', 'text': chunk}
-                for chunk in self._split_text(part.text)
-            )
+            rendered.extend(self.text_parts(part.text))
         for artifact in self._artifacts(message.metadata):
             source = str(artifact.get('source') or '')
             kind = str(artifact.get('kind') or '')
@@ -316,11 +406,14 @@ class OutboundRenderer:
                 rendered.append(rendered_part)
         source_text = self._source_text(message.metadata)
         if source_text:
-            rendered.extend(
-                {'kind': 'text', 'text': chunk}
-                for chunk in self._split_text(source_text)
-            )
+            rendered.extend(self.text_parts(source_text))
         return rendered
+
+    def text_parts(self, text: str) -> list[dict[str, str]]:
+        return [
+            {'kind': 'text', 'text': chunk}
+            for chunk in self._split_text(text)
+        ]
 
     def _split_text(self, text: str) -> Iterable[str]:
         remaining = text.strip()
@@ -408,8 +501,7 @@ class OutboundRenderer:
                 continue
             kind = (
                 'image'
-                if content_type == 'image'
-                or content_type.startswith('image/')
+                if is_image_content_type(content_type)
                 else 'file'
                 if content_type == 'file'
                 else ''

@@ -5,16 +5,16 @@ import os
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
+from lazyllm.tools.agent import ToolExecutionError
+from typing_extensions import NotRequired, TypedDict
 from lazymind.chat.engine.attachment_reader import (
     is_chat_attachment_file,
     is_chat_image_file,
     is_chat_text_file,
     parse_attachment_content,
 )
-from lazymind.chat.engine.tools.infra import handle_tool_errors, tool_error, tool_success
-from lazymind.chat.engine.tools.attachment_edit import (
+from lazymind.chat.engine.tools.local_file.attachment_edit import (
     AttachmentEditDraft,
-    effective_attachment_path,
 )
 
 from lazymind.chat.service.utils.static_file_url import (
@@ -29,6 +29,17 @@ _CONTENT_TYPES = {'text', 'json', 'image', 'file', 'file_list'}
 
 UPLOAD_MARKER = '/var/lib/lazymind/uploads/'
 SUBAGENT_MARKER = '/data/subagent/'
+
+
+class ArtifactSaveItem(TypedDict):
+    """One save_artifacts entry exposed as a structured model-facing schema."""
+
+    key: str
+    value: Any
+    content_type: NotRequired[Literal['text', 'json', 'image', 'file', 'file_list']]
+    source_tool: NotRequired[str]
+    sort_order: NotRequired[int]
+    caption: NotRequired[str]
 
 
 def _materialize_local_path(path: str) -> str:
@@ -82,7 +93,7 @@ def _is_valid_image_ref(path: str) -> bool:
     p = (path or '').strip()
     if not p:
         return False
-    if p.startswith(('http://', 'https://', '/static-files/', 'data:image/')):
+    if p.startswith(('http://', 'https://', '/static-files/', '/api/core/static-files/', 'data:image/')):
         return True
     if p.startswith('/data/subagent/') or SUBAGENT_MARKER in p:
         return True
@@ -103,6 +114,8 @@ def _build_artifact_value(value: Any, content_type: str):
     """
     ctx = require_context()
     if content_type == 'text':
+        if isinstance(value, dict) and 'text' in value:
+            value = value['text']
         text = str(value)
         if len(text.encode('utf-8', errors='replace')) > LARGE_ARTIFACT_THRESHOLD:
             abs_path = ctx.write_large_content(text, hint='artifact_text')
@@ -120,43 +133,66 @@ def _build_artifact_value(value: Any, content_type: str):
             return {'type': 'json', 'path': abs_path, 'size': os.path.getsize(abs_path)}, 'file'
         return {'data': value}, 'json'
     if content_type == 'image':
-        src = str(value).strip()
+        image_metadata: Dict[str, Any] = {}
+        if isinstance(value, dict):
+            image_metadata = value
+            src = str(
+                value.get('path') or value.get('image_url') or value.get('url') or ''
+            ).strip()
+        else:
+            src = str(value).strip()
+
+        def image_value(path: str) -> Dict[str, Any]:
+            built = {'path': path}
+            embedded_caption = image_metadata.get('caption')
+            if embedded_caption is not None:
+                built['caption'] = str(embedded_caption)
+            return built
+
         if src.startswith('/static-files/'):
-            return {'path': src}, 'image'
+            return image_value(src), 'image'
         if not src.lower().startswith(('http://', 'https://')):
             src = _materialize_local_path(src)
         if not _is_valid_image_ref(src):
-            raise ValueError(
+            raise ToolExecutionError(
                 f'Invalid image reference {src!r}: expected http(s) URL, /static-files/ path, '
                 'or an existing absolute file path — placeholder text is not allowed.'
             )
         # '/static-files/...' (possibly with query) is a signed URL path, not a local
         # filesystem path. Keep it as URL text instead of copying from disk.
         if src.startswith('/static-files/'):
-            return {'path': src}, 'image'
+            return image_value(src), 'image'
         if os.path.isabs(src):
             # Copy into workspace; keep absolute path so Go core can sign a URL for it.
             dst_rel = ctx.copy_into_workspace(src)
             dst_abs = os.path.join(ctx.workspace_path, dst_rel)
-            return {'path': dst_abs}, 'image'
-        return {'path': src}, 'image'
+            return image_value(dst_abs), 'image'
+        return image_value(src), 'image'
     if content_type == 'file':
-        source = str(value).strip()
+        # Models commonly reuse the normalized artifact shape returned by read tools.
+        # Accept that shape as well as the documented plain path so a batch save does
+        # not write earlier text outputs and then fail on ``{"path": ...}``.
+        if isinstance(value, dict):
+            source = str(value.get('path') or '').strip()
+        else:
+            source = str(value).strip()
         if not source:
-            raise ValueError('File artifact path must not be empty.')
+            raise ToolExecutionError('File artifact path must not be empty.')
         if os.path.isabs(source):
             source = os.path.realpath(source)
             if not os.path.isfile(source):
-                raise FileNotFoundError(f'File artifact does not exist: {source}')
+                raise ToolExecutionError(f'File artifact does not exist: {source}')
             rel = ctx.copy_into_workspace(source)
             full = os.path.realpath(os.path.join(ctx.workspace_path, rel))
         else:
             full = os.path.realpath(os.path.join(ctx.workspace_path, source))
             workspace = os.path.realpath(ctx.workspace_path)
             if os.path.commonpath([workspace, full]) != workspace:
-                raise ValueError('Relative file artifact path must stay inside the task workspace.')
+                raise ToolExecutionError(
+                    'Relative file artifact path must stay inside the task workspace.'
+                )
             if not os.path.isfile(full):
-                raise FileNotFoundError(f'File artifact does not exist in task workspace: {source}')
+                raise ToolExecutionError(f'File artifact does not exist in task workspace: {source}')
         size = os.path.getsize(full)
         return {'filename': os.path.basename(full), 'path': full, 'size': size}, 'file'
     if content_type == 'file_list':
@@ -169,27 +205,60 @@ def _build_artifact_value(value: Any, content_type: str):
             if os.path.isabs(p):
                 source = os.path.realpath(p)
                 if not os.path.isfile(source):
-                    raise FileNotFoundError(f'File-list artifact does not exist: {source}')
+                    raise ToolExecutionError(f'File-list artifact does not exist: {source}')
                 rel = ctx.copy_into_workspace(source)
                 paths.append(os.path.realpath(os.path.join(ctx.workspace_path, rel)))
                 continue
             resolved = os.path.realpath(os.path.join(ctx.workspace_path, p))
             workspace = os.path.realpath(ctx.workspace_path)
             if os.path.commonpath([workspace, resolved]) != workspace:
-                raise ValueError('Relative file-list artifact path must stay inside the task workspace.')
+                raise ToolExecutionError(
+                    'Relative file-list artifact path must stay inside the task workspace.'
+                )
             if not os.path.isfile(resolved):
-                raise FileNotFoundError(f'File-list artifact does not exist in task workspace: {p}')
+                raise ToolExecutionError(f'File-list artifact does not exist in task workspace: {p}')
             paths.append(resolved)
         if not paths:
-            raise ValueError('File-list artifact must contain at least one existing file.')
+            raise ToolExecutionError(
+                'File-list artifact must contain at least one existing file.'
+            )
         return {'paths': paths}, 'file_list'
     return {'text': str(value)}, 'text'
+
+
+def _validate_declared_artifact_type(
+    ctx: Any,
+    key: str,
+    content_type: str,
+) -> Optional[str]:
+    declared = (ctx.params or {}).get('output_slot_types') or {}
+    declared_type = (
+        str(declared.get(key) or '').strip().lower()
+        if isinstance(declared, dict) else ''
+    )
+    actual_type = str(content_type or '').strip().lower()
+    if not declared_type:
+        return None
+    allowed_types = {'file', 'file_list'} if declared_type == 'file' else {declared_type}
+    if actual_type not in allowed_types:
+        allowed = ' or '.join(f'content_type="{value}"' for value in sorted(allowed_types))
+        suffix = (
+            ' Save the exact path returned by the producing tool instead of copying '
+            'its contents.' if declared_type == 'file' else ''
+        )
+        return (
+            f'Artifact {key!r} is declared as a {declared_type} slot and must be saved '
+            f'with {allowed}.{suffix}'
+        )
+    return None
 
 
 def _save_artifact(key: str, value: Any, content_type: str = 'text',
                    source_tool: Optional[str] = None,
                    sort_order: Optional[int] = None,
-                   caption: Optional[str] = None) -> Dict[str, Any]:
+                   caption: Optional[str] = None,
+                   *, internal_publish: bool = False,
+                   publisher_list_index: Optional[int] = None) -> Dict[str, Any]:
     """Save one output artifact produced by this SubAgent.
 
     File-type values must be local absolute paths; the framework copies them into the
@@ -223,7 +292,9 @@ def _save_artifact(key: str, value: Any, content_type: str = 'text',
     Args:
         key (str): Artifact key. Must be one of the declared output_slots.
         value (Any): The artifact value. For text: a string. For json: a dict/list.
-            For image/file: a local absolute path. For file_list: a list of absolute paths.
+            For image: a path/URL string or an object containing path/image_url/url and
+            optional caption. For file: a local absolute path. For file_list: a list of
+            absolute paths.
         content_type (str): One of text, json, image, file, file_list. Default text.
         source_tool (str): Optional name of the tool that produced this artifact,
             e.g. 'web_search', 'wikipedia', 'image_generation'. Used for display only.
@@ -239,19 +310,50 @@ def _save_artifact(key: str, value: Any, content_type: str = 'text',
         A confirmation that the artifact was saved.
     """
     ctx = require_context()
+    policy = (ctx.params or {}).get('workflow_runtime') or {}
+    publisher_owned_slots = {
+        str(slot).strip()
+        for slot in (policy.get('publisher_owned_slots') or [])
+        if str(slot).strip()
+    } if isinstance(policy, dict) else set()
+    if key in publisher_owned_slots and not internal_publish:
+        raise ToolExecutionError(
+            f'Workflow slot {key!r} is publisher-owned. Use the package-declared '
+            'publisher tool; it writes the correct existing list_index and revision '
+            'automatically. Do not save this slot directly.',
+        )
     if ctx.output_slots and key not in ctx.output_slots:
-        return tool_error(
-            'save_artifacts',
+        raise ToolExecutionError(
             f'Artifact key {key!r} is not declared for this step. '
             f'Allowed keys: {", ".join(ctx.output_slots)}',
         )
-    ct = content_type if content_type in _CONTENT_TYPES else 'text'
+    if content_type not in _CONTENT_TYPES:
+        raise ToolExecutionError(
+            f'Unsupported content_type {content_type!r}; choose from {sorted(_CONTENT_TYPES)}.'
+        )
+    ct = content_type
+    contract_error = _validate_declared_artifact_type(ctx, key, ct)
+    if contract_error:
+        raise ToolExecutionError(contract_error)
     built, actual_ct = _build_artifact_value(value, ct)
     if source_tool:
         built['_source_tool'] = str(source_tool)
+    # A package publisher may already have resolved the durable list index from
+    # one consistent order snapshot. This avoids races when it emits several
+    # ordered artifacts in one tool call before Core has processed the earlier
+    # events. Model-facing callers must continue to use sort_order.
+    if publisher_list_index is not None:
+        if not internal_publish:
+            raise ToolExecutionError(
+                'publisher_list_index is reserved for package publisher tools.',
+            )
+        if int(publisher_list_index) < 0:
+            raise ToolExecutionError('publisher_list_index must be >= 0.')
+        built['list_index'] = int(publisher_list_index)
+
     # Translate sort_order → list_index via Go core API.
     out_of_range_warning: Optional[str] = None
-    if sort_order is not None:
+    if sort_order is not None and publisher_list_index is None:
         list_index, resolve_err = _resolve_list_index_from_sort_order(key, sort_order)
         if list_index is not None:
             built['list_index'] = list_index
@@ -274,43 +376,56 @@ def _save_artifact(key: str, value: Any, content_type: str = 'text',
     msg = f"Artifact '{key}' saved."
     if out_of_range_warning:
         msg += f' WARNING: {out_of_range_warning}'
-    return tool_success('save_artifacts', {'status': 'ok', 'message': msg})
+    return {'status': 'ok', 'message': msg}
 
 
-def save_artifacts(artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def save_artifacts(artifacts: List[ArtifactSaveItem]) -> Dict[str, Any]:
     """Save one or more output artifacts in one tool call.
 
-    Always pass a list, including when saving a single artifact. Each item accepts
-    key, value, content_type, source_tool, sort_order, and caption. Keeping all
-    writes in one model turn prevents a step with many outputs from exhausting the
-    ReAct tool-turn budget.
+    Always pass a list, including when saving a single artifact. Every item MUST
+    contain ``key`` and ``value``. The payload field is named ``value`` — never
+    ``content`` or ``data``. Optional fields are content_type, source_tool,
+    sort_order, and caption. Keeping all writes in one model turn prevents a step
+    with many outputs from exhausting the ReAct tool-turn budget.
+
+    Correct example::
+
+        {"artifacts": [{"key": "result", "value": "Final output",
+                        "content_type": "text", "caption": "Result"}]}
     """
     if not isinstance(artifacts, list) or not artifacts:
-        return tool_error('save_artifacts', 'artifacts must be a non-empty list.')
+        raise ToolExecutionError('artifacts must be a non-empty list.')
     if len(artifacts) > 50:
-        return tool_error('save_artifacts', 'At most 50 artifacts may be saved at once.')
+        raise ToolExecutionError('At most 50 artifacts may be saved at once.')
 
     results: List[Dict[str, Any]] = []
     for index, item in enumerate(artifacts):
         if not isinstance(item, dict):
-            return tool_error('save_artifacts', f'artifacts[{index}] must be an object.')
+            raise ToolExecutionError(f'artifacts[{index}] must be an object.')
         if 'key' not in item or 'value' not in item:
-            return tool_error(
-                'save_artifacts', f'artifacts[{index}] requires key and value.',
+            if 'key' in item and 'content' in item and 'value' not in item:
+                raise ToolExecutionError(
+                    f'artifacts[{index}] uses content, but the payload field must be named value. '
+                    'Use: {"artifacts":[{"key":"<output key>","value":"<actual content>"}]}',
+                )
+            raise ToolExecutionError(
+                f'artifacts[{index}] requires key and value. '
+                'Use: {"artifacts":[{"key":"<output key>","value":"<actual content>"}]}',
             )
-        results.append(_save_artifact(
+        saved = _save_artifact(
             key=str(item['key']),
             value=item['value'],
             content_type=str(item.get('content_type') or 'text'),
             source_tool=item.get('source_tool'),
             sort_order=item.get('sort_order'),
             caption=item.get('caption'),
-        ))
-    return tool_success('save_artifacts', {
+        )
+        results.append(saved)
+    return {
         'status': 'ok',
         'saved_count': len(results),
         'results': results,
-    })
+    }
 
 
 def _write_artifact_draft(
@@ -361,15 +476,20 @@ def _resolve_list_index_from_sort_order(
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        session_id: str = cfg.get('plugin_session_id', '')
+        session_id: str = cfg.get('workflow_session_id', '')
         if not session_id:
             return None, None
-        ctx = require_context()
-        order_list = ctx.db.load_slot_order_list(session_id, slot)
-        if not order_list:
-            # Single-cardinality slot — sort_order is meaningless, ignore silently.
+        order_response = _workflow_client().get_slot_order(session_id, slot).result
+        raw_order = (
+            order_response.get('order_list')
+            if isinstance(order_response, dict) else None
+        )
+        order = [int(value) for value in (raw_order or [])]
+        if not order:
+            # No durable list order means this is either a single-cardinality
+            # slot or the first append into an empty list.
             return None, None
-        n = len(order_list)
+        n = len(order)
         if sort_order < 1:
             return None, (
                 f'sort_order must be >= 1 (sort_order is 1-based, where 1 is the first item). '
@@ -381,7 +501,7 @@ def _resolve_list_index_from_sort_order(
                 f'(valid range: 1–{n}). Artifact appended as a new item instead. '
                 f'If you intended to overwrite, use a sort_order between 1 and {n}.'
             )
-        return int(order_list[sort_order - 1]), None
+        return order[sort_order - 1], None
     except Exception:
         return None, None
 
@@ -393,7 +513,7 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
     Args:
         key (str): The artifact key to read.
         sort_order (int): Optional. 1-based display position within a list slot.
-            For plugin sessions: resolves via plugin_slot_order → fetches that specific
+            For workflow sessions: resolves via workflow_slot_order → fetches that specific
             selected revision (human or AI).
             For ordinary SubAgents: treated as seq, returns the artifact at that position.
             When omitted, returns all artifacts for this key (or the latest for single slots).
@@ -411,7 +531,7 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
     """
     ctx = require_context()
 
-    # Plugin session: resolve sort_order via DB lookup.
+    # Workflow session: resolve sort_order via DB lookup.
     try:
         import lazyllm
         cfg: Dict[str, Any] = {}
@@ -419,33 +539,84 @@ def get_artifact(key: str, sort_order: Optional[int] = None, task_ref: Optional[
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        plugin_session_id: str = cfg.get('plugin_session_id', '')
+        workflow_session_id: str = cfg.get('workflow_session_id', '')
     except Exception:
-        plugin_session_id = ''
+        workflow_session_id = ''
 
-    bound_rows = ctx.db.load_bound_slot_artifacts(ctx.task_id, key) if plugin_session_id else []
-    if bound_rows:
-        result = _get_bound_plugin_artifacts(ctx, key, bound_rows, sort_order)
-    elif plugin_session_id and sort_order is not None:
-        result = _get_plugin_artifact_by_sort_order(ctx, key, plugin_session_id, sort_order)
-    elif plugin_session_id and sort_order is None:
-        result = _get_plugin_artifact_all(ctx, key, plugin_session_id)
+    if workflow_session_id:
+        local = ctx.local_artifacts(keys=[key])
+        remote_inputs = ctx.params.get('remote_inputs') or {}
+        has_remote_input = key in remote_inputs
+        remote_value = remote_inputs.get(key)
+        remote_type = str((ctx.params.get('remote_input_types') or {}).get(key) or '').lower()
+        direct_value = key in set(ctx.params.get('remote_input_value_slots') or [])
+        if local:
+            artifacts = local
+            if sort_order is not None:
+                artifacts = artifacts[sort_order - 1:sort_order] if sort_order > 0 else []
+            result = {
+                'status': 'ok', 'key': key, 'artifacts': artifacts,
+            }
+        elif has_remote_input:
+            remote_values = remote_value if isinstance(remote_value, list) else [remote_value]
+            remote_values = [value for value in remote_values if value is not None and value != '']
+            if sort_order is not None:
+                remote_values = remote_values[sort_order - 1:sort_order] if sort_order > 0 else []
+            if not remote_values:
+                return {
+                    'status': 'empty',
+                    'message': f"No artifact found for key '{key}' at sort_order={sort_order}.",
+                }
+            if direct_value:
+                content_type = remote_type if remote_type in {'json', 'image'} else 'text'
+                artifacts = []
+                for value in remote_values:
+                    if content_type == 'json':
+                        artifact_value = {'data': value}
+                    elif content_type == 'image':
+                        if isinstance(value, dict):
+                            artifact_value = dict(value)
+                            path = (
+                                artifact_value.get('path')
+                                or artifact_value.get('image_url')
+                                or artifact_value.get('url')
+                            )
+                            artifact_value['path'] = str(path or '')
+                        else:
+                            artifact_value = {'path': str(value)}
+                    else:
+                        artifact_value = {'text': str(value)}
+                    artifacts.append({
+                        'slot': key,
+                        'content_type': content_type,
+                        'value': artifact_value,
+                    })
+            else:
+                artifacts = [{
+                    'slot': key, 'content_type': 'file',
+                    'value': {'path': str(path), 'filename': os.path.basename(str(path))},
+                } for path in remote_values]
+            result = {
+                'status': 'ok', 'key': key, 'artifacts': artifacts,
+            }
+        else:
+            result = _get_public_workflow_artifacts(key, workflow_session_id, sort_order)
     elif sort_order is not None:
         # Ordinary SubAgent: read from sub_agent_artifacts.
         rows = ctx.local_artifacts(keys=[key]) or ctx.db.load_artifacts(ctx.task_id, keys=[key])
         matched = [r for r in rows if r.get('seq') == sort_order]
         if matched:
-            result = tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': matched})
+            result = {'status': 'ok', 'key': key, 'artifacts': matched}
         else:
-            return tool_success('get_artifact', {
+            return {
                 'status': 'empty',
                 'message': f"No artifact found for key '{key}' at sort_order={sort_order}.",
-            })
+            }
     else:
         rows = ctx.local_artifacts(keys=[key]) or ctx.db.load_artifacts(ctx.task_id, keys=[key])
         if not rows:
-            return tool_success('get_artifact', {'status': 'empty', 'message': f"No artifact found for key '{key}'."})
-        result = tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': rows})
+            return {'status': 'empty', 'message': f"No artifact found for key '{key}'."}
+        result = {'status': 'ok', 'key': key, 'artifacts': rows}
 
     # Apply draft overlay and line-range slicing.
     if start_line is not None or end_line is not None:
@@ -460,10 +631,10 @@ def _resolve_artifact_text(
 
     Resolution priority:
     1. Draft file (reflects latest patch_artifact edits in this step).
-    2. Exact revision frozen in the current plugin attempt's input binding.
-    3. Plugin session selected revision via load_slot_artifact_by_sort_order —
+    2. Exact revision frozen in the current workflow attempt's input binding.
+    3. Workflow session selected revision via load_slot_artifact_by_sort_order —
        this is the ONLY path that surfaces human-edited artifacts stored in
-       plugin_human_artifacts; must be checked before sub_agent_artifacts.
+       workflow_human_artifacts; must be checked before sub_agent_artifacts.
     4. Local in-memory cache (same step, sub_agent_artifacts).
     5. DB sub_agent_artifacts (previous steps).
 
@@ -474,7 +645,7 @@ def _resolve_artifact_text(
     if draft is not None:
         return draft[0], draft[1]
 
-    # 2. Plugin session: use the full resolution chain that knows about human edits.
+    # 2. Workflow session: use the full resolution chain that knows about human edits.
     try:
         import lazyllm
         cfg: Dict[str, Any] = {}
@@ -482,35 +653,20 @@ def _resolve_artifact_text(
             cfg = lazyllm.globals.get('agentic_config') or {}
         except Exception:
             pass
-        plugin_session_id: str = cfg.get('plugin_session_id', '')
+        workflow_session_id: str = cfg.get('workflow_session_id', '')
     except Exception:
-        plugin_session_id = ''
+        workflow_session_id = ''
 
-    if plugin_session_id:
-        so = sort_order if sort_order is not None else 1
-        bound_rows = ctx.db.load_bound_slot_artifacts(ctx.task_id, key)
-        if bound_rows:
-            row = bound_rows[so - 1] if 1 <= so <= len(bound_rows) else None
-            if row is None:
-                return None, 'text'
-            value, content_type = ctx.db.resolve_slot_revision_value(row)
-            if value is None:
-                return None, 'text'
+    if workflow_session_id:
+        values = _public_workflow_artifacts(workflow_session_id, key)
+        position = (sort_order or 1) - 1
+        if 0 <= position < len(values):
+            value = values[position].get('value') or {}
+            content_type = str(values[position].get('content_type') or 'text')
             original_type = 'json' if content_type == 'json' else 'text'
-            if content_type == 'file':
+            if content_type == 'file' and isinstance(value, dict):
                 original_type = value.get('type', 'text')
             return _extract_text_from_value(ctx, value, original_type), original_type
-
-        row = ctx.db.load_slot_artifact_by_sort_order(plugin_session_id, key, so)
-        if row is not None:
-            value, content_type = ctx.db.resolve_slot_revision_value(row)
-            if value is not None:
-                original_type = 'json' if content_type == 'json' else 'text'
-                if content_type == 'file':
-                    original_type = value.get('type', 'text')
-                text = _extract_text_from_value(ctx, value, original_type)
-                if text is not None:
-                    return text, original_type
 
     # 3. Local in-memory cache (same step).
     rows = ctx.local_artifacts(keys=[key])
@@ -555,8 +711,7 @@ def _apply_draft_overlay(ctx: Any, key: str, result: Dict[str, Any]) -> Dict[str
     if draft is None:
         return result
     content, original_type = draft
-    data = result.get('data') or {}
-    artifacts = data.get('artifacts') or []
+    artifacts = result.get('artifacts') or []
     if not artifacts:
         return result
     # Replace content in the last artifact entry.
@@ -574,9 +729,7 @@ def _apply_draft_overlay(ctx: Any, key: str, result: Dict[str, Any]) -> Dict[str
     last['value'] = value
     last['_from_draft'] = True
     new_artifacts = artifacts[:-1] + [last]
-    new_data = dict(data)
-    new_data['artifacts'] = new_artifacts
-    return dict(result, data=new_data)
+    return dict(result, artifacts=new_artifacts)
 
 
 def _apply_line_range(
@@ -597,7 +750,7 @@ def _apply_line_range(
     sl = max(1, start_line) if start_line is not None else 1
     el = min(total, end_line) if end_line is not None else total
     slice_content = ''.join(lines[sl - 1:el])
-    return tool_success('get_artifact', {
+    return {
         'status': 'ok',
         'key': key,
         'content': slice_content,
@@ -605,108 +758,57 @@ def _apply_line_range(
         'end_line': el,
         'total_lines': total,
         '_from_draft': ctx.read_draft(key) is not None,
-    })
+    }
 
 
-def _get_plugin_artifact_by_sort_order(
-    ctx: Any, key: str, session_id: str, sort_order: int
+def _workflow_client() -> Any:
+    import httpx
+    import lazyllm
+    from lazymind.config import config
+    from lazymind.workflow_sdk import WorkflowClient
+    cfg = lazyllm.globals.get('agentic_config') or {}
+    return WorkflowClient(
+        str(config['core_api_url']).rstrip('/'), str(cfg.get('user_id') or ''),
+        host='lazymind', transport=httpx,
+        trace_context=lazyllm.get_trace_context,
+    )
+
+
+def _public_workflow_artifacts(session_id: str, key: str = '') -> List[Dict[str, Any]]:
+    response = _workflow_client().list_artifacts(session_id).result
+    artifacts = response.get('artifacts') if isinstance(response, dict) else []
+    values = [dict(item) for item in artifacts if isinstance(item, dict)]
+    if key:
+        values = [item for item in values if item.get('slot') == key]
+    return values
+
+
+def _get_public_workflow_artifacts(
+    key: str, session_id: str, sort_order: Optional[int],
 ) -> Dict[str, Any]:
-    """Fetch a single plugin slot artifact by sort_order via DB resolve."""
-    row = ctx.db.load_slot_artifact_by_sort_order(session_id, key, sort_order)
-    if row is None:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': (
-                f"No artifact found for key '{key}' at sort_order={sort_order} "
-                f'in plugin session {session_id}.'
-            ),
-        })
-
-    value, content_type = ctx.db.resolve_slot_revision_value(row)
-    if value is None:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': f"Artifact key '{key}' at sort_order={sort_order} resolved to null value.",
-        })
-    return tool_success('get_artifact', {
-        'status': 'ok',
-        'key': key,
-        'sort_order': sort_order,
-        'content_type': content_type,
-        'artifacts': [{'slot': key, 'content_type': content_type, 'value': value, 'sort_order': sort_order}],
-    })
-
-
-def _get_bound_plugin_artifacts(
-    ctx: Any,
-    key: str,
-    rows: list[Dict[str, Any]],
-    sort_order: Optional[int],
-) -> Dict[str, Any]:
-    """Resolve artifacts from the immutable input bindings of this attempt."""
-    selected_rows = rows
+    """Read Workflow Artifacts only through the public SDK."""
+    artifacts = _public_workflow_artifacts(session_id, key)
     if sort_order is not None:
-        if sort_order < 1 or sort_order > len(rows):
-            return tool_success('get_artifact', {
-                'status': 'empty',
-                'message': f"No bound artifact found for key '{key}' at sort_order={sort_order}.",
-            })
-        selected_rows = [rows[sort_order - 1]]
-
-    artifacts = []
-    for position, row in enumerate(selected_rows, start=1):
-        value, content_type = ctx.db.resolve_slot_revision_value(row)
-        if value is None:
-            continue
-        artifact_sort_order = sort_order if sort_order is not None else position
-        artifacts.append({
-            'slot': key,
-            'content_type': content_type,
-            'value': value,
-            'sort_order': artifact_sort_order,
-            'revision': row.get('revision'),
-            '_from_attempt_binding': True,
-        })
+        artifacts = artifacts[sort_order - 1:sort_order] if sort_order > 0 else []
     if not artifacts:
-        return tool_success('get_artifact', {
+        return {
             'status': 'empty',
-            'message': f"Bound artifact key '{key}' could not be resolved.",
-        })
-    return tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': artifacts})
-
-
-def _get_plugin_artifact_all(ctx: Any, key: str, session_id: str) -> Dict[str, Any]:
-    """Return all selected revisions for a plugin slot key (sort_order=None)."""
-    resolved_rows = ctx.db.load_selected_slot_artifacts_resolved_with_order(session_id)
-    artifacts = [
-        {
-            'slot': r['slot'],
-            'content_type': r.get('content_type'),
-            'value': r['value'],
-            'sort_order': r.get('sort_order'),
+            'message': f"No artifact found for key '{key}' in workflow session {session_id}.",
         }
-        for r in resolved_rows
-        if r.get('slot') == key
-    ]
-    if not artifacts:
-        return tool_success('get_artifact', {
-            'status': 'empty',
-            'message': f"No artifact found for key '{key}' in plugin session {session_id}.",
-        })
-    return tool_success('get_artifact', {'status': 'ok', 'key': key, 'artifacts': artifacts})
+    return {'status': 'ok', 'key': key, 'artifacts': artifacts}
 
 
 def patch_artifact(
     key: str,
-    patch: Any,
+    patch: str,
     patch_type: str = 'str_replace',
     sort_order: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Apply a local patch to a previously saved artifact without committing a new revision.
 
-    Edits are written to a draft file in the workspace. Call save_artifacts when you are
-    done patching to commit the changes and produce a new revision. If you do not call
-    save_artifacts, the framework will auto-flush all pending drafts when the step ends.
+    Edits are written to a draft file in the workspace and automatically committed as a new
+    revision when normal execution reaches the step boundary. Keep calling patch_artifact for
+    additional targeted edits, or call discard_draft first to abandon all pending edits.
 
     Use patch_artifact for targeted edits (fix a paragraph, update a field). Use
     save_artifacts directly when rewriting the whole artifact from scratch.
@@ -716,9 +818,9 @@ def patch_artifact(
 
     Args:
         key (str): The artifact key to patch.
-        patch (Any): The patch payload — format depends on patch_type:
+        patch (str): A JSON-encoded patch payload whose decoded shape depends on patch_type:
             - str_replace: {"old_str": "exact original text", "new_str": "replacement"}
-            - json_merge:  {"field": "new_value", "obsolete": None}  (RFC 7396; None = delete)
+            - json_merge:  {"field": "new_value", "obsolete": null}  (RFC 7396; null = delete)
             - json_patch:  [{"op": "replace", "path": "/items/0/status", "value": "done"}] (RFC 6902)
         patch_type (str): One of str_replace (default), json_merge, json_patch.
         sort_order (int): 1-based display position for list-cardinality slots.
@@ -729,57 +831,72 @@ def patch_artifact(
     """
     ctx = require_context()
 
+    decoded_patch, decode_error = _decode_patch_payload(patch)
+    if decode_error:
+        raise ToolExecutionError(f'Invalid patch payload: {decode_error}')
+
     # Resolve list_index from sort_order when provided.
     list_index: Optional[int] = None
     if sort_order is not None:
         list_index, resolve_err = _resolve_list_index_from_sort_order(key, sort_order)
         if resolve_err:
-            return tool_success('patch_artifact', {'status': 'error', 'message': resolve_err})
+            raise ToolExecutionError(f'Invalid sort_order: {resolve_err}')
 
     # Load draft or initialize from latest committed content.
     draft_result = ctx.read_draft(key, list_index)
     if draft_result is None:
         # Auto-initialize draft from latest committed artifact.
-        # Plugin sessions: this path also checks plugin_human_artifacts (human edits).
+        # Workflow sessions: this path also checks workflow_human_artifacts (human edits).
         text, original_type = _resolve_artifact_text(ctx, key, sort_order)
         if text is None:
-            return tool_success('patch_artifact', {
-                'status': 'error',
-                'message': (
+            raise ToolExecutionError(
+                (
                     f"No committed content found for artifact '{key}'. "
                     'Call save_artifacts first to create the artifact before patching.'
-                ),
-            })
+                )
+            )
         ctx.write_draft(key, original_type, text, list_index, pending_commit=False)
         draft_result = (text, original_type)
 
     content, original_type = draft_result
 
     if patch_type == 'str_replace':
-        new_content, err = _apply_str_replace(content, patch)
+        new_content, err = _apply_str_replace(content, decoded_patch)
     elif patch_type == 'json_merge':
-        new_content, err = _apply_json_merge(content, patch)
+        new_content, err = _apply_json_merge(content, decoded_patch)
     elif patch_type == 'json_patch':
-        new_content, err = _apply_json_patch(content, patch)
+        new_content, err = _apply_json_patch(content, decoded_patch)
     else:
-        return tool_success('patch_artifact', {
-            'status': 'error',
-            'message': f"Unknown patch_type '{patch_type}'. Use str_replace, json_merge, or json_patch.",
-        })
+        raise ToolExecutionError(
+            f"Unknown patch_type '{patch_type}'. Use str_replace, json_merge, or json_patch."
+        )
 
     if err:
-        return tool_success('patch_artifact', {'status': 'error', 'message': err})
+        raise ToolExecutionError(f'Patch was rejected: {err}')
 
     ctx.write_draft(key, original_type, new_content, list_index)
     lines_changed = abs(new_content.count('\n') - content.count('\n'))
-    return tool_success('patch_artifact', {
+    return {
         'status': 'ok',
         'message': (
             f"Draft for '{key}' updated ({lines_changed} line(s) changed). "
-            'Call save_artifacts to commit, or keep patching. '
-            'The framework will auto-commit on step end if you forget.'
+            'Keep patching, or call discard_draft to abandon the edits. '
+            'The framework will commit them at the normal step boundary.'
         ),
-    })
+    }
+
+
+def _decode_patch_payload(patch: Any) -> tuple[Any, Optional[str]]:
+    """Normalize the model-facing JSON string while tolerating native internal callers."""
+    if not isinstance(patch, str):
+        return patch, None
+    try:
+        return json.loads(patch), None
+    except json.JSONDecodeError as exc:
+        return None, (
+            'patch must be valid JSON text encoding the object/list documented for patch_type: '
+            f'{exc.msg} at character {exc.pos}.'
+        )
 
 
 def _normalize_text(text: str) -> str:
@@ -964,7 +1081,7 @@ def discard_draft(key: str, sort_order: Optional[int] = None) -> Dict[str, Any]:
     if sort_order is not None:
         list_index, resolve_err = _resolve_list_index_from_sort_order(key, sort_order)
         if resolve_err:
-            return tool_success('discard_draft', {'status': 'error', 'message': resolve_err})
+            raise ToolExecutionError(f'Invalid sort_order: {resolve_err}')
     existed = ctx.read_draft(key, list_index) is not None
     ctx.delete_draft(key, list_index)
     msg = (
@@ -972,11 +1089,14 @@ def discard_draft(key: str, sort_order: Optional[int] = None) -> Dict[str, Any]:
         if existed else
         f"No draft found for '{key}' — nothing to discard."
     )
-    return tool_success('discard_draft', {'status': 'ok', 'message': msg})
+    return {'status': 'ok', 'message': msg}
 
 
 def list_artifacts(task_ref: Optional[str] = None) -> Dict[str, Any]:
-    """List the artifact keys produced so far in the current task.
+    """List Workflow output artifacts produced so far in the current task.
+
+    This does not list user-uploaded attachments. Use find_user_attachment only when
+    the User Attachments context provides an exact filename.
 
     Args:
         task_ref (str): Optional task reference; when omitted lists artifacts of the current task.
@@ -991,7 +1111,7 @@ def list_artifacts(task_ref: Optional[str] = None) -> Dict[str, Any]:
         summary[r['slot']] = r['content_type']
     parts = [f'{k} ({v})' for k, v in summary.items()]
     msg = '可用成果：' + ('、'.join(parts) if parts else '（暂无）')
-    return tool_success('list_artifacts', {'status': 'ok', 'keys': summary, 'message': msg})
+    return {'status': 'ok', 'keys': summary, 'message': msg}
 
 
 def list_knowledge_bases() -> Dict[str, Any]:
@@ -1004,163 +1124,64 @@ def list_knowledge_bases() -> Dict[str, Any]:
     Returns:
         A list of knowledge base summaries, each with id, name, type, and tags.
     """
+    import httpx
+    import lazyllm
+    from lazymind.config import config as _cfg
+    # Pick up user_id from agentic_config (injected by Go via X-User-Id).
+    cfg: Dict[str, Any] = {}
     try:
-        import httpx
-        import lazyllm
-        from lazymind.config import config as _cfg
-        # Pick up user_id from agentic_config (injected by Go via X-User-Id).
-        cfg: Dict[str, Any] = {}
-        try:
-            cfg = lazyllm.globals.get('agentic_config') or {}
-        except Exception:
-            pass
-        user_id: str = cfg.get('user_id', '')
-        core_url = str(_cfg['core_api_url']).rstrip('/')
-        headers = {}
-        if user_id:
-            headers['X-User-Id'] = user_id
-        resp = httpx.get(f'{core_url}/kb/list', headers=headers, timeout=5.0)
-        if resp.status_code != 200:
-            return tool_success('list_knowledge_bases', {
-                'status': 'error',
-                'message': f'Failed to list knowledge bases: HTTP {resp.status_code}',
-                'items': [],
-            })
-        # Go /kb/list returns {"code":0,"data":{"total":N,"list":[{id,name,visibility,...}]}}
-        data = resp.json().get('data') or {}
-        raw_items = data.get('list') or []
-        simplified = [
-            {
-                'id': kb.get('id', ''),
-                'name': kb.get('name', ''),
-                'visibility': kb.get('visibility', ''),
-                'permissions': kb.get('permissions', []),
-            }
-            for kb in raw_items
-        ]
-        return tool_success('list_knowledge_bases', {
-            'status': 'ok',
-            'message': f'Found {len(simplified)} knowledge base(s).',
-            'items': simplified,
-        })
-    except Exception as e:
-        return tool_success('list_knowledge_bases', {
-            'status': 'error',
-            'message': f'list_knowledge_bases failed: {e}',
-            'items': [],
-        })
+        cfg = lazyllm.globals.get('agentic_config') or {}
+    except Exception:
+        pass
+    user_id: str = cfg.get('user_id', '')
+    core_url = str(_cfg['core_api_url']).rstrip('/')
+    headers = {}
+    if user_id:
+        headers['X-User-Id'] = user_id
+    resp = httpx.get(f'{core_url}/kb/list', headers=headers, timeout=5.0)
+    if resp.status_code != 200:
+        raise ToolExecutionError(
+            f'Failed to list knowledge bases: HTTP {resp.status_code}.'
+        )
+    # Go /kb/list returns {"code":0,"data":{"total":N,"list":[{id,name,visibility,...}]}}
+    data = resp.json().get('data') or {}
+    raw_items = data.get('list') or []
+    simplified = [
+        {
+            'id': kb.get('id', ''),
+            'name': kb.get('name', ''),
+            'visibility': kb.get('visibility', ''),
+            'permissions': kb.get('permissions', []),
+        }
+        for kb in raw_items
+    ]
+    return {
+        'status': 'ok',
+        'message': f'Found {len(simplified)} knowledge base(s).',
+        'items': simplified,
+    }
 
 
 def _resolve_attachment(
     filename: str,
     turn: Optional[int] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Shared file-resolution logic for read_user_attachment and find_user_attachment.
-
-    Returns (abs_path, error_message). On success, error_message is None.
-    On failure, abs_path is None.
-
-    Matching rules:
-    - If turn is provided, only look in that turn's files.
-    - If turn is omitted, search from newest turn to oldest (current first).
-    - Within a turn, files are deduped: duplicates are addressed as
-      report-1.pdf, report-2.pdf, etc. The display_name must match the
-      deduplicated name shown in the context prompt.
-    """
-    try:
-        import lazyllm
-        cfg: Dict[str, Any] = {}
-        try:
-            cfg = lazyllm.globals.get('agentic_config') or {}
-        except Exception:
-            pass
-        files: List[str] = cfg.get('files') or []
-        history_files_per_turn: Dict[str, List[str]] = cfg.get('history_files_per_turn') or {}
-    except Exception:
-        return None, 'Could not read agentic_config.'
-
-    if not files and not history_files_per_turn:
-        return None, 'No attached files found in this conversation.'
-
-    def _display_name(path: str) -> str:
-        raw = str(path or '')
-        if raw.lower().startswith(('http://', 'https://')):
-            parsed = urlparse(raw)
-            base = os.path.basename(parsed.path)
-            return base or raw
-        return os.path.basename(raw)
-
-    def _dedupe_turn(paths: List[str]) -> List[tuple[str, str]]:
-        """Return (display_name, abs_path) pairs with intra-turn dedup (no size)."""
-        seen: Dict[str, int] = {}
-        result: List[tuple[str, str]] = []
-        for path in paths:
-            base = _display_name(path)
-            name_no_ext, ext = os.path.splitext(base)
-            if base not in seen:
-                seen[base] = 0
-                display = base
-            else:
-                seen[base] += 1
-                display = f'{name_no_ext}-{seen[base]}{ext}'
-            result.append((display, path))
-        return result
-
-    target = filename.strip()
-
-    def _match_in_turn(paths: List[str]) -> Optional[str]:
-        pairs = _dedupe_turn(paths)
-        for display_name, abs_path in pairs:
-            if display_name == target or abs_path.endswith(target) or target in abs_path:
-                return abs_path
-        return None
-
-    if turn is not None:
-        turn_key = str(turn)
-        turn_paths = history_files_per_turn.get(turn_key) or []
-        # Fallback: filter files list by turn position is unreliable; use per-turn map only.
-        if not turn_paths:
-            return None, f'No files found for turn {turn}.'
-        matched = _match_in_turn(turn_paths)
-        if matched:
-            return matched, None
-        available = [os.path.basename(p) for p in turn_paths]
-        return None, (
-            f"File '{target}' not found in turn {turn}. "
-            f"Available: {', '.join(available)}"
-        )
-
-    # Search without turn: newest turn first (descending seq).
-    all_seqs = sorted(
-        (int(k) for k in history_files_per_turn if k.isdigit()),
-        reverse=True,
-    )
-    for seq in all_seqs:
-        paths = history_files_per_turn.get(str(seq)) or []
-        matched = _match_in_turn(paths)
-        if matched:
-            return matched, None
-
-    # Final fallback: scan the merged files list for partial match
-    for path in files:
-        if os.path.basename(path) == target or path.endswith(target) or target in path:
-            return path, None
-
-    all_names = [os.path.basename(p) for p in files]
-    return None, (
-        f"File '{target}' not found in attached files. "
-        f"Available: {', '.join(all_names)}"
+    """Compatibility wrapper around the shared attachment resolver."""
+    from lazymind.chat.engine.tools.local_file.resolver import resolve_attachment_path
+    return resolve_attachment_path(
+        filename,
+        turn,
+        allow_partial=True,
+        prefer_newest=True,
     )
 
 
 def read_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str, Any]:
-    """Extract text from a user-uploaded attachment (on demand only).
+    """Compatibility reader for one user-uploaded attachment.
 
-    Documents (pdf/doc/docx/pptx): OCR reader. Plain-text files: direct UTF-8 read.
-    Images: vision-model text description.
-    Do NOT call this just because a file is attached. For images used in visual tasks
-    (edit, plugin, image_generator), use find_user_attachment for path/url instead.
-    Call this when the user needs document text or a textual summary of image content.
+    Prefer grep(target, pattern) and read_file(target, offset, limit) for PDF,
+    text, and Office content. This transition tool delegates those formats to
+    the same resolver. Images still return a vision-model text description.
 
     Args:
         filename (str): The filename (basename) or display name of the attachment to read.
@@ -1171,68 +1192,75 @@ def read_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
             Omit to search from the current turn first, then historical turns newest-first.
 
     Returns:
-        Parsed text content for supported documents and images.
+        Bounded attachment content and continuation metadata.
     """
     matched, err = _resolve_attachment(filename, turn)
     if err:
-        return tool_success('read_user_attachment', {'status': 'error', 'message': err})
+        raise ToolExecutionError(f'Attachment not found: {err}')
     is_remote = str(matched or '').lower().startswith(('http://', 'https://'))
     if not is_remote:
         matched = _materialize_local_path(matched)
     if not is_remote and not os.path.exists(matched):
-        return tool_success('read_user_attachment', {
-            'status': 'error',
-            'message': f"File '{os.path.basename(matched)}' was found in the index but is no longer on disk.",
-        })
+        raise ToolExecutionError(
+            f"Attachment '{os.path.basename(matched)}' was found in the index but is no longer on disk."
+        )
     if not is_chat_attachment_file(matched):
-        return tool_success('read_user_attachment', {
-            'status': 'error',
-            'message': (
+        raise ToolExecutionError(
+            (
                 f"Unsupported file type '{os.path.splitext(matched)[1].lower() or '(no extension)'}'. "
                 'Supported: images, Office/PDF documents, and common plain-text files.'
-            ),
-        })
-
+            )
+        )
     try:
-        import lazyllm
-        cfg: Dict[str, Any] = lazyllm.globals.get('agentic_config') or {}
-        priority = int(cfg.get('priority') or 0)
-        read_path = effective_attachment_path(matched) if is_chat_text_file(matched) else matched
-        content = parse_attachment_content(read_path, priority=priority)
+        if is_chat_image_file(matched):
+            import lazyllm
+            cfg: Dict[str, Any] = lazyllm.globals.get('agentic_config') or {}
+            content = parse_attachment_content(
+                matched,
+                priority=int(cfg.get('priority') or 0),
+            )
+            return {
+                'status': 'ok',
+                'filename': os.path.basename(matched),
+                'path': matched,
+                'kind': 'image',
+                'content': content,
+            }
+        from lazymind.chat.engine.tools.local_file.workspace import read_file
+        payload = read_file(matched, turn=turn)
     except Exception as e:
-        return tool_success('read_user_attachment', {
-            'status': 'error',
-            'message': f"Could not parse '{os.path.basename(matched)}': {e}",
-        })
+        raise ToolExecutionError(
+            f"Could not parse '{os.path.basename(matched)}': {e}"
+        ) from e
 
-    kind = 'image' if is_chat_image_file(matched) else (
-        'text' if is_chat_text_file(matched) else 'document'
-    )
-
-    return tool_success('read_user_attachment', {
+    return {
         'status': 'ok',
         'filename': os.path.basename(matched),
         'path': matched,
-        'kind': kind,
-        'content': content,
-    })
+        'kind': 'text' if is_chat_text_file(matched) else 'document',
+        'content': payload.get('text', ''),
+        'offset': payload.get('offset'),
+        'end_line': payload.get('end_line'),
+        'total_lines': payload.get('total_lines'),
+        'eof': payload.get('eof'),
+        'next_offset': payload.get('next_offset'),
+        'footer': payload.get('footer'),
+    }
 
 
 def _publish_attachment_edit(draft: AttachmentEditDraft) -> Dict[str, Any]:
     """Publish through the owning Agent's artifact channel."""
     ctx = get_context()
     if ctx is None:
-        return draft.publish()['result']
+        return draft.publish()
     artifact_key = ctx.output_slots[0] if ctx.output_slots else 'edited_attachment'
-    published = _save_artifact(
+    _save_artifact(
         artifact_key,
         draft.draft_path,
         content_type='file',
         source_tool='string_replace',
         caption=f'Edited copy of {draft.filename}',
     )
-    if not published.get('success'):
-        raise RuntimeError(str(published.get('error') or 'Could not publish edited attachment'))
     return {
         'artifact_key': artifact_key,
         'filename': draft.filename,
@@ -1240,7 +1268,6 @@ def _publish_attachment_edit(draft: AttachmentEditDraft) -> Dict[str, Any]:
     }
 
 
-@handle_tool_errors
 def string_replace(
     filename: str,
     old_string: Optional[str] = None,
@@ -1275,26 +1302,34 @@ def string_replace(
     """
     matched, err = _resolve_attachment(filename, turn)
     if err:
-        raise ValueError(err)
+        raise ToolExecutionError(f'Attachment not found: {err}')
     if not os.path.isfile(matched):
-        raise FileNotFoundError(
-            f"File '{os.path.basename(matched)}' was found in the index but is no longer on disk."
+        raise ToolExecutionError(
+            f"Attachment '{os.path.basename(matched)}' was found in the index but is no longer on disk."
         )
     if not is_chat_text_file(matched):
-        raise ValueError('string_replace supports uploaded plain-text/code/config files only')
+        raise ToolExecutionError(
+            'string_replace supports uploaded plain-text/code/config files only'
+        )
     normalized_action = str(action or 'preview').strip().lower()
-    draft = AttachmentEditDraft.for_current_conversation(matched)
+    try:
+        draft = AttachmentEditDraft.for_current_conversation(matched)
+    except RuntimeError as exc:
+        raise ToolExecutionError(f'Conversation context is required: {exc}') from exc
     if normalized_action == 'preview':
         if old_string is None or new_string is None:
-            raise ValueError('old_string and new_string are required for preview')
-        preview = draft.create_preview(
-            old_string,
-            new_string,
-            expected_replacements,
-            mode,
-            regex_flags,
-        )
-        return tool_success('string_replace', {
+            raise ToolExecutionError('old_string and new_string are required for preview')
+        try:
+            preview = draft.create_preview(
+                old_string,
+                new_string,
+                expected_replacements,
+                mode,
+                regex_flags,
+            )
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        return {
             'status': 'preview',
             'action': 'preview',
             'source_filename': os.path.basename(matched),
@@ -1304,14 +1339,17 @@ def string_replace(
                 'Preview only; no file was changed. Verify every match and the diff, then call '
                 "string_replace with action='apply' and this preview_id."
             ),
-        })
+        }
     if normalized_action == 'apply':
         if not preview_id:
-            raise ValueError('preview_id is required for apply; run preview first')
+            raise ToolExecutionError('preview_id is required for apply; run preview first')
         had_previous_edit = os.path.isfile(draft.draft_path)
-        preview, content, revision = draft.apply_preview(preview_id)
+        try:
+            preview, content, revision = draft.apply_preview(preview_id)
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
         artifact = _publish_attachment_edit(draft)
-        return tool_success('string_replace', {
+        return {
             'status': 'ok',
             'action': 'apply',
             'source_filename': os.path.basename(matched),
@@ -1325,11 +1363,14 @@ def string_replace(
             'undo_available': True,
             'original_unchanged': True,
             'continues_previous_edit': had_previous_edit,
-        })
+        }
     if normalized_action == 'undo':
-        content, diff, revision = draft.undo()
+        try:
+            content, diff, revision = draft.undo()
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
         artifact = _publish_attachment_edit(draft)
-        return tool_success('string_replace', {
+        return {
             'status': 'ok',
             'action': 'undo',
             'source_filename': os.path.basename(matched),
@@ -1340,15 +1381,15 @@ def string_replace(
             'undo_available': revision > 0,
             'original_unchanged': True,
             'message': 'Reverted the most recent applied edit and updated the download artifact.',
-        })
-    raise ValueError("action must be 'preview', 'apply', or 'undo'")
+        }
+    raise ToolExecutionError("action must be 'preview', 'apply', or 'undo'")
 
 
 def find_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str, Any]:
     """Return path/url of a user-uploaded attachment without parsing it.
 
     Prefer this over read_user_attachment when you only need the file location: image
-    editing, plugins, vision_extractor, or passing an image path to other tools.
+    editing, workflows, vision_extractor, or passing an image path to other tools.
     Does not run OCR or vision description (fast).
 
     Args:
@@ -1364,15 +1405,14 @@ def find_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
     """
     matched, err = _resolve_attachment(filename, turn)
     if err:
-        return tool_success('find_user_attachment', {'status': 'error', 'message': err})
+        raise ToolExecutionError(f'Attachment not found: {err}')
     is_remote = str(matched or '').lower().startswith(('http://', 'https://'))
     if not is_remote:
         matched = _materialize_local_path(matched)
     if not is_remote and not os.path.exists(matched):
-        return tool_success('find_user_attachment', {
-            'status': 'error',
-            'message': f"File '{os.path.basename(matched)}' was found in the index but is no longer on disk.",
-        })
+        raise ToolExecutionError(
+            f"Attachment '{os.path.basename(matched)}' was found in the index but is no longer on disk."
+        )
 
     signed_url = None if is_remote else _sign_static_file_url(matched)
 
@@ -1388,14 +1428,25 @@ def find_user_attachment(filename: str, turn: Optional[int] = None) -> Dict[str,
         result['url'] = matched
         if not is_remote:
             result['message'] = 'Signed URL unavailable; use the local path instead.'
-    return tool_success('find_user_attachment', result)
+    if str(matched).split('?', 1)[0].lower().endswith('.pdf'):
+        try:
+            from lazymind.chat.engine.tools.local_file.store import FileResourceStore, workspace_for_request
+            store = FileResourceStore(workspace_for_request())
+            manifest = store.find_by_source_path(matched) or store.find_by_display_name(
+                result['filename']
+            )
+            if manifest:
+                result['file_id'] = manifest.get('file_id')
+        except Exception:
+            pass
+    return result
 
 
 def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]:
-    """Return the accessible URL or local path of a plugin artifact.
+    """Return the accessible URL or local path of a workflow artifact.
 
-    Analogous to find_user_attachment but for plugin step outputs.
-    Reads session_id and plugin_id from agentic_config (same as save_artifacts / get_artifact).
+    Analogous to find_user_attachment but for workflow step outputs.
+    Reads session_id and workflow_id from agentic_config (same as save_artifacts / get_artifact).
 
     Args:
         slot (str): The slot id to look up (e.g. 'image_output').
@@ -1412,37 +1463,25 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
     except Exception:
         cfg = {}
 
-    session_id: str = cfg.get('plugin_session_id', '')
+    session_id: str = cfg.get('workflow_session_id', '')
     if not session_id:
-        return tool_success('find_artifact', {
-            'status': 'error',
-            'message': 'No active plugin session found in agentic_config.',
-        })
+        raise ToolExecutionError(
+            'No active workflow session was found in agentic_config; workflow_session is required.'
+        )
 
     ctx = get_context()
     if ctx is None:
-        return tool_success('find_artifact', {
-            'status': 'error',
-            'message': 'find_artifact requires an active SubAgent context.',
-        })
-    if sort_order is not None:
-        result_dict = _get_plugin_artifact_by_sort_order(
-            ctx, slot, session_id, sort_order,
+        raise ToolExecutionError(
+            'find_artifact requires an active SubAgent context.'
         )
-    else:
-        result_dict = _get_plugin_artifact_all(ctx, slot, session_id)
+    result_dict = get_artifact(slot, sort_order=sort_order)
 
-    # Unwrap inner result to extract the path.
-    inner = result_dict.get('result', result_dict)
-    if inner.get('status') != 'ok':
+    if result_dict.get('status') != 'ok':
         return result_dict
 
-    artifacts = inner.get('artifacts') or []
+    artifacts = result_dict.get('artifacts') or []
     if not artifacts:
-        return tool_success('find_artifact', {
-            'status': 'error',
-            'message': f"No artifact found for slot '{slot}'.",
-        })
+        raise ToolExecutionError(f"No artifact found for slot '{slot}'.")
 
     # Use the first (or only) artifact to resolve the path.
     artifact = artifacts[0]
@@ -1458,12 +1497,9 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
     if isinstance(value.get('url'), str) and value.get('url'):
         signed_url = value['url']
 
-    path: Optional[str] = value.get('path') or value.get('url') or value.get('text')
+    path: Optional[str] = value.get('path') or value.get('url')
     if not path or not isinstance(path, str):
-        return tool_success('find_artifact', {
-            'status': 'error',
-            'message': f"Artifact '{slot}' has no resolvable path.",
-        })
+        raise ToolExecutionError(f"Artifact '{slot}' has no resolvable path.")
 
     if not path.lower().startswith(('http://', 'https://', '/static-files/')):
         path = _materialize_local_path(path)
@@ -1484,4 +1520,4 @@ def find_artifact(slot: str, sort_order: Optional[int] = None) -> Dict[str, Any]
     else:
         out['url'] = path
         out['message'] = 'Signed URL unavailable; use the local path instead.'
-    return tool_success('find_artifact', out)
+    return out

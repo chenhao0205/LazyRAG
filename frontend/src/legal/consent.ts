@@ -4,7 +4,7 @@ import {
 } from '@/modules/user/uiPreferencesApi';
 
 /** Bump when the legal text changes so users must re-accept. */
-export const USER_AGREEMENT_VERSION = 'V0.2';
+export const USER_AGREEMENT_VERSION = 'V0.3';
 const USER_AGREEMENT_READ_SESSION_KEY = 'lazymind:user-agreement-read';
 
 export function isAcceptedUserAgreementVersion(version?: string | null): boolean {
@@ -12,14 +12,8 @@ export function isAcceptedUserAgreementVersion(version?: string | null): boolean
 }
 
 export async function syncUserAgreementFromServer(): Promise<boolean> {
-  try {
-    const prefs = await fetchUserUiPreferences();
-    return isAcceptedUserAgreementVersion(prefs.accepted_user_agreement_version);
-  } catch (error) {
-    console.error('Failed to sync user agreement from server:', error);
-    // Fail closed: keep showing the consent modal until the server confirms.
-    return false;
-  }
+  const prefs = await fetchUserUiPreferences();
+  return isAcceptedUserAgreementVersion(prefs.accepted_user_agreement_version);
 }
 
 export async function persistUserAgreementAccepted(): Promise<void> {

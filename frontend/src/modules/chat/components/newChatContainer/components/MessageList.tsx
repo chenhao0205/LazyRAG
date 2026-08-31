@@ -17,12 +17,17 @@ import "../index.scss";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 import type { ChatMention } from "../../ChatInput/MentionEditor";
-import { CHAT_SELECT_CONVERSATION_EVENT } from "@/modules/chat/constants/chat";
+import {
+  CHAT_SELECT_CONVERSATION_EVENT,
+  getChatConversationPath,
+} from "@/modules/chat/constants/chat";
+import { IdentityAvatar } from "@/modules/identityAvatar";
+import type { ChatSource } from "@/modules/chat/utils/sourceAdapter";
 
 const MENTION_ICONS = {
   knowledge_base: <DatabaseOutlined />,
   skill: <ThunderboltOutlined />,
-  plugin: <AppstoreOutlined />,
+  workflow: <AppstoreOutlined />,
   tool: <ThunderboltOutlined />,
   conversation: <CommentOutlined />,
 };
@@ -34,14 +39,14 @@ function mentionHref(mention: ChatMention) {
       return `/lib/knowledge/detail/${id}`;
     case "skill":
       return `/memory-management/skills/${id}`;
-    case "plugin":
+    case "workflow":
       return mention.resource_id.startsWith("builtin:")
-        ? `/memory-management/plugins/builtin/${encodeURIComponent(mention.resource_id.slice(8))}`
-        : `/memory-management/plugins/${id}`;
+        ? `/memory-management/workflows/builtin/${encodeURIComponent(mention.resource_id.slice(8))}`
+        : `/memory-management/workflows/${id}`;
     case "tool":
-      return "/model-providers/tools";
+      return "/settings?section=system_tools";
     case "conversation":
-      return `/agent/chat?conversation_id=${id}`;
+      return getChatConversationPath(mention.resource_id);
     default:
       return undefined;
   }
@@ -97,6 +102,7 @@ interface MessageListProps {
   initialCard?: React.ReactNode;
   sendMessage: (text: string, clearInput?: boolean, extras?: Record<string, unknown>) => void;
   regenerate: () => void;
+  regenerateDisabled?: boolean;
   stopGeneration: () => void;
   renderText: (item: any) => React.ReactNode;
   updateAssistantMessage: (data: any, id?: string, index?: number) => void;
@@ -113,7 +119,8 @@ interface MessageListProps {
   onCancelEditUserMessage?: () => void;
   onResendEditedUserMessage?: (index: number, value: string) => void;
   onCopyUserMessage?: (item: any) => void;
-  onCiteMessage?: (text: string) => void;
+  onCiteMessage?: (text: string, historyId?: string) => void;
+  onOpenSources?: (sources: ChatSource[]) => void;
   footer?: React.ReactNode;
 }
 
@@ -245,6 +252,7 @@ const MessageList: React.FC<MessageListProps> = ({
   initialCard,
   sendMessage,
   regenerate,
+  regenerateDisabled = false,
   stopGeneration,
   renderText,
   updateAssistantMessage,
@@ -262,6 +270,7 @@ const MessageList: React.FC<MessageListProps> = ({
   onResendEditedUserMessage,
   onCopyUserMessage,
   onCiteMessage,
+  onOpenSources,
   footer,
 }) => {
   const { t } = useTranslation();
@@ -322,7 +331,7 @@ const MessageList: React.FC<MessageListProps> = ({
 					<div className="chat-collected-input-title">
 					  {source.conversation_id ? (
 						<a
-						  href={`/agent/chat/home?conversation_id=${encodeURIComponent(source.conversation_id)}`}
+						  href={getChatConversationPath(source.conversation_id)}
 						  onClick={(event) => {
 							event.preventDefault();
 							window.dispatchEvent(new CustomEvent(CHAT_SELECT_CONVERSATION_EVENT, {
@@ -351,9 +360,10 @@ const MessageList: React.FC<MessageListProps> = ({
           {!isEditing && citeMessageList.length > 0 ? (
             <UserCitationPreview citeMessages={citeMessageList} />
           ) : null}
-          <div className="chat-user">
-            {isEditing ? (
-              <div className="chat-user-edit-wrap">
+          <div className="chat-user-bubble-row">
+            <div className="chat-user">
+              {isEditing ? (
+                <div className="chat-user-edit-wrap">
                 {citeMessageList.length > 0 ? (
                   <div className="chat-user-edit-citation-list">
                     {citeMessageList.map((citeMessage, citeIndex) => (
@@ -415,14 +425,23 @@ const MessageList: React.FC<MessageListProps> = ({
                     {t("chat.send")}
                   </Button>
                 </Space>
-              </div>
-            ) : (
-              Array.isArray(item.mentions) && item.mentions.length > 0 ? (
-                <div className="chat-user-mention-text">
-                  <UserMessageWithMentions text={item.display_delta || item.delta || ""} mentions={item.mentions} />
                 </div>
-              ) : renderText(item)
-            )}
+              ) : Array.isArray(item.mentions) && item.mentions.length > 0 ? (
+                <div className="chat-user-mention-text">
+                  <UserMessageWithMentions
+                    mentions={item.mentions}
+                    text={item.display_delta || item.delta || ""}
+                  />
+                </div>
+              ) : (
+                renderText(item)
+              )}
+            </div>
+            <IdentityAvatar
+              className="chat-user-avatar"
+              kind="profile"
+              size={32}
+            />
           </div>
           {!isEditing ? (
             <div className="chat-user-toolbar">
@@ -460,8 +479,13 @@ const MessageList: React.FC<MessageListProps> = ({
     >
       {messageList.length > 0 &&
         messageList.map((item, index) => {
+          const historyId = item.history_id || item.id;
           return (
-            <div className="chat-item" key={`chat-${index}`}>
+            <div
+              className="chat-item"
+              key={`chat-${index}`}
+              data-chat-history-id={historyId || undefined}
+            >
               {item.role === RoleTypes.USER && renderUser(item, index)}
               {item.role === RoleTypes.ASSISTANT && (
                 <AssistantMessage
@@ -470,6 +494,7 @@ const MessageList: React.FC<MessageListProps> = ({
                   length={messageList.length}
                   sendMessage={sendMessage}
                   regenerate={regenerate}
+                  regenerateDisabled={regenerateDisabled}
                   stopGeneration={stopGeneration}
                   renderText={renderText}
                   updateMessage={(msg: any) =>
@@ -477,7 +502,17 @@ const MessageList: React.FC<MessageListProps> = ({
                   }
                   sessionId={sessionId}
                   onPreferenceSelect={onPreferenceSelect}
-                  onCiteMessage={onCiteMessage}
+                  onCiteMessage={(text: string) =>
+                    onCiteMessage?.(text, item.history_id || item.id)
+                  }
+                  onOpenSources={onOpenSources}
+                  hasLaterUserMessage={messageList
+                    .slice(index + 1)
+                    .some(
+                      (nextItem) =>
+                        nextItem?.role === RoleTypes.USER &&
+                        !!String(nextItem?.display_delta || nextItem?.delta || "").trim(),
+                    )}
                   isLatestDualAnswer={
                     index === messageList.length - 1 &&
                     !!(

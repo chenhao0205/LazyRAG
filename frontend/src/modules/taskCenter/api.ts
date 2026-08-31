@@ -4,7 +4,10 @@ const CORE = `${BASE_URL}/api/core`;
 
 export interface StepInfo {
   step_id: string;
+  title?: string;
   status: string;
+  current_phase?: string;
+  summary?: string;
   artifact?: string;
 }
 
@@ -12,8 +15,9 @@ export interface Task {
   id: string;
   user_id: string;
   conversation_id: string;
+  conversation_state: 'active' | 'archived' | 'trash' | 'missing';
   conversation_title?: string;
-  plugin_session_id?: string;
+  workflow_session_id?: string;
   task_type: string;
   title?: string;
   status: string;
@@ -93,7 +97,7 @@ export interface CreateScheduleRequest {
   cron_expr: string;
   prompt_template: string;
   timezone: string;
-  name?: string;
+  name: string;
   remark?: string;
   kb_ids?: string[];
   file_ids?: string[];
@@ -156,6 +160,10 @@ export async function runScheduleNow(id: string): Promise<{ task_id: string; con
 export async function updateSchedule(id: string, req: Partial<CreateScheduleRequest>): Promise<Schedule> {
   const resp = await axiosInstance.put<Schedule>(`${CORE}/schedules/${id}`, req);
   return resp.data;
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+  await axiosInstance.delete(`${CORE}/schedules/${id}`);
 }
 
 export async function listScheduleTasks(

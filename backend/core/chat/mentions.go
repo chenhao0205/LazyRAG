@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,7 +12,8 @@ import (
 	"lazymind/core/acl"
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
-	"lazymind/core/plugin"
+	"lazymind/core/settings"
+	"lazymind/core/workflow"
 )
 
 type chatMention struct {
@@ -24,14 +26,14 @@ type chatMention struct {
 }
 
 type resolvedChatMentions struct {
-	PluginRefs          []string
-	SkillNames          []string
-	KnowledgeBaseIDs    []string
-	ToolNames           []string
-	ExcludedToolNames   []string
-	ExcludedPluginRefs  []string
-	ConversationContext string
-	ResourceMentions    []map[string]string
+	WorkflowRefs         []string
+	SkillNames           []string
+	KnowledgeBaseIDs     []string
+	ToolNames            []string
+	ExcludedToolNames    []string
+	ExcludedWorkflowRefs []string
+	ConversationContext  string
+	ResourceMentions     []map[string]string
 }
 
 var mentionDenyWords = []string{
@@ -124,10 +126,14 @@ func applyChatMentions(ctx context.Context, db *gorm.DB, raw map[string]any, use
 	if err != nil || len(mentions) == 0 {
 		return query, resolvedChatMentions{}, err
 	}
+	controls, err := settings.LoadFeatureControls(ctx, db, userID)
+	if err != nil {
+		return query, resolvedChatMentions{}, err
+	}
 	resolved := resolvedChatMentions{}
 	var datasetIDs, skillIDs, conversationIDs []string
 	for _, mention := range mentions {
-		denied := (mention.Type == "tool" || mention.Type == "plugin") && mentionIsDenied(query, mention)
+		denied := (mention.Type == "tool" || mention.Type == "workflow") && mentionIsDenied(query, mention)
 		switch mention.Type {
 		case "knowledge_base":
 			if !acl.Can(userID, acl.ResourceTypeDB, mention.ResourceID, acl.PermRead) {
@@ -144,6 +150,9 @@ func applyChatMentions(ctx context.Context, db *gorm.DB, raw map[string]any, use
 				"display_name": mention.DisplayName,
 			})
 		case "skill":
+			if !controls.SkillsEnabled {
+				return query, resolved, errors.New("skills and plugins are paused in settings")
+			}
 			var skill orm.SkillV2Skill
 			if err := db.WithContext(ctx).Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", mention.ResourceID, userID).Take(&skill).Error; err != nil || skill.HeadRevisionID == nil {
 				return query, resolved, fmt.Errorf("skill mention is not accessible or unpublished: %s", mention.ResourceID)
@@ -171,31 +180,38 @@ func applyChatMentions(ctx context.Context, db *gorm.DB, raw map[string]any, use
 			} else {
 				resolved.ToolNames = append(resolved.ToolNames, mention.ResourceID)
 			}
-		case "plugin":
+		case "workflow":
+			if !controls.WorkflowsEnabled && !denied {
+				return query, resolved, errors.New("workflows are paused in settings")
+			}
 			if strings.HasPrefix(mention.ResourceID, "builtin:") {
+				var count int64
+				if err := db.WithContext(ctx).Model(&orm.WorkflowResource{}).Where("plugin_ref = ? AND source_type = 'builtin' AND owner_user_id = '' AND status = 'active'", mention.ResourceID).Count(&count).Error; err != nil || count == 0 { // workflow-naming: persistence
+					return query, resolved, fmt.Errorf("workflow mention is not accessible: %s", mention.ResourceID)
+				}
 				if denied {
-					resolved.ExcludedPluginRefs = append(resolved.ExcludedPluginRefs, mention.ResourceID)
+					resolved.ExcludedWorkflowRefs = append(resolved.ExcludedWorkflowRefs, mention.ResourceID)
 					continue
 				}
-				resolved.PluginRefs = append(resolved.PluginRefs, mention.ResourceID)
+				resolved.WorkflowRefs = append(resolved.WorkflowRefs, mention.ResourceID)
 				resolved.ResourceMentions = append(resolved.ResourceMentions, map[string]string{
-					"resource_type": "plugin", "resource_ref": mention.ResourceID,
+					"resource_type": "workflow", "resource_ref": mention.ResourceID,
 					"display_name": mention.DisplayName,
 				})
 				continue
 			}
 			var count int64
-			if err := db.WithContext(ctx).Model(&orm.PluginResource{}).
-				Where("plugin_ref = ? AND status = 'active' AND (owner_user_id = ? OR owner_user_id = '')", mention.ResourceID, userID).Count(&count).Error; err != nil || count == 0 {
-				return query, resolved, fmt.Errorf("plugin mention is not accessible: %s", mention.ResourceID)
+			if err := db.WithContext(ctx).Model(&orm.WorkflowResource{}).
+				Where("plugin_ref = ? AND status = 'active' AND (owner_user_id = ? OR owner_user_id = '')", mention.ResourceID, userID).Count(&count).Error; err != nil || count == 0 { // workflow-naming: persistence
+				return query, resolved, fmt.Errorf("workflow mention is not accessible: %s", mention.ResourceID)
 			}
 			if denied {
-				resolved.ExcludedPluginRefs = append(resolved.ExcludedPluginRefs, mention.ResourceID)
+				resolved.ExcludedWorkflowRefs = append(resolved.ExcludedWorkflowRefs, mention.ResourceID)
 				continue
 			}
-			resolved.PluginRefs = append(resolved.PluginRefs, mention.ResourceID)
+			resolved.WorkflowRefs = append(resolved.WorkflowRefs, mention.ResourceID)
 			resolved.ResourceMentions = append(resolved.ResourceMentions, map[string]string{
-				"resource_type": "plugin", "resource_ref": mention.ResourceID,
+				"resource_type": "workflow", "resource_ref": mention.ResourceID,
 				"display_name": mention.DisplayName,
 			})
 		case "conversation":
@@ -227,13 +243,13 @@ func applyChatMentions(ctx context.Context, db *gorm.DB, raw map[string]any, use
 }
 
 func applyExplicitResourceBindings(body map[string]any, mentions resolvedChatMentions) {
-	if len(mentions.SkillNames) == 0 && len(mentions.KnowledgeBaseIDs) == 0 && len(mentions.PluginRefs) == 0 {
+	if len(mentions.SkillNames) == 0 && len(mentions.KnowledgeBaseIDs) == 0 && len(mentions.WorkflowRefs) == 0 {
 		return
 	}
 	body["explicit_resource_bindings"] = map[string]any{
 		"skill_names":        mentions.SkillNames,
 		"knowledge_base_ids": mentions.KnowledgeBaseIDs,
-		"plugin_refs":        mentions.PluginRefs,
+		"workflow_refs":      mentions.WorkflowRefs,
 		"mentions":           mentions.ResourceMentions,
 	}
 }
@@ -266,6 +282,129 @@ func mergeMentionedDatasets(raw map[string]any, ids []string) {
 
 const recentMentionTurnLimit = 6
 const recentMentionResourceLimit = 10
+
+const conversationWorkflowBindingKey = "workflow_binding"
+
+func workflowSessionTerminal(session *orm.WorkflowSession) bool {
+	return session == nil || session.Dismissed || session.Status == workflow.SessionStatusCompleted ||
+		session.Status == workflow.SessionStatusFailed
+}
+
+func resolveConversationWorkflowBinding(
+	ctx context.Context,
+	db *gorm.DB,
+	conversationID string,
+	currentRefs, excludedRefs []string,
+	enabled, persist bool,
+) ([]string, error) {
+	if conversationID == "" {
+		return currentRefs, nil
+	}
+	// An explicit Workflow mention is an affirmative per-turn selection. It
+	// must take precedence over a persisted conversation toggle; otherwise the
+	// selection is discarded before applyWorkflowSelection can register its
+	// bound trigger tool.
+	if len(currentRefs) > 0 {
+		if persist {
+			return currentRefs, writeConversationWorkflowBinding(
+				ctx, db, conversationID, currentRefs[0],
+			)
+		}
+		return currentRefs, nil
+	}
+	boundRef, err := readConversationWorkflowBinding(ctx, db, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	// New user conversations intentionally start with general Workflow discovery
+	// disabled. An explicit @workflow mention is nevertheless an affirmative
+	// selection, and its exact binding must survive clarification turns before a
+	// Session exists. Otherwise an ask_user answer arrives without a mention, the
+	// bound trigger disappears, and ChatAgent falls back to unrelated tools/skills.
+	// Keep only the explicitly bound Workflow enabled here; applyWorkflowSelection
+	// will continue to restrict the request to this single ref.
+	if !enabled && boundRef == "" {
+		return nil, nil
+	}
+	for _, ref := range excludedRefs {
+		if ref == boundRef {
+			if persist {
+				return nil, writeConversationWorkflowBinding(ctx, db, conversationID, "")
+			}
+			return nil, nil
+		}
+	}
+
+	var latest orm.WorkflowSession
+	err = db.WithContext(ctx).Where("conversation_id = ?", conversationID).
+		Order("created_at DESC").First(&latest).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err == nil {
+		if workflowSessionTerminal(&latest) {
+			if persist && boundRef != "" {
+				return nil, writeConversationWorkflowBinding(ctx, db, conversationID, "")
+			}
+			return nil, nil
+		}
+		if latest.WorkflowRef != "" {
+			boundRef = latest.WorkflowRef
+			if persist {
+				if err := writeConversationWorkflowBinding(ctx, db, conversationID, boundRef); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if boundRef == "" {
+		return nil, nil
+	}
+	return []string{boundRef}, nil
+}
+
+func readConversationWorkflowBinding(ctx context.Context, db *gorm.DB, conversationID string) (string, error) {
+	var conversation orm.Conversation
+	if err := db.WithContext(ctx).Select("ext").Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return "", err
+	}
+	var ext map[string]any
+	if len(conversation.Ext) > 0 {
+		if err := json.Unmarshal(conversation.Ext, &ext); err != nil {
+			return "", fmt.Errorf("decode conversation ext: %w", err)
+		}
+	}
+	binding, _ := ext[conversationWorkflowBindingKey].(map[string]any)
+	if binding == nil {
+		return "", nil
+	}
+	workflowRef, _ := binding["workflow_ref"].(string)
+	return strings.TrimSpace(workflowRef), nil
+}
+
+func writeConversationWorkflowBinding(ctx context.Context, db *gorm.DB, conversationID, workflowRef string) error {
+	var conversation orm.Conversation
+	if err := db.WithContext(ctx).Select("ext").Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return err
+	}
+	ext := map[string]any{}
+	if len(conversation.Ext) > 0 {
+		if err := json.Unmarshal(conversation.Ext, &ext); err != nil {
+			return fmt.Errorf("decode conversation ext: %w", err)
+		}
+	}
+	if workflowRef == "" {
+		delete(ext, conversationWorkflowBindingKey)
+	} else {
+		ext[conversationWorkflowBindingKey] = map[string]any{"workflow_ref": workflowRef}
+	}
+	payload, err := json.Marshal(ext)
+	if err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Model(&orm.Conversation{}).Where("id = ?", conversationID).
+		Update("ext", payload).Error
+}
 
 // buildMentionResourceContext gives the model an unambiguous display-name to
 // resource-id mapping without persisting that internal context in chat history.
@@ -303,12 +442,13 @@ func buildMentionResourceContext(ctx context.Context, db *gorm.DB, userID string
 		case "skill":
 			var count int64
 			return db.WithContext(ctx).Model(&orm.SkillV2Skill{}).Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", mention.ResourceID, userID).Count(&count).Error == nil && count > 0
-		case "plugin":
+		case "workflow":
 			if strings.HasPrefix(mention.ResourceID, "builtin:") {
-				return true
+				var count int64
+				return db.WithContext(ctx).Model(&orm.WorkflowResource{}).Where("plugin_ref = ? AND source_type = 'builtin' AND owner_user_id = '' AND status = 'active'", mention.ResourceID).Count(&count).Error == nil && count > 0 // workflow-naming: persistence
 			}
 			var count int64
-			return db.WithContext(ctx).Model(&orm.PluginResource{}).Where("plugin_ref = ? AND status = 'active' AND (owner_user_id = ? OR owner_user_id = '')", mention.ResourceID, userID).Count(&count).Error == nil && count > 0
+			return db.WithContext(ctx).Model(&orm.WorkflowResource{}).Where("plugin_ref = ? AND status = 'active' AND (owner_user_id = ? OR owner_user_id = '')", mention.ResourceID, userID).Count(&count).Error == nil && count > 0 // workflow-naming: persistence
 		case "tool":
 			return toolIDs[mention.ResourceID]
 		case "conversation":
@@ -342,11 +482,15 @@ func buildMentionResourceContext(ctx context.Context, db *gorm.DB, userID string
 	}
 
 	var lines []string
-	lines = append(lines, "<mentioned_resources>", "The following resources were explicitly referenced by the user. Names are for interpretation; use resource IDs for calls.")
+	lines = append(lines, "<mentioned_resources>", "The following resources were explicitly referenced by the user. Use resource IDs for calls.")
 	if len(current) > 0 {
 		lines = append(lines, "Current-turn references (authorized for this turn):")
 		for _, mention := range current {
-			lines = append(lines, fmt.Sprintf("- type=%s, name=%q, id=%q", mention.Type, mention.DisplayName, mention.ResourceID))
+			if mention.Type == "workflow" {
+				lines = append(lines, fmt.Sprintf("- type=workflow, name=%q, id=%q, semantics=executable_procedure_selected_for_this_turn; invoke its bound trigger, do not search for it as content", mention.DisplayName, mention.ResourceID))
+			} else {
+				lines = append(lines, fmt.Sprintf("- type=%s, name=%q, id=%q", mention.Type, mention.DisplayName, mention.ResourceID))
+			}
 		}
 	}
 	if len(recent) > 0 {
@@ -386,7 +530,7 @@ func mentionedConversationContext(ctx context.Context, db *gorm.DB, userID, curr
 	var chunks []string
 	for _, id := range ids {
 		var conversation orm.Conversation
-		if err := db.WithContext(ctx).Where("id = ? AND create_user_id = ?", id, userID).Take(&conversation).Error; err != nil {
+		if err := db.WithContext(ctx).Where("id = ? AND create_user_id = ? AND deleted_at IS NULL", id, userID).Take(&conversation).Error; err != nil {
 			return "", fmt.Errorf("conversation mention is not readable: %s", id)
 		}
 		if id == currentID {
@@ -422,17 +566,24 @@ func applyMentionedTools(disabled []string, enabled []string) []string {
 	return out
 }
 
-func mergeMentionedPlugins(ctx context.Context, db *gorm.DB, userID string, refs []string, catalog []map[string]any) ([]map[string]any, []string, error) {
+func mergeMentionedWorkflows(ctx context.Context, db *gorm.DB, userID string, refs []string, catalog []map[string]any) ([]map[string]any, []string, error) {
 	if len(refs) == 0 {
 		return catalog, nil, nil
 	}
 	byRef := map[string]map[string]any{}
 	for _, item := range catalog {
-		byRef[fmt.Sprint(item["plugin_ref"])] = item
+		byRef[fmt.Sprint(item["workflow_ref"])] = item
 	}
 	selected := make([]map[string]any, 0, len(refs))
 	var forcedBuiltins []string
 	for _, ref := range refs {
+		callMode, err := workflow.UserWorkflowCallMode(db, userID, ref)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load workflow call mode: %w", err)
+		}
+		if callMode == workflow.WorkflowCallModeDisabled {
+			return nil, nil, fmt.Errorf("workflow is paused: %s", ref)
+		}
 		if strings.HasPrefix(ref, "builtin:") {
 			forcedBuiltins = append(forcedBuiltins, strings.TrimPrefix(ref, "builtin:"))
 			continue
@@ -442,22 +593,48 @@ func mergeMentionedPlugins(ctx context.Context, db *gorm.DB, userID string, refs
 			continue
 		}
 		var row struct {
-			orm.PluginResource
+			orm.WorkflowResource
 			TreeHash string `gorm:"column:tree_hash"`
 		}
 		if err := db.WithContext(ctx).Table("plugins p").Select("p.*, pr.tree_hash").
 			Joins("JOIN plugin_revisions pr ON pr.id=p.head_revision_id").
-			Where("p.plugin_ref=? AND p.status='active' AND (p.owner_user_id=? OR p.owner_user_id='')", ref, userID).Take(&row).Error; err != nil {
-			return nil, nil, fmt.Errorf("plugin mention is not accessible: %s", ref)
+			Where("p.plugin_ref=? AND p.status='active' AND (p.owner_user_id=? OR p.owner_user_id='')", ref, userID).Take(&row).Error; err != nil { // workflow-naming: persistence
+			return nil, nil, fmt.Errorf("workflow mention is not accessible: %s", ref)
 		}
-		selected = append(selected, map[string]any{"plugin_ref": row.PluginRef, "plugin_id": row.PluginID, "name": row.Name, "description": row.Description, "when_to_use": row.WhenToUse, "source_type": row.SourceType, "remote_root": "remote://" + row.RelativeRoot, "revision_id": row.HeadRevisionID, "revision_no": row.Version, "tree_hash": row.TreeHash})
+		selected = append(selected, map[string]any{"workflow_ref": row.WorkflowRef, "workflow_id": row.WorkflowID, "name": row.Name, "description": row.Description, "when_to_use": row.WhenToUse, "source_type": row.SourceType, "remote_root": "remote://" + row.RelativeRoot, "revision_id": row.HeadRevisionID, "revision_no": row.Version, "tree_hash": row.TreeHash})
 	}
 	return selected, forcedBuiltins, nil
 }
 
-// applyPluginSelection is the single catalog/allowlist assembly path used by
+func applyWorkflowContextCallMode(db *gorm.DB, userID string, reqBody map[string]any) error {
+	workflowContext, ok := reqBody["workflow_context"].(map[string]any)
+	if !ok || workflowContext == nil {
+		return nil
+	}
+	workflowRef := strings.TrimSpace(fmt.Sprint(workflowContext["workflow_ref"]))
+	if workflowRef == "" {
+		return nil
+	}
+	callMode, err := workflow.UserWorkflowCallMode(db, userID, workflowRef)
+	if err != nil {
+		return fmt.Errorf("load active workflow call mode: %w", err)
+	}
+	if callMode != workflow.WorkflowCallModeDisabled {
+		return nil
+	}
+	for _, key := range []string{
+		"session_id", "workflow_id", "current_step", "workflow_ref",
+		"revision_id", "revision_no", "tree_hash", "remote_root", "runtime",
+	} {
+		delete(workflowContext, key)
+	}
+	reqBody["workflow_context"] = workflowContext
+	return nil
+}
+
+// applyWorkflowSelection is the single catalog/allowlist assembly path used by
 // both real chat execution and context preview/export.
-func applyPluginSelection(
+func applyWorkflowSelection(
 	ctx context.Context,
 	db *gorm.DB,
 	userID string,
@@ -465,21 +642,40 @@ func applyPluginSelection(
 	mentionedRefs []string,
 	excludedRefs []string,
 ) error {
-	if len(mentionedRefs) > 1 {
-		return fmt.Errorf("at most one plugin mention is allowed per turn")
+	controls, err := settings.LoadFeatureControls(ctx, db, userID)
+	if err != nil {
+		return err
 	}
-	if len(mentionedRefs) > 0 {
-		reqBody["enable_plugin"] = true
-		reqBody["allowed_plugin_refs"] = mentionedRefs
-	}
-	if enabled, _ := reqBody["enable_plugin"].(bool); !enabled {
-		reqBody["plugin_catalog"] = []map[string]any{}
-		reqBody["disabled_builtin_plugins"] = []string{}
+	if !controls.WorkflowsEnabled {
+		// A master pause must also block workflow bindings restored from an
+		// existing conversation. Keep the binding itself untouched so enabling
+		// the feature later restores the user's prior choice.
+		reqBody["enable_workflow"] = false
+		reqBody["workflow_catalog"] = []map[string]any{}
+		reqBody["disabled_builtin_workflows"] = []string{}
+		delete(reqBody, "allowed_workflow_refs")
+		delete(reqBody, "workflow_activations")
 		return nil
 	}
-	catalog, err := plugin.EnabledCatalog(db, userID)
+	if err := applyWorkflowContextCallMode(db, userID, reqBody); err != nil {
+		return err
+	}
+	if len(mentionedRefs) > 1 {
+		return fmt.Errorf("at most one workflow mention is allowed per turn")
+	}
+	if len(mentionedRefs) > 0 {
+		reqBody["enable_workflow"] = true
+		reqBody["allowed_workflow_refs"] = mentionedRefs
+	}
+	delete(reqBody, "workflow_activations")
+	if enabled, _ := reqBody["enable_workflow"].(bool); !enabled {
+		reqBody["workflow_catalog"] = []map[string]any{}
+		reqBody["disabled_builtin_workflows"] = []string{}
+		return nil
+	}
+	catalog, err := workflow.EnabledCatalog(db, userID)
 	if err != nil {
-		return fmt.Errorf("load plugin catalog: %w", err)
+		return fmt.Errorf("load workflow catalog: %w", err)
 	}
 	excluded := map[string]bool{}
 	for _, ref := range excludedRefs {
@@ -487,34 +683,109 @@ func applyPluginSelection(
 	}
 	filteredCatalog := catalog[:0]
 	for _, item := range catalog {
-		if !excluded[fmt.Sprint(item["plugin_ref"])] {
+		if !excluded[fmt.Sprint(item["workflow_ref"])] {
 			filteredCatalog = append(filteredCatalog, item)
 		}
 	}
 	catalog = filteredCatalog
-	catalog, forcedBuiltins, err := mergeMentionedPlugins(
+	catalog, forcedBuiltins, err := mergeMentionedWorkflows(
 		ctx, db, userID, mentionedRefs, catalog,
 	)
 	if err != nil {
 		return err
 	}
-	disabledBuiltins, err := plugin.DisabledBuiltinPluginIDs(db, userID)
+	if len(mentionedRefs) == 1 {
+		var selected map[string]any
+		for _, item := range catalog {
+			if fmt.Sprint(item["workflow_ref"]) != mentionedRefs[0] {
+				continue
+			}
+			selected = item
+			break
+		}
+		if selected == nil && strings.HasPrefix(mentionedRefs[0], "builtin:") {
+			selected = map[string]any{
+				"workflow_ref": mentionedRefs[0],
+				"workflow_id":  strings.TrimPrefix(mentionedRefs[0], "builtin:"),
+			}
+			if runtimePolicy, ok := workflow.RuntimePolicyForRevision(
+				ctx, db, userID, mentionedRefs[0], "",
+			); ok {
+				selected["runtime"] = runtimePolicy
+			}
+			catalog = append(catalog, selected)
+		}
+		if activation := buildWorkflowActivation(selected, mentionedRefs[0]); activation != nil {
+			reqBody["workflow_activations"] = []map[string]any{activation}
+		}
+	}
+	disabledBuiltins, err := workflow.DisabledBuiltinWorkflowIDs(db, userID)
 	if err != nil {
-		return fmt.Errorf("load builtin plugin settings: %w", err)
+		return fmt.Errorf("load builtin workflow settings: %w", err)
 	}
 	for _, ref := range excludedRefs {
 		if strings.HasPrefix(ref, "builtin:") {
 			disabledBuiltins = append(disabledBuiltins, strings.TrimPrefix(ref, "builtin:"))
 		}
 	}
-	if pluginContext, ok := reqBody["plugin_context"].(map[string]any); ok {
-		if excluded[fmt.Sprint(pluginContext["plugin_ref"])] {
-			reqBody["plugin_context"] = map[string]any{}
+	if workflowContext, ok := reqBody["workflow_context"].(map[string]any); ok {
+		if excluded[fmt.Sprint(workflowContext["workflow_ref"])] {
+			reqBody["workflow_context"] = map[string]any{}
 		}
 	}
-	reqBody["plugin_catalog"] = catalog
-	reqBody["disabled_builtin_plugins"] = applyMentionedTools(
+	reqBody["workflow_catalog"] = catalog
+	reqBody["disabled_builtin_workflows"] = applyMentionedTools(
 		disabledBuiltins, forcedBuiltins,
 	)
 	return nil
+}
+
+func buildWorkflowActivation(item map[string]any, workflowRef string) map[string]any {
+	if item == nil {
+		return nil
+	}
+	workflowID := optionalActivationString(item["workflow_id"])
+	if workflowID == "" {
+		return nil
+	}
+	stem := strings.Trim(strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(workflowID)), "_")
+	if stem == "" {
+		stem = "workflow"
+	}
+	stem = strings.TrimSuffix(stem, "_workflow")
+	name := optionalActivationString(item["name"])
+	if name == "" {
+		name = workflowID
+	}
+	activation := map[string]any{
+		"workflow_ref": workflowRef,
+		"workflow_id":  workflowID,
+		"revision_id":  optionalActivationString(item["revision_id"]),
+		"tool_name":    "trigger_" + stem + "_workflow",
+		"tool_description": strings.TrimSpace(fmt.Sprintf(
+			"Start the exact executable Workflow %q explicitly selected by the user and return its Ready frontier. This is execution, not resource lookup. %s %s",
+			name, fmt.Sprint(item["description"]), fmt.Sprint(item["when_to_use"]),
+		)),
+		"prompt": "The user explicitly selected an executable Workflow with @workflow. Apply its declared Runtime startup clarification policy first; ask only for missing declared fields. When no declared field is missing, call its bound trigger directly. Do not search for the Workflow as an artifact, do not merely explain it, and do not call list_workflows or select another Workflow.",
+	}
+	if runtimePolicy, ok := item["runtime"]; ok && runtimePolicy != nil {
+		activation["runtime"] = runtimePolicy
+	}
+	return activation
+}
+
+func optionalActivationString(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
 }

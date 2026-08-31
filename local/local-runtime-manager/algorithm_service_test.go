@@ -9,10 +9,30 @@ import (
 	"testing"
 )
 
+func TestLazyLLMVersionUsesRepositoryPin(t *testing.T) {
+	t.Setenv("LAZYMIND_LAZYLLM_VERSION", "")
+	repo := t.TempDir()
+	const pinnedVersion = "9.8.7a6"
+	if err := os.WriteFile(filepath.Join(repo, "LAZYLLM_VERSION"), []byte(pinnedVersion+"\n"), 0o644); err != nil {
+		t.Fatalf("write LazyLLM version: %v", err)
+	}
+	version, err := lazyLLMVersion(repo)
+	if err != nil {
+		t.Fatalf("read LazyLLM version: %v", err)
+	}
+	if version != pinnedVersion {
+		t.Fatalf("LazyLLM version = %q, want %q", version, pinnedVersion)
+	}
+}
+
 func TestAlgorithmPreparePythonPinsSetuptoolsForLocalVenv(t *testing.T) {
 	installFakeUVOnPath(t)
 	repo := t.TempDir()
 	writeComposeFixture(t, repo)
+	const pinnedVersion = "9.8.7a6"
+	if err := os.WriteFile(filepath.Join(repo, "LAZYLLM_VERSION"), []byte(pinnedVersion+"\n"), 0o644); err != nil {
+		t.Fatalf("write LazyLLM version: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(repo, "algorithm", "lazyllm", "lazyllm"), 0o755); err != nil {
 		t.Fatalf("mkdir lazyllm submodule fixture: %v", err)
 	}
@@ -63,7 +83,7 @@ func TestAlgorithmPreparePythonPinsSetuptoolsForLocalVenv(t *testing.T) {
 			return CommandResult{}, nil
 		},
 		func(cmd Command) (CommandResult, error) {
-			assertCommand(t, cmd, "uv", "pip", "install", "--python", paths.AlgorithmPython, "--link-mode", "copy", "--strict", "lazyllm==1.2.2")
+			assertCommand(t, cmd, "uv", "pip", "install", "--python", paths.AlgorithmPython, "--link-mode", "copy", "--strict", "lazyllm=="+pinnedVersion)
 			return CommandResult{}, nil
 		},
 		func(cmd Command) (CommandResult, error) {
@@ -118,6 +138,68 @@ func TestAlgorithmServiceEnvPinsLocalRouterHost(t *testing.T) {
 	env := algorithmServiceEnv(cfg, paths, chatProcessName)
 
 	assertEnvContains(t, env, "LAZYMIND_ROUTER_HOST=127.0.0.1")
+	assertEnvContains(t, env, "LAZYMIND_WORKFLOW_EXECUTOR_TOKEN=dev-workflow-executor-token")
+	assertEnvContains(t, env, "LAZYMIND_WORKFLOWS_DIR="+filepath.Join(repo, "workflows"))
+}
+
+func TestWorkflowExecutorTokenMatchesCoreAndAlgorithmOverride(t *testing.T) {
+	t.Setenv("LAZYMIND_WORKFLOW_EXECUTOR_TOKEN", "custom-workflow-secret")
+	repo := t.TempDir()
+	writeComposeFixture(t, repo)
+	cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnvContains(t, algorithmServiceEnv(cfg, paths, chatProcessName),
+		"LAZYMIND_WORKFLOW_EXECUTOR_TOKEN=custom-workflow-secret")
+	assertEnvContains(t, coreServiceEnv(cfg, paths),
+		"LAZYMIND_WORKFLOW_EXECUTOR_TOKEN=custom-workflow-secret")
+}
+
+func TestAlgorithmServiceEnvTrustedLocalMode(t *testing.T) {
+	repo := t.TempDir()
+	writeComposeFixture(t, repo)
+	cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
+	if err != nil {
+		t.Fatalf("runtime config: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		manifest    bool
+		environment string
+		want        string
+	}{
+		{name: "disabled by default", want: "LAZYMIND_TRUSTED_LOCAL_MODE=false"},
+		{name: "enabled by desktop manifest", manifest: true, want: "LAZYMIND_TRUSTED_LOCAL_MODE=true"},
+		{name: "enabled by source environment", environment: "true", want: "LAZYMIND_TRUSTED_LOCAL_MODE=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LAZYMIND_TRUSTED_LOCAL_MODE", tc.environment)
+			testPaths := paths
+			testPaths.TrustedLocalMode = tc.manifest
+
+			env := algorithmServiceEnv(cfg, testPaths, chatProcessName)
+
+			assertEnvContains(t, env, tc.want)
+		})
+	}
+}
+
+func TestAlgorithmServiceEnvDoesNotForceEditablePPT(t *testing.T) {
+	repo := t.TempDir()
+	writeComposeFixture(t, repo)
+	cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
+	if err != nil {
+		t.Fatalf("runtime config: %v", err)
+	}
+
+	env := algorithmServiceEnv(cfg, paths, chatProcessName)
+
+	assertEnvNotContains(t, env, "LAZYMIND_OUTPUT_EDITABLE_PPT=")
+	assertEnvContains(t, env, "LAZYMIND_PPT_EXPORT_CLI="+filepath.Join(paths.RepoRoot, "workflows", "ppt-workflow", "runtime", "scripts", "export_pptx", "html_to_pptx.mjs"))
+	assertEnvContains(t, env, "LAZYMIND_PPT_EXPORT_DEPS="+filepath.Join(paths.RuntimeRoot, "deps", "editable-ppt"))
+	assertEnvContains(t, env, "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(paths.RuntimeRoot, "deps", "editable-ppt", "browsers"))
 }
 
 func TestDesktopAlgorithmRegisterPolicyForInstallVersion(t *testing.T) {
@@ -228,6 +310,35 @@ func TestRAGServicesDoNotWaitBeforeStarting(t *testing.T) {
 	}
 }
 
+func TestInstallerWarmupDoesNotWaitForExcludedProcessorWorker(t *testing.T) {
+	normal := ragReadinessChecks(RuntimeConfig{})
+	warmup := ragReadinessChecks(RuntimeConfig{MaintenanceMode: installerWarmupMaintenanceMode})
+
+	if !hasRAGReadinessLabel(normal, "processor-worker") {
+		t.Fatal("normal runtime must wait for processor-worker")
+	}
+	if hasRAGReadinessLabel(warmup, "processor-worker") {
+		t.Fatal("installer warmup must not wait for excluded processor-worker")
+	}
+}
+
+func TestWarmupChatCapabilityDoesNotWaitForProcessorWorker(t *testing.T) {
+	t.Setenv(installerWarmupSkipProcessorWorkerEnvVar, "true")
+	checks := ragReadinessChecks(RuntimeConfig{})
+	if hasRAGReadinessLabel(checks, "processor-worker") {
+		t.Fatal("warmup Chat capability must skip processor-worker readiness")
+	}
+}
+
+func hasRAGReadinessLabel(checks []ragReadinessCheck, label string) bool {
+	for _, check := range checks {
+		if check.label == label {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAlgorithmServiceEnvUsesRuntimeDataPaths(t *testing.T) {
 	repo := t.TempDir()
 	writeComposeFixture(t, repo)
@@ -291,21 +402,25 @@ func TestEnsureTiktokenCacheWarmsOnceAndWritesMarker(t *testing.T) {
 	}
 }
 
-func TestAlgorithmServiceEnvUsesFileBackedRelayArgumentsOnWindowsDesktop(t *testing.T) {
+func TestAlgorithmServiceEnvUsesFileBackedRelayArgumentsOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		t.Skip("Windows-specific Desktop process policy")
+		t.Skip("Windows-specific process policy")
 	}
-	repo := t.TempDir()
-	writeComposeFixture(t, repo)
-	cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
-	if err != nil {
-		t.Fatalf("runtime config: %v", err)
+	for _, profile := range []string{"local", "desktop"} {
+		t.Run(profile, func(t *testing.T) {
+			repo := t.TempDir()
+			writeComposeFixture(t, repo)
+			cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
+			if err != nil {
+				t.Fatalf("runtime config: %v", err)
+			}
+			cfg.Profile = profile
+
+			env := algorithmServiceEnv(cfg, paths, chatProcessName)
+
+			assertEnvContains(t, env, "LAZYLLM_PASS_ARGS_BY_FILE=1")
+		})
 	}
-	cfg.Profile = "desktop"
-
-	env := algorithmServiceEnv(cfg, paths, chatProcessName)
-
-	assertEnvContains(t, env, "LAZYLLM_PASS_ARGS_BY_FILE=1")
 }
 
 func TestAlgorithmServiceCommandArgsUsesWindowsDesktopBootstrap(t *testing.T) {

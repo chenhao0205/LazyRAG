@@ -4,12 +4,14 @@ import lazyllm
 from lazymind.chat.service.component.tool_registry import (
     DEFAULT_TOOLS,
     IMAGE_MARKDOWN_OUTPUT_APPENDIX,
+    RETRIEVAL_CITATION_OUTPUT_APPENDIX,
     SKILL_TOOL_CONFIG,
     ToolConfig,
     _capability_is_denied,
     collect_system_prompt_appendices,
     filter_tools,
     get_all_tool_groups,
+    tool_is_active,
 )
 
 
@@ -79,7 +81,7 @@ def test_wikipedia_remains_available_without_web_provider():
     assert 'wikipedia' in _active_tool_names()
 
 
-def test_registry_key_source_activates_function_tool():
+def test_temp_kb_activates_when_files_are_present():
     from lazyllm.tools.agent.toolsManager import ToolManager
 
     assert 'temp_kb' not in _active_tool_names()
@@ -100,9 +102,29 @@ def test_registry_key_source_activates_function_tool():
     assert group['methods'] == [
         {
             'name': 'kb_tmp_search',
-            'summary': 'Search attached temporary uploaded files with the temporary document retriever.',
+            'summary': 'Locate passages in this conversation\'s uploaded documents.',
         }
     ]
+
+
+def test_registry_key_source_activates_function_tool():
+    def gated_tool() -> None:
+        return None
+
+    cfg = ToolConfig(
+        name='gated',
+        label='gated',
+        description='gated',
+        tool=(
+            gated_tool,
+            lambda: (lazyllm.globals.get('agentic_config') or {}).get('files'),
+        ),
+        module='retrieval',
+    )
+
+    assert tool_is_active(cfg) is False
+    lazyllm.globals['agentic_config'] = {'files': ['tmp-a.md']}
+    assert tool_is_active(cfg) is True
 
 
 def test_catalog_exposes_modules_without_registering_module_gateways():
@@ -115,6 +137,55 @@ def test_catalog_exposes_modules_without_registering_module_gateways():
     names = {item['function']['name'] for item in manager.tools_description}
     assert names == {'calculator'}
     assert not any('utility' in name for name in names)
+
+
+def test_memory_tools_are_registered_as_one_eager_group():
+    from lazyllm.tools.agent.toolsManager import ToolManager
+
+    configs = [
+        cfg for cfg in DEFAULT_TOOLS
+        if cfg.name in {'memory', 'read_memory', 'episode_create'}
+    ]
+
+    assert [cfg.name for cfg in configs] == ['memory']
+    config = configs[0]
+    assert [method['name'] for method in _tool_group('memory')['methods']] == [
+        'read_memory',
+        'read_memory_reference',
+        'soul_editor',
+        'profile_editor',
+        'preference_editor',
+        'episode_create',
+    ]
+    manager = ToolManager([config.tool])
+    assert {item['function']['name'] for item in manager.tools_description} == {
+        'MemoryTools_read_memory',
+        'MemoryTools_read_memory_reference',
+        'MemoryTools_soul_editor',
+        'MemoryTools_profile_editor',
+        'MemoryTools_preference_editor',
+        'MemoryTools_episode_create',
+    }
+    assert not hasattr(config.tool, 'memory_editor')
+    memory_policy = '\n'.join(config.appendix_system_prompt['tool_policy'])
+    assert 'Never claim that information was saved unless' in memory_policy
+    assert 'MemoryTools_episode_create' in memory_policy
+    assert 'preference_editor' in memory_policy
+    assert 'new preference was not saved' in memory_policy
+    assert 'no existing preference was deleted, overwritten, or reordered' in memory_policy
+    assert 'Never claim or imply automatic eviction' in memory_policy
+
+
+def test_writer_tools_publish_stable_capability_ids():
+    capabilities = {
+        config.name: config.capability_id
+        for config in DEFAULT_TOOLS
+        if config.name in {'writer_create', 'writer_revision'}
+    }
+    assert capabilities == {
+        'writer_create': 'writer.create',
+        'writer_revision': 'writer.revise',
+    }
 
 
 def test_shared_prompt_appendix_is_reused_and_deduplicated():
@@ -176,6 +247,40 @@ def test_search_tool_descriptions_distinguish_open_web_from_encyclopedic_lookup(
     assert 'current information' in web_config.tool['desc']
     assert 'stable encyclopedic background' in wikipedia_config.description_en
     assert 'not for news' in wikipedia_config.description_en
+
+
+def test_external_retrieval_tools_share_the_citation_output_contract():
+    configs = [
+        cfg for cfg in DEFAULT_TOOLS
+        if cfg.name in {'web_search', 'academic_search', 'wikipedia', 'url_fetch'}
+    ]
+    collected = collect_system_prompt_appendices(configs)
+
+    assert collected['output_contract'] == list(RETRIEVAL_CITATION_OUTPUT_APPENDIX['output_contract'])
+    assert any('exact `target_url`' in item for item in collected['tool_policy'])
+    assert any('get_content' in item for item in collected['tool_policy'])
+
+
+def test_mixed_kb_and_web_tools_share_one_citation_output_contract():
+    configs = [
+        cfg for cfg in DEFAULT_TOOLS
+        if cfg.name in {'kb', 'web_search'}
+    ]
+    lazyllm.globals['agentic_config'] = {'filters': {'kb_id': 'selected-kb'}}
+    collected = collect_system_prompt_appendices(configs)
+
+    citation_contracts = [
+        item for item in collected['output_contract']
+        if 'Retrieval evidence citation rules' in item
+    ]
+    assert citation_contracts == list(RETRIEVAL_CITATION_OUTPUT_APPENDIX['output_contract'])
+    contract = '\n'.join(citation_contracts)
+    assert 'copy that `ref` exactly' in contract
+    assert '[[document.chunk]]' not in contract
+    assert 'cite at least one result from each category' in contract
+
+    policy = '\n'.join(collected['tool_policy'])
+    assert 'cite at least one result from each category' not in policy
 
 
 def test_prompt_appendix_deduplication_normalizes_whitespace():

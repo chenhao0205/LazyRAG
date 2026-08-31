@@ -8,7 +8,6 @@ import lazyllm
 
 from lazymind.chat.engine.subagent import SUBAGENT_ATTACHMENT_CONTEXT_KEY
 from lazymind.chat.engine.subagent.db import TaskQueryDB
-from lazymind.chat.engine.tools.infra import tool_success
 from lazyllm.tools.agent.base import _write_agent_data
 
 # How often to emit a heartbeat while polling in auto mode (seconds).
@@ -143,6 +142,9 @@ def create_subagent(
     mode = _mode()
     params = dict(params or {})
     params['_thinking_depth'] = str(_agentic_config().get('thinking_depth') or 'medium')
+    trace = lazyllm.get_trace_context()
+    if trace.trace_id and trace.parent_span_id:
+        params.update(trace_id=trace.trace_id, parent_span_id=trace.parent_span_id)
     attachment_context = _current_attachment_context()
     if attachment_context:
         params[SUBAGENT_ATTACHMENT_CONTEXT_KEY] = attachment_context
@@ -221,11 +223,11 @@ def create_subagent(
             else:
                 msg = f"Task '{title}' failed: {phase or status_row.get('status')}. {resume_hint}"
             result = {'status': 'failed', 'message': msg, 'summary': summary}
-        return tool_success('create_subagent', result)
+        return result
 
     # manual: return immediately; Go runs the SubAgent in the background.
     msg = f"Task '{title}' started in the background. Use get_subagent_status('{title}') to check progress."
-    return tool_success('create_subagent', {'status': 'ok', 'message': msg})
+    return {'status': 'ok', 'message': msg}
 
 
 def _describe_artifact(a: Dict[str, Any]) -> str:
@@ -319,107 +321,6 @@ def _resolve_task(task_ref: str, tasks: List[Dict[str, Any]]) -> Optional[Dict[s
     return None
 
 
-def save_plugin_artifact(
-    slot: str,
-    value: Any,
-    content_type: str = 'text',
-    sort_order: Optional[int] = None,
-    caption: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Save a workflow artifact directly from ChatAgent without launching a SubAgent.
-
-    Use this when ChatAgent can produce the artifact value itself (e.g. copying a user
-    file into a slot, or writing a short text value) without running a full SubAgent.
-
-    Reads session_id and step_id from agentic_config (same as advance_step).
-    Calls Go core POST /plugin-sessions/{session_id}/artifacts to write a slot revision.
-
-    Args:
-        slot (str): The slot id to write (must have a slot binding in the workflow).
-        value (Any): The artifact value.
-            - text: a plain string.
-            - json: a dict or list.
-            - image/file: a local absolute path from find_user_attachment's `path` field.
-              IMPORTANT: pass the `path` field, NOT the `url` field. The `url` field is a
-              signed URL that expires and cannot be used for persistent storage.
-            - file_list: a list of local absolute paths.
-        content_type (str): One of text, json, image, file, file_list. Default text.
-        sort_order (int): Optional 1-based display position for list-slot artifacts.
-            Omit (or pass None) to append; pass N to overwrite position N.
-        caption (str): Optional human-readable description for image/file artifacts.
-
-    Returns:
-        A confirmation that the artifact was saved.
-    """
-    cfg = _agentic_config()
-    session_id: str = cfg.get('plugin_session_id', '')
-    if not session_id:
-        return tool_success('save_plugin_artifact', {
-            'status': 'error',
-            'message': 'No active workflow session found.',
-        })
-
-    from lazymind.config import config as _cfg
-    import httpx
-
-    core_url = str(_cfg['core_api_url']).rstrip('/')
-
-    # Build value payload.
-    _CONTENT_TYPES = {'text', 'json', 'image', 'file', 'file_list'}
-    ct = content_type if content_type in _CONTENT_TYPES else 'text'
-    if ct == 'text':
-        value_payload: Any = {'text': str(value)}
-    elif ct == 'json':
-        value_payload = {'data': value}
-    elif ct in ('image', 'file'):
-        resolved_path = _resolve_file_path_for_artifact(str(value), cfg)
-        value_payload = {'path': resolved_path}
-    elif ct == 'file_list':
-        paths_raw = list(value) if hasattr(value, '__iter__') and not isinstance(value, str) else [str(value)]
-        value_payload = {'paths': [_resolve_file_path_for_artifact(str(p), cfg) for p in paths_raw]}
-    else:
-        value_payload = {'text': str(value)}
-    if caption is not None:
-        value_payload['caption'] = str(caption)
-
-    body: Dict[str, Any] = {
-        'slot': slot,
-        'value': value_payload,
-        'content_type': ct,
-    }
-    if sort_order is not None:
-        body['sort_order'] = sort_order
-    if caption is not None:
-        body['caption'] = caption
-    step_id: str = cfg.get('plugin_step', '')
-    if step_id:
-        body['step_id'] = step_id
-
-    try:
-        resp = httpx.post(
-            f'{core_url}/plugin-sessions/{session_id}/artifacts',
-            json=body,
-            timeout=10.0,
-        )
-        if resp.status_code != 200:
-            return tool_success('save_plugin_artifact', {
-                'status': 'error',
-                'message': f'Go core returned {resp.status_code}: {resp.text[:200]}',
-            })
-        data = resp.json()
-        msg = f"Artifact '{slot}' saved to workflow session {session_id}."
-        return tool_success('save_plugin_artifact', {
-            'status': 'ok',
-            'message': msg,
-            'revision': data.get('data', {}).get('revision'),
-        })
-    except Exception as exc:
-        return tool_success('save_plugin_artifact', {
-            'status': 'error',
-            'message': f'Request failed: {exc}',
-        })
-
-
 def list_subagents(status: Optional[str] = None) -> Dict[str, Any]:
     """List SubAgent tasks in the current conversation, optionally filtered by status.
 
@@ -440,7 +341,7 @@ def list_subagents(status: Optional[str] = None) -> Dict[str, Any]:
         line += ')'
         lines.append(line)
     msg = '\n'.join(lines) if lines else 'No SubAgent tasks in the current conversation.'
-    return tool_success('list_subagents', {'status': 'ok', 'message': msg, 'tasks': tasks})
+    return {'status': 'ok', 'message': msg, 'tasks': tasks}
 
 
 def get_subagent_status(task_ref: str) -> Dict[str, Any]:
@@ -452,7 +353,7 @@ def get_subagent_status(task_ref: str) -> Dict[str, Any]:
     tasks = _list_conversation_tasks()
     task = _resolve_task(task_ref, tasks)
     if not task:
-        return tool_success('get_subagent_status', {'status': 'empty', 'message': f'Task not found: {task_ref}'})
+        return {'status': 'empty', 'message': f'Task not found: {task_ref}'}
     msg = (
         f"{task.get('title')} ({task.get('status')}): {task.get('progress_pct', 0)}% complete"
     )
@@ -462,7 +363,7 @@ def get_subagent_status(task_ref: str) -> Dict[str, Any]:
     eta = task.get('estimated_sec')
     if eta:
         msg += f', estimated {eta}s remaining.'
-    return tool_success('get_subagent_status', {'status': 'ok', 'message': msg, 'task': task})
+    return {'status': 'ok', 'message': msg, 'task': task}
 
 
 def list_subagent_artifacts(task_ref: str) -> Dict[str, Any]:
@@ -477,14 +378,14 @@ def list_subagent_artifacts(task_ref: str) -> Dict[str, Any]:
     tasks = _list_conversation_tasks()
     task = _resolve_task(task_ref, tasks)
     if not task:
-        return tool_success('list_subagent_artifacts', {'status': 'empty', 'message': f'Task not found: {task_ref}'})
+        return {'status': 'empty', 'message': f'Task not found: {task_ref}'}
     arts = task.get('artifacts') or []
     summary: Dict[str, str] = {}
     for a in arts:
         summary[a.get('slot') or a.get('artifact_key')] = a.get('content_type')
     parts = [f'{k} ({v})' for k, v in summary.items()]
     msg = f"Task '{task.get('title')}' has {len(summary)} artifact(s): " + (', '.join(parts) if parts else '(none)')
-    return tool_success('list_subagent_artifacts', {'status': 'ok', 'message': msg, 'keys': summary})
+    return {'status': 'ok', 'message': msg, 'keys': summary}
 
 
 def get_subagent_artifacts(task_ref: str, keys: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -500,9 +401,9 @@ def get_subagent_artifacts(task_ref: str, keys: Optional[List[str]] = None) -> D
     tasks = _list_conversation_tasks()
     task = _resolve_task(task_ref, tasks)
     if not task:
-        return tool_success('get_subagent_artifacts', {'status': 'empty', 'message': f'Task not found: {task_ref}'})
+        return {'status': 'empty', 'message': f'Task not found: {task_ref}'}
     arts = task.get('artifacts') or []
     if keys:
         keyset = set(keys)
         arts = [a for a in arts if a.get('slot') or a.get('artifact_key') in keyset]
-    return tool_success('get_subagent_artifacts', {'status': 'ok', 'artifacts': arts, 'task_title': task.get('title')})
+    return {'status': 'ok', 'artifacts': arts, 'task_title': task.get('title')}

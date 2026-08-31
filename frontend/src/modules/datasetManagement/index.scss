@@ -84,6 +84,60 @@
   align-items: flex-start;
 }
 
+.dataset-new-item-action-bar {
+  display: flex;
+  min-width: 0;
+  min-height: 52px;
+  padding: 8px 10px 8px 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #dbe7f8;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.dataset-new-item-action-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: #1f2937;
+
+  > span {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    border-radius: 50%;
+    background: #1677ff;
+  }
+
+  > strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.dataset-new-item-action-buttons {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+  .dataset-new-item-action-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dataset-new-item-action-buttons {
+    display: flex;
+
+    .ant-btn {
+      flex: 1;
+    }
+  }
+}
+
 .dataset-detail-filters {
   justify-content: flex-start;
 }
@@ -195,32 +249,82 @@
   overflow: hidden;
 }
 
-.dataset-kb-scroll-list {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
+.dataset-kb-cell {
   display: flex;
-  flex-wrap: nowrap;
+  align-items: center;
   gap: 4px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 2px 0 4px;
-  white-space: nowrap;
-  scrollbar-width: thin;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
-.dataset-kb-scroll-list::-webkit-scrollbar {
-  height: 6px;
+.dataset-kb-tag-wrap {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  vertical-align: middle;
+  cursor: default;
 }
 
-.dataset-kb-scroll-list::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: #d0d5dd;
+.dataset-kb-cell:has(.dataset-kb-more-wrap) .dataset-kb-tag-wrap {
+  // Leave room for the +N tag so the first label can ellipsis instead of
+  // pushing the counter to the far right of the cell.
+  max-width: calc(100% - 36px);
 }
 
-.dataset-kb-scroll-tag.ant-tag {
+.dataset-kb-more-wrap {
+  display: inline-flex;
   flex: 0 0 auto;
+  vertical-align: middle;
+  cursor: default;
+}
+
+.dataset-kb-tag.ant-tag {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
   margin-inline-end: 0;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.dataset-kb-tag-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dataset-kb-more-tag.ant-tag {
+  margin-inline-end: 0;
+  background: #f2f4f7;
+  border-color: #e4e7ec;
+  color: #475467;
+}
+
+.dataset-kb-tooltip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 320px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: normal;
+}
+
+.dataset-kb-tooltip-tag.ant-tag {
+  margin-inline-end: 0;
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-all;
+  background: #f2f4f7;
+  border-color: #e4e7ec;
+  color: #344054;
 }
 
 .dataset-detail-breadcrumb {

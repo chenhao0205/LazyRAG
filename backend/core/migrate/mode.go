@@ -2,10 +2,109 @@ package migrate
 
 import (
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 
 	"lazymind/core/log"
 )
+
+func (r *Runner) reconcileUnknownOpenDevHistory(
+	catalog migrationCatalog,
+	applied []historyRecord,
+) ([]historyRecord, error) {
+	if !envEnabled(reconcileUnknownDevHistoryEnv) || len(catalog.Modes) == 0 {
+		return applied, nil
+	}
+
+	open := catalog.Modes[len(catalog.Modes)-1]
+	if !open.DevDirectory {
+		return applied, nil
+	}
+
+	known := make(map[uint64]struct{}, len(catalog.All))
+	allowedSuperseded := make(map[uint64]struct{})
+	for _, migration := range catalog.All {
+		known[migration.Version] = struct{}{}
+		for _, version := range migration.Supersedes {
+			allowedSuperseded[version] = struct{}{}
+		}
+	}
+
+	hasKnownOpenDevHistory := false
+	for _, record := range applied {
+		if _, ok := known[record.Version]; ok && isDevVersionForMode(record.Version, open.ModeVersion) {
+			hasKnownOpenDevHistory = true
+			break
+		}
+	}
+	if !hasKnownOpenDevHistory {
+		return applied, nil
+	}
+
+	kept := make([]historyRecord, 0, len(applied))
+	removed := make([]historyRecord, 0)
+	for _, record := range applied {
+		_, isKnown := known[record.Version]
+		_, isSuperseded := allowedSuperseded[record.Version]
+		if !isKnown && !isSuperseded && isDevVersionForMode(record.Version, open.ModeVersion) {
+			removed = append(removed, record)
+			continue
+		}
+		kept = append(kept, record)
+	}
+	if len(removed) == 0 {
+		return applied, nil
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return applied, err
+	}
+	for _, record := range removed {
+		if err := r.deleteHistory(tx, record.Version); err != nil {
+			_ = tx.Rollback()
+			return applied, err
+		}
+	}
+	if len(kept) == 0 {
+		err = r.writeState(tx, nil, false)
+	} else {
+		nextVersion := highestAppliedVersion(kept)
+		err = r.writeState(tx, &nextVersion, false)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return applied, err
+	}
+	if err := tx.Commit(); err != nil {
+		return applied, err
+	}
+
+	for _, record := range removed {
+		log.Logger.Warn().
+			Uint64("version", record.Version).
+			Str("name", record.Name).
+			Str("mode", open.Name).
+			Msg("removed unknown open-development migration history")
+	}
+	return kept, nil
+}
+
+func isDevVersionForMode(version, modeVersion uint64) bool {
+	return version >= devVersionBase &&
+		version%devVersionBase != 0 &&
+		version/devVersionBase == modeVersion
+}
+
+func envEnabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 func validateAppliedHistory(catalog migrationCatalog, applied []historyRecord) error {
 	if err := validateKnownAppliedHistory(catalog, applied); err != nil {
@@ -65,6 +164,9 @@ func validateKnownAppliedHistory(catalog migrationCatalog, applied []historyReco
 			continue
 		}
 		if _, ok := allowedSuperseded[record.Version]; !ok {
+			if isArchivedDevHistory(catalog.Modes, record.Version) {
+				continue
+			}
 			return fmt.Errorf(
 				"applied migration version %d has no migration file or release directory; refusing to execute SQL",
 				record.Version,
@@ -72,6 +174,30 @@ func validateKnownAppliedHistory(catalog migrationCatalog, applied []historyReco
 		}
 	}
 	return nil
+}
+
+func isArchivedDevHistory(modes []modeMigration, version uint64) bool {
+	if version < devVersionBase || version%devVersionBase == 0 {
+		return false
+	}
+	modeVersion := version / devVersionBase
+	for _, mode := range modes {
+		if mode.ModeVersion == modeVersion && mode.Aggregate != nil && !mode.DevDirectory {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDevHistoryForMode(mode modeMigration, applied []historyRecord) bool {
+	for _, record := range applied {
+		if record.Version >= devVersionBase &&
+			record.Version%devVersionBase != 0 &&
+			record.Version/devVersionBase == mode.ModeVersion {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) applyUpMigrationAutomatic(
@@ -175,18 +301,6 @@ func (r *Runner) normalizeCanonicalHistory(
 			return applied, err
 		}
 	}
-	for _, mode := range catalog.Modes {
-		if mode.Aggregate == nil || historyContains(applied, mode.Aggregate.Version) {
-			continue
-		}
-		if len(mode.Dev) == 0 || appliedDevVersions(mode, applied) != len(mode.Dev) {
-			continue
-		}
-		applied, _, err = r.canonicalizeHistory(*mode.Aggregate, migrationVersions(mode.Dev), applied)
-		if err != nil {
-			return applied, err
-		}
-	}
 	return applied, nil
 }
 
@@ -257,11 +371,22 @@ func postAggregateDevMigrations(mode modeMigration) []migrationFile {
 	}
 	out := make([]migrationFile, 0)
 	for _, migration := range mode.Dev {
-		if migration.FileVersion > mode.Aggregate.Version {
+		if !aggregateIncludesDevMigration(mode, migration) {
 			out = append(out, migration)
 		}
 	}
 	return out
+}
+
+// aggregateIncludesDevMigration reports whether a dev migration is covered by
+// an already-applied aggregate. The aggregate version is a hard compatibility
+// cutoff because older databases may contain only the aggregate history row
+// after executing the aggregate directly or canonicalizing their dev history.
+func aggregateIncludesDevMigration(mode modeMigration, migration migrationFile) bool {
+	if mode.Aggregate == nil {
+		return false
+	}
+	return migration.FileVersion <= mode.Aggregate.Version
 }
 
 func appliedPreAggregateDevVersions(mode modeMigration, applied []historyRecord) int {
@@ -270,7 +395,7 @@ func appliedPreAggregateDevVersions(mode modeMigration, applied []historyRecord)
 	}
 	count := 0
 	for _, migration := range mode.Dev {
-		if migration.FileVersion <= mode.Aggregate.Version && historyContains(applied, migration.Version) {
+		if aggregateIncludesDevMigration(mode, migration) && historyContains(applied, migration.Version) {
 			count++
 		}
 	}

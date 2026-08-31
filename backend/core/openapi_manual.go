@@ -16,6 +16,161 @@ func manualSchemas() map[string]any {
 			prop("code", intSchema()),
 			prop("message", strSchema()),
 		),
+		"CurrentMemoryDocument": map[string]any{
+			"type": "object",
+			"additionalProperties": map[string]any{
+				"oneOf": []any{
+					map[string]any{
+						"type":     "string",
+						"nullable": true,
+					},
+					array(strSchema()),
+					refSchema("CurrentMemoryDocument"),
+				},
+			},
+		},
+		"CurrentMemoryLocalizedText": map[string]any{
+			"type":                 "object",
+			"additionalProperties": strSchema(),
+		},
+		"CurrentMemoryPresentationField": objReq(
+			[]string{"path", "labels", "summary_role"},
+			prop("path", strSchema()),
+			prop("labels", refSchema("CurrentMemoryLocalizedText")),
+			prop("summary_role", enumStringSchema("title", "subtitle", "description", "tag", "none")),
+		),
+		"CurrentMemoryPresentationSection": objReq(
+			[]string{"path", "labels", "fields"},
+			prop("path", strSchema()),
+			prop("labels", refSchema("CurrentMemoryLocalizedText")),
+			prop("fields", array(refSchema("CurrentMemoryPresentationField"))),
+		),
+		"CurrentMemoryPresentation": objReq(
+			[]string{"fallbacks", "sections"},
+			prop("fallbacks", map[string]any{
+				"type":                 "object",
+				"additionalProperties": refSchema("CurrentMemoryLocalizedText"),
+			}),
+			prop("sections", array(refSchema("CurrentMemoryPresentationSection"))),
+		),
+		"CurrentMemorySoulData": objReq(
+			[]string{"document", "template_version", "presentation", "updated_at"},
+			prop("document", refSchema("CurrentMemoryDocument")),
+			prop("template_version", intSchema()),
+			prop("presentation", refSchema("CurrentMemoryPresentation")),
+			prop("updated_at", int64Schema()),
+		),
+		"CurrentMemorySoulResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemorySoulData")),
+		),
+		"CurrentMemoryOperation": objReq(
+			[]string{"op", "path"},
+			prop("op", enumStringSchema("set", "clear", "add", "remove")),
+			prop("path", strSchema()),
+			prop("value", strSchema()),
+		),
+		"CurrentMemoryOperationsRequest": objReq(
+			[]string{"operations"},
+			prop("operations", array(refSchema("CurrentMemoryOperation"))),
+		),
+		"CurrentMemoryProfileData": objReq(
+			[]string{"document", "template_version", "presentation", "updated_at"},
+			prop("document", refSchema("CurrentMemoryDocument")),
+			prop("template_version", intSchema()),
+			prop("presentation", refSchema("CurrentMemoryPresentation")),
+			prop("updated_at", int64Schema()),
+		),
+		"CurrentMemoryProfileResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemoryProfileData")),
+		),
+		"CurrentMemoryAvatarData": objReq(
+			[]string{"kind", "content_type", "size", "updated_at"},
+			prop("kind", enumStringSchema("soul", "profile")),
+			prop("content_type", enumStringSchema("image/png", "image/jpeg", "image/webp")),
+			prop("size", int64Schema()),
+			prop("updated_at", int64Schema()),
+		),
+		"CurrentMemoryAvatarResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemoryAvatarData")),
+		),
+		"CurrentMemoryPreferenceItem": objReq(
+			[]string{"name", "summary", "created_at", "updated_at"},
+			prop("name", strSchema()),
+			prop("summary", strSchema()),
+			prop("created_at", dateTimeSchema()),
+			prop("updated_at", dateTimeSchema()),
+		),
+		"CurrentMemoryPreferenceResidentIndexUsage": objReq(
+			[]string{"used_items", "max_items", "over_limit"},
+			prop("used_items", int64Schema()),
+			prop("max_items", int64Schema()),
+			prop("over_limit", boolSchema()),
+		),
+		"CurrentMemoryReferenceSource": objReq(
+			[]string{"kind", "conversation_id"},
+			prop("kind", enumStringSchema("memory_review", "chat_explicit")),
+			prop("conversation_id", strSchema()),
+		),
+		"CurrentMemoryReference": objReq(
+			[]string{"name", "summary", "created_at", "updated_at", "source", "application_scenarios", "preference_details", "reason"},
+			prop("name", strSchema()),
+			prop("summary", strSchema()),
+			prop("created_at", dateTimeSchema()),
+			prop("updated_at", dateTimeSchema()),
+			prop("source", refSchema("CurrentMemoryReferenceSource")),
+			prop("application_scenarios", strSchema()),
+			prop("preference_details", strSchema()),
+			prop("reason", strSchema()),
+		),
+		"CurrentMemoryPreferenceListData": objReq(
+			[]string{"items", "total_size", "resident_index_usage", "etag", "updated_at"},
+			prop("items", array(refSchema("CurrentMemoryPreferenceItem"))),
+			prop("total_size", int64Schema()),
+			prop("resident_index_usage", refSchema("CurrentMemoryPreferenceResidentIndexUsage")),
+			prop("etag", strSchema()),
+			prop("updated_at", int64Schema()),
+		),
+		"CurrentMemoryPreferenceListResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemoryPreferenceListData")),
+		),
+		"CurrentMemoryPreferenceDetailData": objReq(
+			[]string{"item", "reference_status", "reference"},
+			prop("item", refSchema("CurrentMemoryPreferenceItem")),
+			prop("reference_status", enumStringSchema("available", "missing")),
+			prop("reference", nullableSchema(refSchema("CurrentMemoryReference"))),
+		),
+		"CurrentMemoryPreferenceDetailResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemoryPreferenceDetailData")),
+		),
+		"CurrentMemoryPreferenceOrderRequest": objReq(
+			[]string{"ordered_names", "expected_etag"},
+			prop("ordered_names", array(strSchema())),
+			prop("expected_etag", strSchema()),
+		),
+		"CurrentMemoryConflictData": obj(
+			prop("current_etag", strSchema()),
+		),
+		"CurrentMemoryErrorResponse": objReq(
+			[]string{"code", "message"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("CurrentMemoryConflictData")),
+		),
 		"Algo": obj(
 			prop("algo_id", strSchema()),
 			prop("description", strSchema()),
@@ -50,6 +205,7 @@ func manualSchemas() map[string]any {
 			prop("tags", array(strSchema())),
 			prop("default_dataset", boolSchema()),
 			prop("created_by_data_source", boolSchema()),
+			prop("source_type", strSchema()),
 		),
 		"ListAlgosResponse":      obj(prop("algos", array(refSchema("Algo")))),
 		"AllDatasetTagsResponse": obj(prop("tags", array(strSchema()))),
@@ -256,27 +412,95 @@ func manualSchemas() map[string]any {
 			prop("status", strSchema()),
 			prop("error_message", strSchema()),
 		),
-		"ListTasksResponse":               obj(prop("tasks", array(refSchema("TaskResponse"))), prop("total_size", intSchema()), prop("next_page_token", strSchema())),
-		"PromptRequest":                   objReq([]string{"display_name", "content"}, prop("display_name", strSchema()), prop("content", strSchema()), prop("category", strSchema())),
-		"PromptPatchRequest":              obj(prop("display_name", strSchema()), prop("content", strSchema()), prop("category", strSchema())),
-		"PromptCategoryRequest":           objReq([]string{"name"}, prop("name", strSchema())),
-		"PromptCategory":                  objReq([]string{"id", "name"}, prop("id", strSchema()), prop("name", strSchema())),
-		"PromptCategoryListResponse":      obj(prop("categories", array(refSchema("PromptCategory")))),
-		"PromptPolishRequest":             objReq([]string{"content", "user_instruct"}, prop("content", strSchema()), prop("user_instruct", strSchema())),
-		"PromptPolishResponse":            obj(prop("content", strSchema())),
-		"PromptItem":                      obj(prop("name", strSchema()), prop("id", strSchema()), prop("content", strSchema()), prop("display_name", strSchema()), prop("category", strSchema()), prop("source", strSchema()), prop("is_favorite", boolSchema()), prop("usage_count", int64Schema()), prop("last_used_at", strSchema()), prop("created_at", strSchema()), prop("updated_at", strSchema())),
-		"PromptFacets":                    obj(prop("scopes", obj()), prop("categories", obj()), prop("category_total", int64Schema())),
-		"PromptListResponse":              obj(prop("prompts", array(refSchema("PromptItem"))), prop("custom_categories", array(refSchema("PromptCategory"))), prop("next_page_token", strSchema()), prop("total", int64Schema()), prop("facets", refSchema("PromptFacets"))),
-		"PromptStateResponse":             obj(prop("id", strSchema()), prop("is_favorite", boolSchema()), prop("usage_count", int64Schema()), prop("last_used_at", strSchema())),
-		"ToolMethod":                      obj(prop("name", strSchema()), prop("summary", strSchema())),
-		"ToolGroup":                       obj(prop("name", strSchema()), prop("label", strSchema()), prop("description", strSchema()), prop("methods", array(refSchema("ToolMethod"))), prop("can_disable", boolSchema()), prop("active", boolSchema()), prop("disabled", boolSchema())),
-		"ToolListResponse":                obj(prop("tool_groups", array(refSchema("ToolGroup"))), prop("page", intSchema()), prop("page_size", intSchema()), prop("total", intSchema())),
-		"ToolStateResponse":               obj(prop("name", strSchema()), prop("disabled", boolSchema())),
-		"ConversationResumeRequest":       objReq([]string{"conversation_id"}, prop("conversation_id", strSchema()), prop("history_id", strSchema())),
-		"ConversationStopRequest":         objReq([]string{"conversation_id"}, prop("conversation_id", strSchema()), prop("history_id", strSchema())),
-		"ConversationSetHistoryRequest":   objReq([]string{"set_history_id", "deleted_history_id"}, prop("set_history_id", strSchema()), prop("deleted_history_id", strSchema())),
-		"ConversationBatchDeleteRequest":  objReq([]string{"conversation_ids"}, prop("conversation_ids", array(strSchema()))),
-		"ConversationBatchDeleteResponse": obj(prop("deleted_count", intSchema()), prop("deleted_ids", array(strSchema()))),
+		"ListTasksResponse":                obj(prop("tasks", array(refSchema("TaskResponse"))), prop("total_size", intSchema()), prop("next_page_token", strSchema())),
+		"PromptRequest":                    objReq([]string{"display_name", "content"}, prop("display_name", strSchema()), prop("content", strSchema()), prop("category", strSchema())),
+		"PromptPatchRequest":               obj(prop("display_name", strSchema()), prop("content", strSchema()), prop("category", strSchema())),
+		"PromptCategoryRequest":            objReq([]string{"name"}, prop("name", strSchema())),
+		"PromptCategory":                   objReq([]string{"id", "name"}, prop("id", strSchema()), prop("name", strSchema())),
+		"PromptCategoryListResponse":       obj(prop("categories", array(refSchema("PromptCategory")))),
+		"PromptPolishRequest":              objReq([]string{"content", "user_instruct"}, prop("content", strSchema()), prop("user_instruct", strSchema()), prop("allow_empty", boolSchema())),
+		"PromptPolishResponse":             obj(prop("content", strSchema())),
+		"PromptItem":                       obj(prop("name", strSchema()), prop("id", strSchema()), prop("content", strSchema()), prop("display_name", strSchema()), prop("category", strSchema()), prop("source", strSchema()), prop("is_favorite", boolSchema()), prop("usage_count", int64Schema()), prop("last_used_at", strSchema()), prop("created_at", strSchema()), prop("updated_at", strSchema())),
+		"PromptFacets":                     obj(prop("scopes", obj()), prop("categories", obj()), prop("category_total", int64Schema())),
+		"PromptListResponse":               obj(prop("prompts", array(refSchema("PromptItem"))), prop("custom_categories", array(refSchema("PromptCategory"))), prop("next_page_token", strSchema()), prop("total", int64Schema()), prop("facets", refSchema("PromptFacets"))),
+		"PromptStateResponse":              obj(prop("id", strSchema()), prop("is_favorite", boolSchema()), prop("usage_count", int64Schema()), prop("last_used_at", strSchema())),
+		"ToolMethod":                       obj(prop("name", strSchema()), prop("summary", strSchema())),
+		"ToolGroup":                        obj(prop("name", strSchema()), prop("label", strSchema()), prop("description", strSchema()), prop("methods", array(refSchema("ToolMethod"))), prop("can_disable", boolSchema()), prop("active", boolSchema()), prop("disabled", boolSchema())),
+		"ToolListResponse":                 obj(prop("tool_groups", array(refSchema("ToolGroup"))), prop("page", intSchema()), prop("page_size", intSchema()), prop("total", intSchema())),
+		"ToolStateResponse":                obj(prop("name", strSchema()), prop("disabled", boolSchema())),
+		"ConversationResumeRequest":        objReq([]string{"conversation_id"}, prop("conversation_id", strSchema()), prop("history_id", strSchema())),
+		"ConversationStopRequest":          objReq([]string{"conversation_id"}, prop("conversation_id", strSchema()), prop("history_id", strSchema())),
+		"ConversationSetHistoryRequest":    objReq([]string{"set_history_id", "deleted_history_id"}, prop("set_history_id", strSchema()), prop("deleted_history_id", strSchema())),
+		"ConversationBatchDeleteRequest":   objReq([]string{"conversation_ids"}, prop("conversation_ids", array(strSchema()))),
+		"ConversationBatchDeleteResponse":  obj(prop("deleted_count", intSchema()), prop("deleted_ids", array(strSchema()))),
+		"ConversationArchiveFolderRequest": objReq([]string{"name"}, prop("name", strSchema())),
+		"ConversationArchiveRequest":       obj(prop("folder_id", nullableSchema(strSchema()))),
+		"ConversationArchiveFolder": objReq(
+			[]string{"id", "name", "dialog_count", "task_count", "total_count", "created_at", "updated_at"},
+			prop("id", strSchema()), prop("name", strSchema()),
+			prop("dialog_count", int64Schema()), prop("task_count", int64Schema()), prop("total_count", int64Schema()),
+			prop("created_at", dateTimeSchema()), prop("updated_at", dateTimeSchema()),
+		),
+		"ConversationArchiveFolderListResponse": objReq(
+			[]string{"folders", "unfiled_dialog_count", "unfiled_task_count", "unfiled_total_count"},
+			prop("folders", array(refSchema("ConversationArchiveFolder"))),
+			prop("unfiled_dialog_count", int64Schema()), prop("unfiled_task_count", int64Schema()), prop("unfiled_total_count", int64Schema()),
+		),
+		"ConversationArchiveFolderCreateResponse": objReq([]string{"folder"}, prop("folder", refSchema("ConversationArchiveFolder"))),
+		"ConversationArchiveFolderDeleteResponse": objReq([]string{"moved_count"}, prop("moved_count", int64Schema())),
+		"ConversationRecoveryItem": objReq(
+			[]string{"conversation_id", "display_name", "kind", "create_time", "update_time"},
+			prop("conversation_id", strSchema()), prop("display_name", strSchema()),
+			prop("kind", enumStringSchema("dialog", "task")), prop("folder_id", nullableSchema(strSchema())),
+			prop("archive_folder_name", strSchema()), prop("create_time", dateTimeSchema()), prop("update_time", dateTimeSchema()),
+			prop("archived_at", dateTimeSchema()), prop("deleted_at", dateTimeSchema()), prop("trash_expires_at", dateTimeSchema()),
+		),
+		"ConversationRecoveryListResponse": objReq(
+			[]string{"items", "total", "page", "page_size"},
+			prop("items", array(refSchema("ConversationRecoveryItem"))), prop("total", int64Schema()),
+			prop("page", intSchema()), prop("page_size", intSchema()),
+		),
+		"RecoveryDeleteCountResponse": obj(prop("deleted_count", intSchema())),
+		"WorkflowTrashItem": objReq(
+			[]string{"id", "name", "deleted_at", "trash_expires_at", "updated_at"},
+			prop("id", strSchema()), prop("name", strSchema()), prop("workflow_id", strSchema()),
+			prop("published_workflow_ref", strSchema()), prop("published_status_before_trash", strSchema()),
+			prop("deleted_at", dateTimeSchema()), prop("trash_expires_at", dateTimeSchema()), prop("updated_at", dateTimeSchema()),
+		),
+		"WorkflowTrashListData": objReq(
+			[]string{"records", "total", "page", "page_size"}, prop("records", array(refSchema("WorkflowTrashItem"))),
+			prop("total", int64Schema()), prop("page", intSchema()), prop("page_size", intSchema()),
+		),
+		"WorkflowTrashListResponse": objReq(
+			[]string{"code", "message", "data"}, prop("code", intSchema()), prop("message", strSchema()), prop("data", refSchema("WorkflowTrashListData")),
+		),
+		"CoreEmptyResponse":      objReq([]string{"code", "message"}, prop("code", intSchema()), prop("message", strSchema())),
+		"WorkflowTrashEmptyData": obj(prop("purged", intSchema())),
+		"WorkflowTrashEmptyResponse": objReq(
+			[]string{"code", "message", "data"}, prop("code", intSchema()), prop("message", strSchema()), prop("data", refSchema("WorkflowTrashEmptyData")),
+		),
+		"TaskCenterStepInfo": objReq(
+			[]string{"step_id", "status"}, prop("step_id", strSchema()), prop("title", strSchema()),
+			prop("status", strSchema()), prop("current_phase", strSchema()), prop("summary", strSchema()), prop("artifact", strSchema()),
+		),
+		"TaskCenterTaskResponse": objReq(
+			[]string{"id", "user_id", "conversation_id", "conversation_state", "task_type", "status", "steps", "created_at", "updated_at"},
+			prop("id", strSchema()), prop("user_id", strSchema()), prop("conversation_id", strSchema()),
+			prop("conversation_state", enumStringSchema("active", "archived", "trash", "missing")), prop("conversation_title", strSchema()),
+			prop("workflow_session_id", strSchema()), prop("task_type", strSchema()), prop("title", strSchema()), prop("status", strSchema()),
+			prop("schedule_id", strSchema()), prop("schedule_name", strSchema()), prop("steps", array(refSchema("TaskCenterStepInfo"))),
+			prop("progress", obj()), prop("created_at", dateTimeSchema()), prop("updated_at", dateTimeSchema()),
+			prop("finished_at", dateTimeSchema()), prop("waiting_reason", strSchema()),
+		),
+		"TaskCenterStatusCounts": obj(
+			prop("all", int64Schema()), prop("pending", int64Schema()), prop("waiting", int64Schema()),
+			prop("waiting_inputs", int64Schema()), prop("running", int64Schema()), prop("succeeded", int64Schema()),
+			prop("failed", int64Schema()), prop("canceled", int64Schema()),
+		),
+		"TaskCenterTaskListResponse": objReq(
+			[]string{"items", "total", "page", "page_size"}, prop("items", array(refSchema("TaskCenterTaskResponse"))),
+			prop("total", int64Schema()), prop("page", intSchema()), prop("page_size", intSchema()), prop("status_counts", refSchema("TaskCenterStatusCounts")),
+		),
 		"ConversationFeedbackRequest": objReq(
 			[]string{"history_id", "type"},
 			prop("history_id", strSchema()),
@@ -288,37 +512,114 @@ func manualSchemas() map[string]any {
 		"ConversationSwitchStatusResponse": obj(prop("status", intSchema())),
 		"ConversationChatStatusResponse":   obj(prop("is_generating", boolSchema())),
 		"ConversationItem": obj(
-			prop("name", strSchema()), prop("conversation_id", strSchema()), prop("display_name", strSchema()), prop("search_config", obj()), prop("user", strSchema()), prop("chat_times", int64Schema()), prop("total_feedback_like", int64Schema()), prop("total_feedback_unlike", int64Schema()), prop("create_time", strSchema()), prop("update_time", strSchema()), prop("models", array(strSchema())),
+			prop("name", strSchema()), prop("conversation_id", strSchema()), prop("display_name", strSchema()), prop("search_config", obj()), prop("user", strSchema()), prop("chat_times", int64Schema()), prop("total_feedback_like", int64Schema()), prop("total_feedback_unlike", int64Schema()), prop("create_time", strSchema()), prop("update_time", strSchema()), prop("pinned_at", nullableSchema(dateTimeSchema())), prop("is_pinned", boolSchema()), prop("models", array(strSchema())), prop("chat_executor", enumStringSchema("lazymind", "codex", "cursor", "workbuddy")), prop("thinking_depth", enumStringSchema("low", "medium", "high", "max")), prop("assistant", enumStringSchema("lazymind", "codex", "cursor", "workbuddy")), prop("project_key", strSchema()), prop("project_name", strSchema()),
+		),
+		"ConversationPinResponse": objReq(
+			[]string{"conversation_id", "is_pinned"},
+			prop("conversation_id", strSchema()), prop("is_pinned", boolSchema()), prop("pinned_at", nullableSchema(dateTimeSchema())),
+		),
+		"ExternalExecutionInvocation": obj(
+			prop("total", intSchema()), prop("running", intSchema()), prop("succeeded", intSchema()),
+			prop("failed", intSchema()), prop("interrupted", intSchema()), prop("tools", array(strSchema())),
+		),
+		"ExternalExecutionWorkflow": obj(
+			prop("session_id", strSchema()), prop("workflow_id", strSchema()), prop("status", strSchema()),
+			prop("current_step_id", strSchema()), prop("state_version", int64Schema()),
+			prop("artifact_count", int64Schema()), prop("artifact_revision_count", int64Schema()),
+		),
+		"ExternalExecutionProjection": obj(
+			prop("run_id", strSchema()), prop("history_id", strSchema()), prop("provider", strSchema()),
+			prop("status", enumStringSchema("pending", "running", "completed", "failed", "stopped")),
+			prop("host_id", strSchema()), prop("host_online", boolSchema()), prop("claim_count", intSchema()),
+			prop("recovery_count", intSchema()), prop("event_count", int64Schema()),
+			prop("invocation", refSchema("ExternalExecutionInvocation")),
+			prop("workflows", array(refSchema("ExternalExecutionWorkflow"))),
+			prop("artifact_count", int64Schema()), prop("artifact_revision_count", int64Schema()),
+			prop("error_message", strSchema()), prop("claimed_at", dateTimeSchema()),
+			prop("last_heartbeat_at", dateTimeSchema()), prop("completed_at", dateTimeSchema()),
+			prop("created_at", dateTimeSchema()), prop("updated_at", dateTimeSchema()),
 		),
 		"ConversationHistoryItem": obj(
-			prop("seq", intSchema()), prop("query", strSchema()), prop("result", strSchema()), prop("id", strSchema()), prop("feed_back", intSchema()), prop("sources", array(obj())), prop("input", array(obj())), prop("reasoning_content", strSchema()), prop("thinking_time_s", int64Schema()), prop("reason", strSchema()), prop("expected_answer", strSchema()), prop("create_time", strSchema()),
+			prop("seq", intSchema()), prop("query", strSchema()), prop("result", strSchema()), prop("id", strSchema()), prop("feed_back", intSchema()), prop("sources", array(obj())), prop("input", array(obj())), prop("reasoning_content", strSchema()), prop("thinking_time_s", int64Schema()), prop("reason", strSchema()), prop("expected_answer", strSchema()), prop("create_time", strSchema()), prop("run_id", strSchema()), prop("run_status", strSchema()), prop("run_terminal", refSchema("RunTerminal")), prop("execution", refSchema("ExternalExecutionProjection")),
 		),
 		"ConversationDetailResponse":      obj(prop("conversation", refSchema("ConversationItem"))),
 		"ConversationHistoryListResponse": obj(prop("conversation_id", strSchema()), prop("name", strSchema()), prop("history", array(refSchema("ConversationHistoryItem"))), prop("total_size", int64Schema()), prop("next_page_token", strSchema())),
-		"ConversationListResponse":        obj(prop("conversations", array(refSchema("ConversationItem"))), prop("total_size", int64Schema()), prop("next_page_token", strSchema())),
-		"SetChatHistoryResponse":          obj(prop("history_id", strSchema())),
-		"ChatChunkResponse":               obj(prop("conversation_id", strSchema()), prop("seq", intSchema()), prop("message", strSchema()), prop("delta", strSchema()), prop("finish_reason", strSchema()), prop("history_id", strSchema()), prop("sources", array(obj())), prop("prompt_questions", array(strSchema())), prop("reasoning_content", strSchema()), prop("thinking_duration_s", int64Schema())),
-		"ACLApiResponse":                  obj(prop("code", intSchema()), prop("message", strSchema()), prop("data", obj())),
-		"AddACLRequest":                   objReq([]string{"grantee_type", "grantee_id", "permission"}, prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema()), prop("expires_at", dateTimeSchema())),
-		"UpdateACLRequest":                objReq([]string{"permission"}, prop("permission", strSchema()), prop("expires_at", dateTimeSchema())),
-		"BatchAddACLItem":                 objReq([]string{"grantee_type", "grantee_id", "permission"}, prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema())),
-		"BatchAddACLRequest":              objReq([]string{"items"}, prop("items", array(refSchema("BatchAddACLItem")))),
-		"PermissionBatchRequest":          objReq([]string{"kb_ids"}, prop("kb_ids", array(strSchema()))),
-		"ACLListItem":                     obj(prop("id", int64Schema()), prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema()), prop("created_at", dateTimeSchema())),
-		"ACLListData":                     obj(prop("list", array(refSchema("ACLListItem")))),
-		"AddACLData":                      obj(prop("acl_id", int64Schema())),
-		"BatchAddACLData":                 obj(prop("count", intSchema()), prop("invalid_count", intSchema()), prop("failed_count", intSchema())),
-		"PermissionResult":                obj(prop("permissions", array(strSchema())), prop("source", strSchema())),
-		"PermissionBatchItem":             obj(prop("kb_id", strSchema()), prop("permissions", array(strSchema()))),
-		"CanResult":                       obj(prop("allowed", boolSchema())),
-		"KBListRow":                       obj(prop("id", strSchema()), prop("name", strSchema()), prop("visibility", strSchema()), prop("permissions", array(strSchema()))),
-		"KBListResult":                    obj(prop("total", int64Schema()), prop("list", array(refSchema("KBListRow")))),
-		"AuthorizationSubjectGrant":       obj(prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permissions", array(strSchema()))),
-		"GetKBAuthorizationResponse":      obj(prop("kb_id", strSchema()), prop("grants", array(refSchema("AuthorizationSubjectGrant")))),
-		"SetKBAuthorizationRequest":       obj(prop("grants", array(refSchema("AuthorizationSubjectGrant")))),
-		"SetKBAuthorizationData":          obj(prop("kb_id", strSchema()), prop("subject_count", intSchema()), prop("acl_rows", intSchema())),
-		"GrantPrincipal":                  obj(prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("name", strSchema())),
-		"ListGrantPrincipalsResponse":     obj(prop("users", array(refSchema("GrantPrincipal"))), prop("groups", array(refSchema("GrantPrincipal")))),
+		"ConversationTrailItem": obj(
+			prop("history_id", strSchema()), prop("seq", intSchema()), prop("summary", strSchema()), prop("question", strSchema()), prop("depth", intSchema()), prop("parent_history_id", strSchema()), prop("source", strSchema()), prop("create_time", strSchema()),
+		),
+		"ConversationTrailListResponse": obj(prop("conversation_id", strSchema()), prop("name", strSchema()), prop("items", array(refSchema("ConversationTrailItem"))), prop("total_size", int64Schema()), prop("next_page_token", strSchema())),
+		"ConversationListResponse":      obj(prop("conversations", array(refSchema("ConversationItem"))), prop("total_size", int64Schema()), prop("next_page_token", strSchema())),
+		"EpisodeMemory": objReq(
+			[]string{
+				"id",
+				"conversation_id",
+				"source_kind",
+				"episode_type",
+				"summary",
+				"occurred_at_ms",
+				"recorded_at_ms",
+				"hit_count",
+			},
+			prop("id", strSchema()),
+			prop("conversation_id", strSchema()),
+			prop("source_kind", enumStringSchema("chat_explicit", "memory_review")),
+			prop("episode_type", enumStringSchema("decision", "progress", "result", "blocker", "event")),
+			prop("summary", strSchema()),
+			prop("occurred_at_ms", int64Schema()),
+			prop("recorded_at_ms", int64Schema()),
+			prop("hit_count", int64Schema()),
+		),
+		"EpisodeMemoryListData": objReq(
+			[]string{"items", "total_size", "next_page_token"},
+			prop("items", array(refSchema("EpisodeMemory"))),
+			prop("total_size", int64Schema()),
+			prop("next_page_token", strSchema()),
+		),
+		"EpisodeMemoryListResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("EpisodeMemoryListData")),
+		),
+		"EpisodeMemoryDetailResponse": objReq(
+			[]string{"code", "message", "data"},
+			prop("code", intSchema()),
+			prop("message", strSchema()),
+			prop("data", refSchema("EpisodeMemory")),
+		),
+		"SetChatHistoryResponse": obj(prop("history_id", strSchema())),
+		"RunTerminal": objReq(
+			[]string{"status", "reason", "partial_output"},
+			prop("status", enumStringSchema("completed", "interrupted", "failed", "cancelled")),
+			prop("reason", enumStringSchema("normal", "awaiting_user_input", "model_incomplete", "model_failure", "runtime_failure", "user_cancelled")),
+			prop("code", strSchema()),
+			prop("partial_output", boolSchema()),
+			prop("model_call_id", strSchema()),
+			prop("diagnostic_id", strSchema()),
+		),
+		"ChatRuntimeEvent":            obj(prop("schema_version", intSchema()), prop("event_id", strSchema()), prop("run_id", strSchema()), prop("type", strSchema()), prop("data", obj())),
+		"ChatChunkResponse":           obj(prop("conversation_id", strSchema()), prop("seq", intSchema()), prop("message", strSchema()), prop("delta", strSchema()), prop("delta_mode", enumStringSchema("append", "replace")), prop("history_id", strSchema()), prop("sources", array(obj())), prop("prompt_questions", array(strSchema())), prop("reasoning_content", strSchema()), prop("thinking_duration_s", int64Schema()), prop("runtime_event", refSchema("ChatRuntimeEvent")), prop("execution", refSchema("ExternalExecutionProjection"))),
+		"ACLApiResponse":              obj(prop("code", intSchema()), prop("message", strSchema()), prop("data", obj())),
+		"AddACLRequest":               objReq([]string{"grantee_type", "grantee_id", "permission"}, prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema()), prop("expires_at", dateTimeSchema())),
+		"UpdateACLRequest":            objReq([]string{"permission"}, prop("permission", strSchema()), prop("expires_at", dateTimeSchema())),
+		"BatchAddACLItem":             objReq([]string{"grantee_type", "grantee_id", "permission"}, prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema())),
+		"BatchAddACLRequest":          objReq([]string{"items"}, prop("items", array(refSchema("BatchAddACLItem")))),
+		"PermissionBatchRequest":      objReq([]string{"kb_ids"}, prop("kb_ids", array(strSchema()))),
+		"ACLListItem":                 obj(prop("id", int64Schema()), prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permission", strSchema()), prop("created_at", dateTimeSchema())),
+		"ACLListData":                 obj(prop("list", array(refSchema("ACLListItem")))),
+		"AddACLData":                  obj(prop("acl_id", int64Schema())),
+		"BatchAddACLData":             obj(prop("count", intSchema()), prop("invalid_count", intSchema()), prop("failed_count", intSchema())),
+		"PermissionResult":            obj(prop("permissions", array(strSchema())), prop("source", strSchema())),
+		"PermissionBatchItem":         obj(prop("kb_id", strSchema()), prop("permissions", array(strSchema()))),
+		"CanResult":                   obj(prop("allowed", boolSchema())),
+		"KBListRow":                   obj(prop("id", strSchema()), prop("name", strSchema()), prop("visibility", strSchema()), prop("permissions", array(strSchema()))),
+		"KBListResult":                obj(prop("total", int64Schema()), prop("list", array(refSchema("KBListRow")))),
+		"AuthorizationSubjectGrant":   obj(prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("permissions", array(strSchema()))),
+		"GetKBAuthorizationResponse":  obj(prop("kb_id", strSchema()), prop("grants", array(refSchema("AuthorizationSubjectGrant")))),
+		"SetKBAuthorizationRequest":   obj(prop("grants", array(refSchema("AuthorizationSubjectGrant")))),
+		"SetKBAuthorizationData":      obj(prop("kb_id", strSchema()), prop("subject_count", intSchema()), prop("acl_rows", intSchema())),
+		"GrantPrincipal":              obj(prop("grantee_type", strSchema()), prop("grantee_id", strSchema()), prop("name", strSchema())),
+		"ListGrantPrincipalsResponse": obj(prop("users", array(refSchema("GrantPrincipal"))), prop("groups", array(refSchema("GrantPrincipal")))),
 	}
 }
 
@@ -434,7 +735,232 @@ func manualPaths() map[string]any {
 			nil,
 			response(200, "Chat history page ordered by seq descending; may include in-flight turns from Redis", refSchema("ConversationHistoryListResponse")),
 		)},
-		"/conversations":                     map[string]any{"get": op("Conversation list", queryParams(param("query", "keyword", false, strSchema()), param("query", "page_size", false, intSchema()), param("query", "page_token", false, strSchema())), nil, response(200, "Conversation list", refSchema("ConversationListResponse")))},
+		"/conversations/{name}:trail": map[string]any{"get": op(
+			"List conversation trail metadata (paginated)",
+			conversationTrailListParams(),
+			nil,
+			response(200, "Conversation navigation metadata ordered by seq ascending", refSchema("ConversationTrailListResponse")),
+		)},
+		"/conversation-archive-folders": map[string]any{
+			"get": op("List conversation archive folders", nil, nil, response(200, "Archive folders", refSchema("ConversationArchiveFolderListResponse"))),
+			"post": map[string]any{
+				"summary": "Create a conversation archive folder", "requestBody": jsonBody(refSchema("ConversationArchiveFolderRequest"), true),
+				"responses": map[string]any{"201": response(201, "Archive folder created", refSchema("ConversationArchiveFolderCreateResponse"))},
+			},
+		},
+		"/conversation-archive-folders/{folder_id}": map[string]any{
+			"patch": op(
+				"Rename a conversation archive folder",
+				queryParams(param("path", "folder_id", true, strSchema())),
+				jsonBody(refSchema("ConversationArchiveFolderRequest"), true),
+				response(200, "Archive folder renamed", refSchema("EmptyObject")),
+			),
+			"delete": op(
+				"Delete a conversation archive folder",
+				queryParams(
+					param("path", "folder_id", true, strSchema()),
+					param("query", "move_to_folder_id", false, strSchema()),
+				),
+				nil,
+				response(200, "Archive folder deleted", refSchema("ConversationArchiveFolderDeleteResponse")),
+			),
+		},
+		"/conversations:archived": map[string]any{"get": op(
+			"List archived conversations", recoveryListParams(true), nil,
+			response(200, "Archived conversation page", refSchema("ConversationRecoveryListResponse")),
+		)},
+		"/conversations:trash": map[string]any{
+			"get":    op("List trashed conversations", recoveryListParams(false), nil, response(200, "Conversation trash page", refSchema("ConversationRecoveryListResponse"))),
+			"delete": op("Empty conversation trash for one kind", queryParams(param("query", "kind", true, enumStringSchema("dialog", "task"))), nil, response(200, "Conversation trash emptied", refSchema("RecoveryDeleteCountResponse"))),
+		},
+		"/conversations/{conversation_id}:archive": map[string]any{"post": op(
+			"Archive or move a conversation", queryParams(param("path", "conversation_id", true, strSchema())), jsonBody(refSchema("ConversationArchiveRequest"), true),
+			response(200, "Conversation archived", refSchema("EmptyObject")),
+		)},
+		"/conversations/{conversation_id}:unarchive": map[string]any{"post": op(
+			"Unarchive a conversation", queryParams(param("path", "conversation_id", true, strSchema())), nil, response(200, "Conversation unarchived", refSchema("EmptyObject")),
+		)},
+		"/conversations/{conversation_id}:pin": map[string]any{"post": op(
+			"Pin a conversation", queryParams(param("path", "conversation_id", true, strSchema())), nil, response(200, "Conversation pinned", refSchema("ConversationPinResponse")),
+		)},
+		"/conversations/{conversation_id}:unpin": map[string]any{"post": op(
+			"Unpin a conversation", queryParams(param("path", "conversation_id", true, strSchema())), nil, response(200, "Conversation unpinned", refSchema("ConversationPinResponse")),
+		)},
+		"/conversations/{conversation_id}:restore": map[string]any{"post": op(
+			"Restore a trashed conversation", queryParams(param("path", "conversation_id", true, strSchema())), nil, response(200, "Conversation restored", refSchema("EmptyObject")),
+		)},
+		"/conversations/{conversation_id}:purge": map[string]any{"delete": op(
+			"Permanently delete a trashed conversation", queryParams(param("path", "conversation_id", true, strSchema())), nil, response(200, "Conversation permanently deleted", refSchema("EmptyObject")),
+		)},
+		"/workflow-drafts:trash": map[string]any{
+			"get":    op("List workflow draft trash", recoveryPageParams(), nil, response(200, "Workflow trash page", refSchema("WorkflowTrashListResponse"))),
+			"delete": op("Empty workflow draft trash", nil, nil, response(200, "Workflow trash emptied", refSchema("WorkflowTrashEmptyResponse"))),
+		},
+		"/workflow-drafts/{draft_id}:restore": map[string]any{"post": op(
+			"Restore a workflow draft", queryParams(param("path", "draft_id", true, strSchema())), nil, response(200, "Workflow restored", refSchema("CoreEmptyResponse")),
+		)},
+		"/workflow-drafts/{draft_id}:purge": map[string]any{"delete": op(
+			"Permanently delete a workflow draft", queryParams(param("path", "draft_id", true, strSchema())), nil, response(200, "Workflow permanently deleted", refSchema("CoreEmptyResponse")),
+		)},
+		"/task-center/tasks": map[string]any{"get": op(
+			"List task-center tasks", queryParams(
+				param("query", "status", false, strSchema()), param("query", "task_type", false, strSchema()),
+				param("query", "keyword", false, strSchema()), param("query", "page", false, intSchema()), param("query", "page_size", false, intSchema()),
+			), nil, response(200, "Task-center task page", refSchema("TaskCenterTaskListResponse")),
+		)},
+		"/task-center/tasks/{task_id}": map[string]any{"get": op(
+			"Get a task-center task", queryParams(param("path", "task_id", true, strSchema())), nil,
+			response(200, "Task-center task", refSchema("TaskCenterTaskResponse")),
+		)},
+		"/task-center/schedules/{schedule_id}/tasks": map[string]any{"get": op(
+			"List tasks for a schedule", queryParams(
+				param("path", "schedule_id", true, strSchema()), param("query", "page", false, intSchema()), param("query", "page_size", false, intSchema()),
+			), nil, response(200, "Schedule task page", refSchema("TaskCenterTaskListResponse")),
+		)},
+		"/conversations": map[string]any{"get": op("Conversation list", queryParams(param("query", "keyword", false, strSchema()), param("query", "assistant", false, enumStringSchema("lazymind", "codex", "cursor", "workbuddy")), param("query", "page_size", false, intSchema()), param("query", "page_token", false, strSchema())), nil, response(200, "Conversation list", refSchema("ConversationListResponse")))},
+		"/memory/soul": map[string]any{
+			"get": map[string]any{
+				"summary": "Get current user's Soul memory",
+				"responses": map[string]any{
+					"200": response(200, "Current Soul document", refSchema("CurrentMemorySoulResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Soul document is missing", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Soul document is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+			"patch": map[string]any{
+				"summary":     "Apply operations to current user's Soul memory",
+				"description": "Applies an atomic batch of set operations. Core migrates legacy content and retries an internal content compare-and-swap up to three times.",
+				"requestBody": jsonBody(refSchema("CurrentMemoryOperationsRequest"), true),
+				"responses": map[string]any{
+					"200": response(200, "Updated Soul document", refSchema("CurrentMemorySoulResponse")),
+					"400": response(400, "Invalid partial Soul document", refSchema("CurrentMemoryErrorResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Soul document is missing", refSchema("CurrentMemoryErrorResponse")),
+					"409": response(409, "Soul document kept changing during the update", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Soul document is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+		},
+		"/memory/profile": map[string]any{
+			"get": map[string]any{
+				"summary": "Get current user's Profile memory",
+				"responses": map[string]any{
+					"200": response(200, "Current Profile document", refSchema("CurrentMemoryProfileResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Profile document is missing", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Profile document is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+			"patch": map[string]any{
+				"summary":     "Apply operations to current user's Profile memory",
+				"description": "Applies an atomic batch. Scalar fields accept set/clear; list fields accept add/remove/clear.",
+				"requestBody": jsonBody(refSchema("CurrentMemoryOperationsRequest"), true),
+				"responses": map[string]any{
+					"200": response(200, "Updated Profile document", refSchema("CurrentMemoryProfileResponse")),
+					"400": response(400, "Invalid partial Profile document", refSchema("CurrentMemoryErrorResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Profile document is missing", refSchema("CurrentMemoryErrorResponse")),
+					"409": response(409, "Profile document kept changing during the update", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Profile document is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+		},
+		"/memory/soul/avatar":    currentMemoryAvatarPath("Soul"),
+		"/memory/profile/avatar": currentMemoryAvatarPath("Profile"),
+		"/memory/preferences": map[string]any{
+			"get": map[string]any{
+				"summary": "List current user's Preference memory",
+				"responses": map[string]any{
+					"200": response(200, "Current ordered Preference items", refSchema("CurrentMemoryPreferenceListResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Preference index is missing", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Preference index is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+		},
+		"/memory/preferences:order": map[string]any{
+			"put": map[string]any{
+				"summary":     "Replace the order of current user's Preference items",
+				"description": "ordered_names must be an exact, unnormalized permutation of every current Preference name. expected_etag must equal the list response etag.",
+				"requestBody": jsonBody(refSchema("CurrentMemoryPreferenceOrderRequest"), true),
+				"responses": map[string]any{
+					"200": response(200, "Reordered Preference items", refSchema("CurrentMemoryPreferenceListResponse")),
+					"400": response(400, "ordered_names is not an exact permutation", refSchema("CurrentMemoryErrorResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Preference index is missing", refSchema("CurrentMemoryErrorResponse")),
+					"409": response(409, "Preference etag conflict; data.current_etag contains the latest etag", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Preference index is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+		},
+		"/memory/preferences/{name}": map[string]any{
+			"get": map[string]any{
+				"summary": "Get a current Preference item and its reference detail",
+				"parameters": []map[string]any{
+					param("path", "name", true, strSchema()),
+				},
+				"description": "A missing reference file is represented by HTTP 200 with reference_status=missing and reference=null.",
+				"responses": map[string]any{
+					"200": response(200, "Preference item detail", refSchema("CurrentMemoryPreferenceDetailResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"404": response(404, "Preference item is missing", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Preference or reference document is invalid", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+			"delete": map[string]any{
+				"summary": "Delete a current Preference item",
+				"parameters": []map[string]any{
+					param("path", "name", true, strSchema()),
+				},
+				"description": "Atomically removes the item and its now-unreferenced reference file. Missing items, including other users' items, are idempotent success.",
+				"responses": map[string]any{
+					"204": map[string]any{"description": "Deleted or already absent"},
+					"401": response(401, "Gateway user identity is missing", refSchema("CurrentMemoryErrorResponse")),
+					"500": response(500, "Stored Preference index is invalid or unavailable", refSchema("CurrentMemoryErrorResponse")),
+				},
+			},
+		},
+		"/memory/episodes": map[string]any{
+			"get": map[string]any{
+				"summary": "List current user's Episode Memory",
+				"parameters": queryParams(
+					param("query", "page_size", false, intSchema()),
+					param("query", "page_token", false, strSchema()),
+				),
+				"responses": map[string]any{
+					"200": response(200, "Episode Memory page", refSchema("EpisodeMemoryListResponse")),
+					"400": response(400, "Invalid page size or cursor", refSchema("ErrorResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("ErrorResponse")),
+					"500": response(500, "Episode Memory list is unavailable", refSchema("ErrorResponse")),
+				},
+			},
+		},
+		"/memory/episodes/{episode_id}": map[string]any{
+			"get": map[string]any{
+				"summary": "Get an Episode Memory item",
+				"parameters": []map[string]any{
+					param("path", "episode_id", true, strSchema()),
+				},
+				"responses": map[string]any{
+					"200": response(200, "Episode Memory item", refSchema("EpisodeMemoryDetailResponse")),
+					"401": response(401, "Gateway user identity is missing", refSchema("ErrorResponse")),
+					"404": response(404, "Episode Memory item does not exist for this user", refSchema("ErrorResponse")),
+					"500": response(500, "Episode Memory detail is unavailable", refSchema("ErrorResponse")),
+				},
+			},
+			"delete": map[string]any{
+				"summary": "Delete an Episode Memory item",
+				"parameters": []map[string]any{
+					param("path", "episode_id", true, strSchema()),
+				},
+				"responses": map[string]any{
+					"204": map[string]any{"description": "Deleted or already absent"},
+					"401": response(401, "Gateway user identity is missing", refSchema("ErrorResponse")),
+					"500": response(500, "Episode Memory deletion failed", refSchema("ErrorResponse")),
+				},
+			},
+		},
 		"/conversations:setChatHistory":      map[string]any{"post": op("Set conversation history", nil, jsonBody(refSchema("ConversationSetHistoryRequest"), true), response(200, "Set result", refSchema("SetChatHistoryResponse")))},
 		"/conversations:batchDelete":         map[string]any{"post": op("Batch delete conversations", nil, jsonBody(refSchema("ConversationBatchDeleteRequest"), true), response(200, "Batch deleted conversations", refSchema("ConversationBatchDeleteResponse")))},
 		"/conversations:feedBackChatHistory": map[string]any{"post": op("Feedback conversation history", nil, jsonBody(refSchema("ConversationFeedbackRequest"), true), response(200, "Feedback succeeded", refSchema("EmptyObject")))},
@@ -535,8 +1061,67 @@ func conversationHistoryListParams() []map[string]any {
 	}
 }
 
+func conversationTrailListParams() []map[string]any {
+	return []map[string]any{
+		param("path", "name", true, map[string]any{
+			"type":        "string",
+			"description": "Conversation ID or resource name (e.g. conv-1 or conversations/conv-1; :trail suffix is stripped)",
+		}),
+		param("query", "page_size", false, map[string]any{
+			"type":        "integer",
+			"description": "Page size (default 20, max 100)",
+		}),
+		param("query", "page_token", false, map[string]any{
+			"type":        "string",
+			"description": "Pagination offset token from a previous response next_page_token",
+		}),
+	}
+}
+
+func recoveryPageParams() []map[string]any {
+	return queryParams(
+		param("query", "keyword", false, strSchema()),
+		param("query", "page", false, intSchema()),
+		param("query", "page_size", false, intSchema()),
+	)
+}
+
+func recoveryListParams(withFolder bool) []map[string]any {
+	params := recoveryPageParams()
+	params = append(params, param("query", "kind", true, enumStringSchema("dialog", "task")))
+	if withFolder {
+		params = append(params, param("query", "folder_id", false, strSchema()))
+	}
+	return params
+}
+
 func jsonBody(schema map[string]any, required bool) map[string]any {
 	return map[string]any{"required": required, "content": map[string]any{"application/json": map[string]any{"schema": schema}}}
+}
+
+func nullableSchema(schema map[string]any) map[string]any {
+	if reference, ok := schema["$ref"]; ok && len(schema) == 1 {
+		return map[string]any{
+			"allOf":    []any{map[string]any{"$ref": reference}},
+			"nullable": true,
+		}
+	}
+	cloned := make(map[string]any, len(schema)+1)
+	for key, value := range schema {
+		cloned[key] = value
+	}
+	cloned["nullable"] = true
+	return cloned
+}
+
+func enumStringSchema(values ...string) map[string]any {
+	schema := strSchema()
+	items := make([]any, 0, len(values))
+	for _, value := range values {
+		items = append(items, value)
+	}
+	schema["enum"] = items
+	return schema
 }
 
 func multipartOp(summary string, formParams []map[string]any, resp map[string]any) map[string]any {
@@ -570,6 +1155,60 @@ func sseOp(summary string, body map[string]any, resp map[string]any) map[string]
 
 func response(status int, desc string, schema map[string]any) map[string]any {
 	return map[string]any{"description": desc, "content": map[string]any{"application/json": map[string]any{"schema": schema}}}
+}
+
+func currentMemoryAvatarPath(label string) map[string]any {
+	errorResponse := refSchema("CurrentMemoryErrorResponse")
+	return map[string]any{
+		"get": map[string]any{
+			"summary": "Get current user's " + label + " avatar",
+			"responses": map[string]any{
+				"200": avatarBinaryResponse(label + " avatar"),
+				"401": response(401, "Gateway user identity is missing", errorResponse),
+				"404": response(404, label+" avatar is not configured", errorResponse),
+				"500": response(500, "Stored avatar is invalid or unavailable", errorResponse),
+			},
+		},
+		"put": map[string]any{
+			"summary": "Upload current user's " + label + " avatar",
+			"requestBody": map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"multipart/form-data": map[string]any{
+						"schema": objReq(
+							[]string{"file"},
+							prop("file", map[string]any{"type": "string", "format": "binary"}),
+						),
+					},
+				},
+			},
+			"responses": map[string]any{
+				"200": response(200, "Uploaded avatar metadata", refSchema("CurrentMemoryAvatarResponse")),
+				"400": response(400, "Avatar file is invalid or unsupported", errorResponse),
+				"401": response(401, "Gateway user identity is missing", errorResponse),
+				"413": response(413, "Avatar file exceeds 2 MiB", errorResponse),
+				"500": response(500, "Avatar upload failed", errorResponse),
+			},
+		},
+		"delete": map[string]any{
+			"summary": "Delete current user's " + label + " avatar",
+			"responses": map[string]any{
+				"204": map[string]any{"description": "Deleted or already absent"},
+				"401": response(401, "Gateway user identity is missing", errorResponse),
+				"500": response(500, "Avatar deletion failed", errorResponse),
+			},
+		},
+	}
+}
+
+func avatarBinaryResponse(description string) map[string]any {
+	content := map[string]any{}
+	for _, contentType := range []string{"image/png", "image/jpeg", "image/webp"} {
+		content[contentType] = map[string]any{
+			"schema": map[string]any{"type": "string", "format": "binary"},
+		}
+	}
+	return map[string]any{"description": description, "content": content}
 }
 
 func aclResponse(schema map[string]any) map[string]any {

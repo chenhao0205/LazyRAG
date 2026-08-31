@@ -31,6 +31,14 @@ export type LocalPathTreeNode = DataNode & {
   children?: LocalPathTreeNode[];
 };
 
+export interface LocalPathRecommendation {
+  key: string;
+  value: string;
+  title: string;
+  path: string;
+  source?: "server" | "desktop_discovery";
+}
+
 export function normalizeFeishuTargetType(
   targetType?: string,
   targetRef?: string,

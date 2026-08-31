@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"gorm.io/gorm"
 
 	skillhttperr "lazymind/core/skillv2/httperr"
+	skillmetadata "lazymind/core/skillv2/metadata"
 	"lazymind/core/skillv2/revision"
 	skillsearch "lazymind/core/skillv2/search"
 	skillservice "lazymind/core/skillv2/service"
@@ -66,7 +69,6 @@ type Handler struct {
 }
 
 func NewHandler(deps HandlerDeps) *Handler {
-	relaxSQLiteFixtureIndexes(deps.DB)
 	return &Handler{db: deps.DB, blobStore: deps.BlobStore, stateStore: deps.StateStore, clock: systemClock{}}
 }
 
@@ -84,7 +86,6 @@ type CommitDraftRequest = revision.CommitDraftRequest
 type CommitDraftResponse = revision.CommitDraftResponse
 
 func NewCommitter(deps CommitterDeps) *Committer {
-	relaxSQLiteFixtureIndexes(deps.DB)
 	return &Committer{
 		db:      deps.DB,
 		service: revision.NewService(revision.ServiceDeps{DB: deps.DB, BlobStore: deps.BlobStore.revision}),
@@ -582,6 +583,14 @@ func (h *Handler) readContent(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, err)
 		return
 	}
+	if parsed.relPath == skill.SkillMDPath && (skill.Category == skillmetadata.ExternalCategory || skill.OriginBuiltinSkillUID != "") {
+		resolved, resolveErr := skillmetadata.ResolveWithFallback(data, skillmetadata.Metadata{Name: skill.SkillName, Description: skill.Description})
+		if resolveErr != nil {
+			writeHTTPError(w, resolveErr)
+			return
+		}
+		data = resolved.Content
+	}
 	switch r.URL.Query().Get("encoding") {
 	case "base64":
 		writeJSON(w, http.StatusOK, map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(data)})
@@ -726,7 +735,7 @@ func (h *Handler) createEmptyPackage(ctx context.Context, tx *gorm.DB, userID st
 		return err
 	}
 	if conflicts > 0 {
-		return conflict("skill package already exists")
+		return conflict("skill already exists")
 	}
 	now := h.clock.Now()
 	skillID := uuid.NewString()
@@ -1039,7 +1048,7 @@ func (h *Handler) movePackageRoot(ctx context.Context, userID string, from, to r
 			return err
 		}
 		if conflicts > 0 {
-			return conflict("target skill package already exists")
+			return conflict("skill already exists")
 		}
 		if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", skill.ID).Updates(map[string]any{
 			"category":      to.category,
@@ -1068,15 +1077,14 @@ func (h *Handler) blobData(blob skillBlobRow) ([]byte, error) {
 	if u.Scheme != "file" {
 		return nil, fmt.Errorf("unsupported storage url: %s", rawURL)
 	}
-	return os.ReadFile(u.Path)
-}
-
-func relaxSQLiteFixtureIndexes(db *gorm.DB) {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return
+	localPath := u.Path
+	if runtime.GOOS == "windows" && len(localPath) >= 3 && localPath[0] == '/' && localPath[2] == ':' {
+		localPath = localPath[1:]
 	}
-	_ = db.Exec("DROP INDEX IF EXISTS uk_skills_owner_identity").Error
-	_ = db.Exec("DROP INDEX IF EXISTS uk_skills_owner_relative_root").Error
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		localPath = "//" + u.Host + "/" + strings.TrimPrefix(localPath, "/")
+	}
+	return os.ReadFile(filepath.FromSlash(localPath))
 }
 
 type pathLevel int
@@ -1349,32 +1357,33 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now() }
 
 type skillRow struct {
-	ID                 string     `gorm:"column:id;type:varchar(36);primaryKey"`
-	OwnerUserID        string     `gorm:"column:owner_user_id;type:text;not null"`
-	OwnerUserName      string     `gorm:"column:owner_user_name;type:text;not null;default:''"`
-	CreateUserID       string     `gorm:"column:create_user_id;type:text;not null"`
-	CreateUserName     string     `gorm:"column:create_user_name;type:text;not null;default:''"`
-	Category           string     `gorm:"column:category;type:text;not null"`
-	SkillName          string     `gorm:"column:skill_name;type:text;not null"`
-	Description        string     `gorm:"column:description;type:text"`
-	Tags               []byte     `gorm:"column:tags;type:json"`
-	RelativeRoot       string     `gorm:"column:relative_root;type:text;not null"`
-	SkillMDPath        string     `gorm:"column:skill_md_path;type:text;not null;default:'SKILL.md'"`
-	HeadRevisionID     *string    `gorm:"column:head_revision_id;type:varchar(36)"`
-	Version            int64      `gorm:"column:version;not null;default:1"`
-	AutoEvo            bool       `gorm:"column:auto_evo;not null;default:false"`
-	AutoEvoApplyStatus string     `gorm:"column:auto_evo_apply_status;type:text;not null;default:'idle'"`
-	AutoEvoGeneration  int64      `gorm:"column:auto_evo_generation;not null;default:0"`
-	AutoEvoStartedAt   *time.Time `gorm:"column:auto_evo_started_at"`
-	AutoEvoFinishedAt  *time.Time `gorm:"column:auto_evo_finished_at"`
-	AutoEvoError       string     `gorm:"column:auto_evo_error;type:text;not null;default:''"`
-	IsEnabled          bool       `gorm:"column:is_enabled;not null;default:true"`
-	UpdateStatus       string     `gorm:"column:update_status;type:text;not null;default:'up_to_date'"`
-	Ext                []byte     `gorm:"column:ext;type:json"`
-	DeletedAt          *time.Time `gorm:"column:deleted_at"`
-	DeletedBy          *string    `gorm:"column:deleted_by;type:text"`
-	CreatedAt          time.Time  `gorm:"column:created_at;not null"`
-	UpdatedAt          time.Time  `gorm:"column:updated_at;not null"`
+	ID                    string     `gorm:"column:id;type:varchar(36);primaryKey"`
+	OwnerUserID           string     `gorm:"column:owner_user_id;type:text;not null"`
+	OwnerUserName         string     `gorm:"column:owner_user_name;type:text;not null;default:''"`
+	CreateUserID          string     `gorm:"column:create_user_id;type:text;not null"`
+	CreateUserName        string     `gorm:"column:create_user_name;type:text;not null;default:''"`
+	Category              string     `gorm:"column:category;type:text;not null"`
+	SkillName             string     `gorm:"column:skill_name;type:text;not null"`
+	Description           string     `gorm:"column:description;type:text"`
+	Tags                  []byte     `gorm:"column:tags;type:json"`
+	RelativeRoot          string     `gorm:"column:relative_root;type:text;not null"`
+	SkillMDPath           string     `gorm:"column:skill_md_path;type:text;not null;default:'SKILL.md'"`
+	HeadRevisionID        *string    `gorm:"column:head_revision_id;type:varchar(36)"`
+	Version               int64      `gorm:"column:version;not null;default:1"`
+	AutoEvo               bool       `gorm:"column:auto_evo;not null;default:false"`
+	AutoEvoApplyStatus    string     `gorm:"column:auto_evo_apply_status;type:text;not null;default:'idle'"`
+	AutoEvoGeneration     int64      `gorm:"column:auto_evo_generation;not null;default:0"`
+	AutoEvoStartedAt      *time.Time `gorm:"column:auto_evo_started_at"`
+	AutoEvoFinishedAt     *time.Time `gorm:"column:auto_evo_finished_at"`
+	AutoEvoError          string     `gorm:"column:auto_evo_error;type:text;not null;default:''"`
+	IsEnabled             bool       `gorm:"column:is_enabled;not null;default:true"`
+	OriginBuiltinSkillUID string     `gorm:"column:origin_builtin_skill_uid;type:text;not null;default:''"`
+	UpdateStatus          string     `gorm:"column:update_status;type:text;not null;default:'up_to_date'"`
+	Ext                   []byte     `gorm:"column:ext;type:json"`
+	DeletedAt             *time.Time `gorm:"column:deleted_at"`
+	DeletedBy             *string    `gorm:"column:deleted_by;type:text"`
+	CreatedAt             time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt             time.Time  `gorm:"column:updated_at;not null"`
 }
 
 func (skillRow) TableName() string { return "skills" }

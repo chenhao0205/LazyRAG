@@ -1,0 +1,285 @@
+initial: __start__
+start_route: choice
+
+transitions:
+  __start__:
+    - to: prepare
+
+  prepare:
+    - to: outline
+      when: >
+        Generate, reuse, display, or revise an authoring outline. Choose this route
+        for a supplied source only when the user explicitly identifies that source
+        as an outline to use or revise.
+    - to: write_flat_document
+      when: Generate a new flat article without an outline.
+    - to: write_document
+      when: >
+        Revise or fully rewrite an existing full document directly. This is the mandatory
+        route when the user asks to add, delete, replace, or rewrite sections or paragraphs,
+        condense the whole document, change its chapter count, or merge or reorder chapters
+        in a supplied article, report, or other complete document. References to headings,
+        section numbers, or insertion positions do not make the source an outline.
+    - to: __end__
+      when: The requested read-only preparation is complete.
+
+  outline:
+    - to: write_document
+      when: Draft the full document from the latest outline revision.
+    - to: __end__
+      when: The requested outline work is complete.
+
+  write_flat_document:
+    - to: __end__
+
+  write_document:
+    - to: __end__
+
+steps:
+  prepare:
+    label: 写作准备
+    mode: auto
+    route: choice
+    tools_only: true
+    stream_heartbeat: true
+    prompt: |
+      {{runtime_instruction}}
+
+      Authoritative current user request:
+      {{user_input}}
+
+      Prepare the workspace only; do not generate an outline or body.
+
+      Select one writer_prepare_workspace operation:
+      - create: start from scratch.
+      - use_outline: use or revise a supplied outline.
+      - rewrite_document: rewrite or restructure a supplied complete document.
+      - revise_document: make targeted changes to a supplied complete document.
+      - prepare_only: only when the user explicitly requests read-only preparation and no
+        writing change. Never select it merely because this is the prepare step, because a
+        source_document is not available yet, or because you cannot access a URL directly.
+
+      Do not choose target_stage. writer_prepare_workspace derives the terminal target from
+      the authoritative request: full document by default, outline only when explicitly
+      requested as the final deliverable, and prepared only for an explicit read-only request.
+
+      A supplied Feishu/Lark URL is loaded by writer_prepare_workspace; do not pre-read it.
+      If the current user request references Feishu/Lark but has no exact URL, report the
+      missing locator. If a knowledge base is explicitly requested, query it once and pass
+      the evidence as knowledge_text; otherwise skip KB. Targeted section changes, text
+      expansion, or image insertion in a supplied full document require revise_document.
+
+      Call writer_prepare_workspace exactly once with operation and knowledge_text when retrieved.
+      The wrapper accepts knowledge_text only when a preceding successful knowledge-base
+      retrieval is present in this step's tool history; never compose it from the request,
+      attachments, filenames, URLs, or your own writing instructions.
+      The wrapper reads the authoritative user request directly. Pass source_filename only for an
+      uploaded .md, .markdown, .txt, or .lmd source, using its basename exactly. Never put
+      a Feishu/Lark URL or an uploaded image filename in source_filename. The workspace
+      saves its declared artifacts itself. Do not invent fallback artifacts.
+
+      Report representation and the exact `REQUIRED_NEXT_STEP: <next_step>` returned.
+      If source_document is absent, state that processing continues directly to outline.
+    tools:
+      - kb
+      - cloud_files
+      - writer_prepare_workspace
+    terminal_tools:
+      - writer_prepare_workspace
+    outputs:
+      - material: writer_command
+      - material: writing_task
+      - material: media_assets
+      - material: resource_profiles
+      - material: writing_context
+      - material: source_document
+        required: false
+      - material: target_document
+        required: false
+    acceptance_criteria: |
+      writer_command, writing_task, media_assets, resource_profiles, and writing_context are present.
+      media_assets is valid even when its assets mapping is empty.
+      When a Feishu/Lark source was required, source_document and target_document are also present.
+
+  outline:
+    label: 大纲
+    route: choice
+    tools_only: true
+    rerun_when: >
+      The user asks to modify, regenerate, or replace the current outline artifact.
+    prompt: |
+      {{runtime_instruction}}
+
+      Authoritative current user request:
+      {{user_input}}
+
+      All input artifacts are already bound to the workspace. The wrapper resolves them
+      authoritatively; do not search for artifacts and do not construct or pass file paths.
+
+      The writer_command produced by prepare is immutable and is the sole routing decision.
+      Do not reinterpret the request or create, resolve, or replace that command. Call
+      writer_outline_workspace exactly once without operation or artifact path arguments.
+      Do not call internal tools.
+
+      The workspace saves outline_document, writing_context_after_outline, and any revision
+      artifacts itself. Do not reread the result for a summary.
+    tools:
+      - writer_outline_workspace
+    terminal_tools:
+      - writer_outline_workspace
+    inputs:
+      - material: writer_command
+        required: true
+      - material: writing_task
+        required: true
+      - material: writing_context
+        required: true
+      - material: source_document
+        required: false
+      - material: resource_profiles
+        required: false
+    outputs:
+      - material: outline_document
+      - material: writing_context_after_outline
+      - material: outline_revision_task
+        required: false
+      - material: outline_locate_result
+        required: false
+      - material: outline_modify_plan
+        required: false
+      - material: outline_revision_set
+        required: false
+      - material: outline_revision_result
+        required: false
+      - material: outline_write_result
+        required: false
+    acceptance_criteria: |
+      outline_document and writing_context_after_outline are present. Markdown outlines
+      are `.md`; IR outlines have stage="outline" and ui_editable=true. Revision internals are required only when
+      this execution handled an AI revision. For a cloud-bound revision,
+      outline_write_result must report success.
+
+  write_flat_document:
+    label: 短文成稿
+    tools_only: true
+    stream_heartbeat: true
+    prompt: |
+      {{runtime_instruction}}
+
+      Authoritative current user request:
+      {{user_input}}
+
+      All input artifacts are already bound to the workspace. The writer_command produced by
+      prepare is immutable and must select structure_mode=flat. Do not reinterpret the request,
+      generate an outline, or create section instructions. Call writer_flat_draft_workspace
+      exactly once without arguments. The workspace saves every output itself; finish immediately
+      from its completion metadata.
+    tools:
+      - writer_flat_draft_workspace
+    terminal_tools:
+      - writer_flat_draft_workspace
+    inputs:
+      - material: writer_command
+        required: true
+      - material: writing_task
+        required: true
+      - material: media_assets
+        required: true
+      - material: writing_context
+        required: true
+    outputs:
+      - material: flat_draft_document
+      - material: flat_writing_context_after_draft
+      - material: short_writing_plan
+      - material: flat_visual_plan
+      - material: flat_resolved_media_assets
+        required: false
+    acceptance_criteria: |
+      flat_draft_document, flat_writing_context_after_draft, short_writing_plan, and
+      flat_visual_plan are present. flat_draft_document is Markdown or a non-outline
+      WriterDocument IR with ui_editable=true. No
+      outline_document, section_instructions, or draft_blocks are produced. When flat_visual_plan is
+      non-empty, flat_resolved_media_assets is also present.
+
+  write_document:
+    label: 成稿
+    tools_only: true
+    stream_heartbeat: true
+    rerun_when: >
+      The user asks to modify or rewrite the current draft_document, including changes
+      to text, structure, images, tables, references, formatting, or insertion position.
+    prompt: |
+      {{runtime_instruction}}
+
+      Authoritative current user request:
+      {{user_input}}
+
+      All input artifacts are already bound to the workspace. The wrapper resolves them
+      authoritatively; do not search for artifacts and do not construct or pass file paths.
+
+      The writer_command produced by prepare is immutable and is the sole routing decision.
+      Do not reinterpret the request or create, resolve, or replace that command. Call
+      writer_draft_workspace exactly once without operation or artifact path arguments.
+      Do not call internal tools. The workspace saves every output itself; finish immediately
+      from its completion metadata.
+    tools:
+      - cloud_files
+      - writer_draft_workspace
+    terminal_tools:
+      - writer_draft_workspace
+    inputs:
+      - material: writer_command
+        required: true
+      - material: outline_document
+        required: true
+        alternatives:
+          - material: source_document
+      - material: writing_task
+        required: true
+      - material: media_assets
+        required: true
+      - material: writing_context_after_outline
+        required: true
+        alternatives:
+          - material: writing_context
+      - material: source_document
+        required: false
+      - material: target_document
+        required: false
+    outputs:
+      - material: draft_document
+      - material: writing_context_after_draft
+      - material: section_instructions
+        required: false
+      - material: visual_plan
+        required: false
+      - material: resolved_media_assets
+        required: false
+      - material: draft_blocks
+        required: false
+      - material: document_revision_task
+        required: false
+      - material: document_locate_result
+        required: false
+      - material: document_modify_plan
+        required: false
+      - material: document_revision_set
+        required: false
+      - material: document_revision_result
+        required: false
+      - material: document_write_result
+        required: false
+    acceptance_criteria: |
+      draft_document and writing_context_after_draft are present. Markdown output is a
+      `.md` file or an IR document with ui_editable=true. Generation/rewrite requires
+      section_instructions and draft_blocks; IR generation also requires visual_plan and
+      resolved_media_assets. A targeted revision requires document_revision_task,
+      document_locate_result, document_modify_plan, document_revision_set, and a successful
+      document_revision_result. A targeted image-adding revision also requires resolved_media_assets.
+      When generation started without draft_document and used a cloud-bound `.lmd` source,
+      document_write_result must report success and draft_document must be the
+      provider-confirmed document. Every cloud-bound IR full-document rewrite also requires
+      one successful document_write_result and a provider-confirmed draft_document,
+      regardless of whether a previous draft existed. Markdown rewrite remains local and
+      does not require document_write_result. Later targeted revisions must not mutate the
+      cloud document automatically.

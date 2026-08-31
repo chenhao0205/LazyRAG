@@ -15,9 +15,11 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	"lazymind/core/modelconfig"
-	"lazymind/core/plugin"
 	"lazymind/core/store"
 	"lazymind/core/subagent"
+	"lazymind/core/workflow"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -50,15 +52,17 @@ type ContextUsageCategory struct {
 }
 
 type ContextUsageResponse struct {
-	Scope             string                 `json:"scope"`
-	EstimatedTokens   int64                  `json:"estimated_tokens"`
-	MaxInputTokens    *int64                 `json:"max_input_tokens,omitempty"`
-	EstimatedRatio    *float64               `json:"estimated_ratio,omitempty"`
-	Categories        []ContextUsageCategory `json:"categories"`
-	EstimationVersion string                 `json:"estimation_version"`
-	PreviewAccuracy   string                 `json:"preview_accuracy,omitempty"`
-	RequiresLLM       bool                   `json:"requires_llm,omitempty"`
-	LLMReason         string                 `json:"llm_reason,omitempty"`
+	Scope                        string                 `json:"scope"`
+	EstimatedTokens              int64                  `json:"estimated_tokens"`
+	MaxInputTokens               *int64                 `json:"max_input_tokens,omitempty"`
+	EstimatedRatio               *float64               `json:"estimated_ratio,omitempty"`
+	CompressionApplied           bool                   `json:"compression_applied,omitempty"`
+	CompressionCoveredThroughSeq int                    `json:"compression_covered_through_seq,omitempty"`
+	Categories                   []ContextUsageCategory `json:"categories"`
+	EstimationVersion            string                 `json:"estimation_version"`
+	PreviewAccuracy              string                 `json:"preview_accuracy,omitempty"`
+	RequiresLLM                  bool                   `json:"requires_llm,omitempty"`
+	LLMReason                    string                 `json:"llm_reason,omitempty"`
 }
 
 type ContextPromptResponse struct {
@@ -70,7 +74,7 @@ func (c *ChatService) ContextUsage(ctx context.Context, req *LazyChatRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	endpoint := strings.TrimSuffix(c.chatURL, chatPath) + contextUsagePath
+	endpoint := c.baseURL + contextUsagePath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
@@ -96,7 +100,7 @@ func (c *ChatService) ContextPrompt(ctx context.Context, req *LazyChatRequest) (
 	if err != nil {
 		return nil, err
 	}
-	endpoint := strings.TrimSuffix(c.chatURL, chatPath) + contextPromptPath
+	endpoint := c.baseURL + contextPromptPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
@@ -154,6 +158,21 @@ func parseMaxInputTokens(raw string) *int64 {
 	}
 	parsed := int64(number * multiplier)
 	return &parsed
+}
+
+func applyCatalogWindowIfMissing(ctx context.Context, db *gorm.DB, userID string, report *ContextUsageResponse) {
+	if report == nil {
+		return
+	}
+	if report.MaxInputTokens == nil || *report.MaxInputTokens <= 0 {
+		if configured, err := modelconfig.LoadMaxInputTokens(ctx, db, userID, "llm"); err == nil && configured != nil {
+			report.MaxInputTokens = parseMaxInputTokens(*configured)
+		}
+	}
+	if report.MaxInputTokens != nil && *report.MaxInputTokens > 0 {
+		ratio := float64(report.EstimatedTokens) / float64(*report.MaxInputTokens)
+		report.EstimatedRatio = &ratio
+	}
 }
 
 // EstimateContextUsage builds the same algorithm request shape as chat without
@@ -222,8 +241,8 @@ func estimateContext(w http.ResponseWriter, r *http.Request, exportPrompt bool) 
 		common.ReplyErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if len(mentioned.PluginRefs) > 1 {
-		common.ReplyErr(w, "at most one plugin mention is allowed per turn", http.StatusBadRequest)
+	if len(mentioned.WorkflowRefs) > 1 {
+		common.ReplyErr(w, "at most one workflow mention is allowed per turn", http.StatusBadRequest)
 		return
 	}
 	disabled, err := listDisabledToolNames(r.Context(), db, userID)
@@ -231,11 +250,12 @@ func estimateContext(w http.ResponseWriter, r *http.Request, exportPrompt bool) 
 		common.ReplyErr(w, "query disabled tools failed", http.StatusInternalServerError)
 		return
 	}
-	resourceContext.DisabledTools = mergeDisabledToolNames(resourceContext.DisabledTools, disabled)
 	resourceContext.DisabledTools = mergeDisabledToolNames(
 		resourceContext.DisabledTools, mentioned.ExcludedToolNames,
 	)
 	resourceContext.DisabledTools = applyMentionedTools(resourceContext.DisabledTools, mentioned.ToolNames)
+	// A setting-level pause must not be bypassed by an explicit @tool mention.
+	resourceContext.DisabledTools = mergeDisabledToolNames(resourceContext.DisabledTools, disabled)
 
 	reqBody := buildChatRequestBody(
 		r.Context(), db, convID, sessionID, query, histories, raw,
@@ -264,8 +284,8 @@ func estimateContext(w http.ResponseWriter, r *http.Request, exportPrompt bool) 
 	}
 	applyMCPRuntimeConfig(r.Context(), db, userID, reqBody)
 	if agentConfig, ok := reqBody["agentic_config"].(map[string]any); ok {
-		if value, exists := agentConfig["enable_plugin"]; exists {
-			reqBody["enable_plugin"] = value
+		if value, exists := agentConfig["enable_workflow"]; exists {
+			reqBody["enable_workflow"] = value
 		}
 		if value, exists := agentConfig["enable_subagent"]; exists {
 			reqBody["enable_subagent"] = value
@@ -274,40 +294,62 @@ func estimateContext(w http.ResponseWriter, r *http.Request, exportPrompt bool) 
 	// Runtime controls next to the composer are part of the draft, just like
 	// mentions and attachments. Prefer their current UI values over persisted
 	// conversation defaults when building a preview.
-	for _, key := range []string{"enable_plugin", "enable_subagent"} {
+	for _, key := range []string{"enable_workflow", "enable_subagent"} {
 		if value, ok := raw[key].(bool); ok {
 			reqBody[key] = value
 		}
 	}
+	if err := applyChatFeatureControls(r.Context(), db, userID, reqBody); err != nil {
+		common.ReplyErr(w, "load chat feature controls failed", http.StatusInternalServerError)
+		return
+	}
 	if value, ok := raw["context_preview_allow_llm_routing"].(bool); ok {
 		reqBody["context_preview_allow_llm_routing"] = value
 	}
-	pluginMode := resolvePluginModeWithFallback(raw, reqBody)
-	pluginContext, _ := reqBody["plugin_context"].(map[string]any)
-	if pluginContext == nil {
-		pluginContext = map[string]any{}
+	workflowMode := resolveWorkflowModeWithFallback(raw, reqBody)
+	workflowContext, _ := reqBody["workflow_context"].(map[string]any)
+	if workflowContext == nil {
+		workflowContext = map[string]any{}
 	}
-	pluginContext["plugin_mode"] = pluginMode
+	workflowContext["workflow_mode"] = workflowMode
 	if convID != "" {
-		if preflight := loadPluginPreflightContext(r.Context(), db, convID); len(preflight) > 0 {
-			pluginContext["plugin_preflight"] = preflight
+		if preflight := loadWorkflowPreflightContext(r.Context(), db, convID); len(preflight) > 0 {
+			workflowContext["workflow_preflight"] = preflight
 		}
 	}
 	if convID != "" {
-		if active, activeErr := plugin.GetLatestSession(r.Context(), db, convID); activeErr == nil && active != nil {
-			pluginContext["session_id"] = active.ID
-			pluginContext["plugin_id"] = active.PluginID
-			pluginContext["current_step"] = active.CurrentStepID
-			pluginContext["plugin_ref"] = active.PluginRef
-			pluginContext["revision_id"] = active.PluginRevisionID
-			pluginContext["revision_no"] = active.PluginRevisionNo
-			pluginContext["tree_hash"] = active.PluginTreeHash
-			pluginContext["remote_root"] = active.PluginRemoteRoot
+		if active, activeErr := workflow.GetLatestSession(r.Context(), db, convID); activeErr == nil &&
+			!workflowSessionTerminal(active) {
+			workflowContext["session_id"] = active.ID
+			workflowContext["workflow_id"] = active.WorkflowID
+			workflowContext["current_step"] = active.CurrentStepID
+			workflowContext["workflow_ref"] = active.WorkflowRef
+			workflowContext["revision_id"] = active.WorkflowRevisionID
+			workflowContext["revision_no"] = active.WorkflowRevisionNo
+			workflowContext["tree_hash"] = active.WorkflowTreeHash
+			workflowContext["remote_root"] = active.WorkflowRemoteRoot
+			refOrID := active.WorkflowRef
+			if refOrID == "" {
+				refOrID = active.WorkflowID
+			}
+			delete(workflowContext, "runtime")
+			if runtimePolicy, ok := workflow.RuntimePolicyForRevision(r.Context(), db, userID, refOrID, active.WorkflowRevisionID); ok {
+				workflowContext["runtime"] = runtimePolicy
+			}
 		}
 	}
-	reqBody["plugin_context"] = pluginContext
-	if err := applyPluginSelection(
-		r.Context(), db, userID, reqBody, mentioned.PluginRefs, mentioned.ExcludedPluginRefs,
+	reqBody["workflow_context"] = workflowContext
+	workflowEnabled, _ := reqBody["enable_workflow"].(bool)
+	effectiveWorkflowRefs, bindingErr := resolveConversationWorkflowBinding(
+		r.Context(), db, convID, mentioned.WorkflowRefs, mentioned.ExcludedWorkflowRefs,
+		workflowEnabled, false,
+	)
+	if bindingErr != nil {
+		common.ReplyErr(w, "resolve conversation workflow binding failed", http.StatusInternalServerError)
+		return
+	}
+	if err := applyWorkflowSelection(
+		r.Context(), db, userID, reqBody, effectiveWorkflowRefs, mentioned.ExcludedWorkflowRefs,
 	); err != nil {
 		common.ReplyErr(w, err.Error(), http.StatusForbidden)
 		return
@@ -342,12 +384,6 @@ func estimateContext(w http.ResponseWriter, r *http.Request, exportPrompt bool) 
 		common.ReplyErr(w, fmt.Sprintf("estimate context usage failed: %v", err), http.StatusBadGateway)
 		return
 	}
-	if configured, configErr := modelconfig.LoadMaxInputTokens(r.Context(), db, userID, "llm"); configErr == nil && configured != nil {
-		report.MaxInputTokens = parseMaxInputTokens(*configured)
-		if report.MaxInputTokens != nil && *report.MaxInputTokens > 0 {
-			ratio := float64(report.EstimatedTokens) / float64(*report.MaxInputTokens)
-			report.EstimatedRatio = &ratio
-		}
-	}
+	applyCatalogWindowIfMissing(r.Context(), db, userID, report)
 	common.ReplyOK(w, report)
 }

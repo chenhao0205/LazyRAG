@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ChangeEvent } from "react";
 import { Modal, Button, Input, Space, message } from "antd";
 import { CloseOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
@@ -10,7 +10,8 @@ interface FeedbackModalProps {
   visible: boolean;
   onCancel: () => void;
   onSubmit: (reason: string[], comment: string) => void;
-  
+  initialReason?: string;
+  initialComment?: string;
   submitLoading?: boolean;
 }
 
@@ -29,6 +30,8 @@ const FeedbackModal = ({
   visible,
   onCancel,
   onSubmit,
+  initialReason = "",
+  initialComment = "",
   submitLoading = false,
 }: FeedbackModalProps) => {
   const { t } = useTranslation();
@@ -38,13 +41,23 @@ const FeedbackModal = ({
   }));
   const [selectedReasons, setSelectedReasons] = useState<string[]>([]);
   const [comment, setComment] = useState("");
+  const otherReason = t("chatFeedback.other");
+  const effectiveSelectedReasons =
+    comment.trim() && !selectedReasons.includes(otherReason)
+      ? [...selectedReasons, otherReason]
+      : selectedReasons;
 
   useEffect(() => {
-    if (!visible) {
-      setSelectedReasons([]);
-      setComment("");
+    if (visible) {
+      setSelectedReasons(
+        initialReason.split(",").map((value) => value.trim()).filter(Boolean),
+      );
+      setComment(initialComment);
+      return;
     }
-  }, [visible]);
+    setSelectedReasons([]);
+    setComment("");
+  }, [initialComment, initialReason, visible]);
 
   const handleReasonClick = (value: string) => {
     if (selectedReasons.includes(value)) {
@@ -55,14 +68,14 @@ const FeedbackModal = ({
   };
 
   const handleSubmit = () => {
-    if (selectedReasons.length === 0) {
+    if (effectiveSelectedReasons.length === 0) {
       message.error(t("chat.atLeastOneUnsatisfiedReason"));
       return;
     }
     if (submitLoading) {
       return;
     }
-    onSubmit(selectedReasons, comment);
+    onSubmit(effectiveSelectedReasons, comment);
   };
 
   const handleCancel = () => {
@@ -87,7 +100,7 @@ const FeedbackModal = ({
           {feedbackOptions.map(({ id, label }) => (
             <Button
               key={id}
-              type={selectedReasons.includes(label) ? "primary" : "default"}
+              type={effectiveSelectedReasons.includes(label) ? "primary" : "default"}
               onClick={() => handleReasonClick(label)}
               className="feedback-option-btn"
             >
@@ -100,11 +113,15 @@ const FeedbackModal = ({
           <TextArea
             placeholder={t("chat.expectedAnswer")}
             value={comment}
-            onChange={(e) => setComment(e.target.value)}
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) => (
+              setComment(event.target.value)
+            )}
             rows={6}
             maxLength={200}
             showCount={{
-              formatter: ({ count, maxLength }) => `${count}/${maxLength}`,
+              formatter: ({ count, maxLength }: { count: number; maxLength?: number }) => (
+                `${count}/${maxLength ?? 200}`
+              ),
             }}
           />
         </div>

@@ -12,7 +12,7 @@ from lazyllm.tools.agent.skill_manager import SkillManager
 from lazyllm.tools.sandbox.dummy_sandbox import DummySandbox
 from lazymind.chat.engine.tools.infra.github_skill_installer import GitHubSkillInstaller
 from lazymind.chat.engine.tools.skill_editor import SkillManagementToolkit
-from lazymind.common.skill_remote_store import SkillRemoteStore
+from lazymind.common.skill.remote_store import SkillRemoteStore
 
 
 class _Response:
@@ -181,8 +181,7 @@ def installed_skill(tmp_path):
 def test_skill_install_stage_persists_complete_package(installed_skill):
     fs, result = installed_skill
 
-    assert result['success'] is True
-    assert result['result']['skill_key'] == 'external/example'
+    assert result['skill_key'] == 'external/example'
     package = fs._path('remote://skills/external/example')
     assert (package / 'SKILL.md').is_file()
     assert (package / 'references' / 'message.txt').read_text(encoding='utf-8') == 'installed-reference\n'
@@ -224,7 +223,7 @@ def test_install_skill_then_execute_script_end_to_end(installed_skill):
     )
 
     execution = manager.run_script(
-        install_result['result']['skill_key'],
+        install_result['skill_key'],
         'scripts/check.py',
         args=['--platform-matrix', 'ok'],
     )

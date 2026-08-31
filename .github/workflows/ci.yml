@@ -1,14 +1,8 @@
-# CI: run lint, documentation checks, and tests for pushes and pull requests.
+# CI: run lint, documentation checks, and tests for pull requests.
 name: CI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master, 'dev/*']
-    paths-ignore:
-      - "**.md"
-      - ".git*"
-      - "docs/**"
   pull_request:
     branches: [main, master, 'dev/*']
     paths-ignore:
@@ -17,10 +11,32 @@ on:
       - "docs/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  verify-skill-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+      - name: Verify pinned SkillHub packages and lock artifacts
+        working-directory: backend/core
+        run: |
+          go run ./cmd/builtin-skill-bundle \
+            --sources ../../skills/builtin-sources.yaml \
+            --lock ../../skills/builtin-skills.lock.json \
+            --cache ../../skills/.runtime/cache \
+            --output ../../skills/.runtime/builtin-skills \
+            --featured-sources ../../skills/featured \
+            --featured-output ../../skills/.runtime/featured-skills \
+            --verify-lock-artifacts
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -75,6 +91,10 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Verify generated OpenAPI clients
+        working-directory: frontend
+        run: node scripts/openapi/check-stale.mjs
+
       - name: Install and test with coverage
         run: |
           cd tests/frontend
@@ -114,6 +134,9 @@ jobs:
         run: go test ./... -v
       - name: Test Local Runtime Manager
         working-directory: local/local-runtime-manager
+        run: go test ./... -v
+      - name: Test LazyMind Agent Connector
+        working-directory: local/lazymind-cli
         run: go test ./... -v
 
   test-desktop-shell:
@@ -204,12 +227,18 @@ jobs:
         with:
           go-version: '1.25.11'
 
-      - name: Verify migration paths
+      - name: Verify migration and target-upgrade paths
         env:
           MIGRATION_TEST_POSTGRES_DSN: postgres://root:test-password@127.0.0.1:5432/postgres?sslmode=disable
-        run: cd backend/core && go test ./migrate -v
+        run: bash scripts/test_migration_upgrade.sh
 
-      - name: Test backend core
+      - name: Test backend core (SQLite)
+        run: cd backend/core && go test ./... -v
+
+      - name: Test backend core (PostgreSQL)
+        env:
+          TEST_DB_DRIVER: postgres
+          TEST_DB_DSN: postgres://root:test-password@127.0.0.1:5432/postgres?sslmode=disable
         run: cd backend/core && go test ./... -v
 
       - name: Test backend core integration module

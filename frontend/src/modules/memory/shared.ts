@@ -1,12 +1,16 @@
 import dayjs from "dayjs";
 import { diffLines, diffChars } from "diff";
-import type { EvolutionSuggestionRecord } from "./preferenceApi";
-import type { SkillDraftSummary, SkillShareStatus } from "./skillApi";
+import type { EvolutionSuggestionRecord } from "./evolutionApi";
+import type {
+  SkillDraftPreviewRecord,
+  SkillDraftSummary,
+  SkillShareStatus,
+} from "./skillApi";
 
 export type MemoryTab = "skills" | "experience" | "glossary";
 export type ModalMode = "add" | "edit" | "view";
-export type ShareableTab = "skills" | "experience";
-export type ChangeProposalTab = Extract<MemoryTab, "skills" | "experience">;
+export type ShareableTab = "skills";
+export type ChangeProposalTab = "skills";
 export type SkillShareCenterTab = "incoming" | "outgoing";
 export type SkillShareAction = "accept" | "reject" | "preview";
 export type GlossarySource = "user" | "ai";
@@ -14,6 +18,30 @@ export type GlossarySource = "user" | "ai";
 export const GLOSSARY_TERM_MAX_LENGTH = 50;
 export const GLOSSARY_ALIAS_MAX_LENGTH = 50;
 export const GLOSSARY_CONTENT_MAX_LENGTH = 300;
+export const SKILL_NAME_MAX_LENGTH = 80;
+export const SKILL_DESCRIPTION_MAX_LENGTH = 1024;
+
+export function countSkillCharacters(value: unknown): number {
+  return Array.from(typeof value === "string" ? value.trim() : "").length;
+}
+
+export function skillCharCountConfig(maxLength: number, visible = true) {
+  if (!visible) {
+    return undefined;
+  }
+  return {
+    strategy: (value: string) => countSkillCharacters(value),
+    show: ({ count }: { count: number }) => `${count}/${maxLength}`,
+  };
+}
+
+export const SKILL_CHAR_COUNT_STYLE = {
+  fontSize: 12,
+  fontWeight: 400,
+  color: '#98a2b3',
+  lineHeight: '12px',
+  fontVariantNumeric: 'tabular-nums',
+} as const;
 
 export interface BaseAsset {
   id: string;
@@ -30,9 +58,11 @@ export interface StructuredAsset extends BaseAsset {
   description: string;
   category: string;
   tags: string[];
+  provider?: string;
   headRevisionId?: string;
   draft?: SkillDraftSummary;
   isEnabled?: boolean;
+  isAvailable?: boolean;
   readonly?: boolean;
   protect?: boolean;
   hasPendingReviewSuggestions?: boolean;
@@ -45,7 +75,7 @@ export interface StructuredAsset extends BaseAsset {
   deletedBy?: string;
 }
 
-export type SkillViewMode = "installed" | "market" | "trash";
+export type SkillViewMode = "installed" | "market";
 export type SkillSourceFilter = "all" | "builtin" | "admin" | "personal";
 export type SkillMarketSourceFilter = "all" | "builtin" | "admin";
 
@@ -57,20 +87,6 @@ export const isSkillUpdatePendingForRecord = (record: StructuredAsset) =>
   Boolean(record.hasPendingReviewResult) ||
   Boolean(record.hasPendingReviewSuggestions) ||
   Boolean(record.hasPendingRemoveSuggestion);
-
-export interface ExperienceAsset extends BaseAsset {
-  title: string;
-  agentPersona?: string;
-  draftStatus?: string;
-  summary?: string;
-  hasPendingReviewResult?: boolean;
-  hasPendingReviewSuggestions?: boolean;
-  responseStyle?: string;
-  resourceType?: string;
-  reviewStatus?: string;
-  suggestionStatus?: string;
-  preferredName?: string;
-}
 
 export interface GlossaryAsset extends BaseAsset {
   term: string;
@@ -120,8 +136,6 @@ export interface GlossaryConflictResolution {
 
 export interface AssetDraft {
   id?: string;
-  title: string;
-  agentPersona: string;
   name: string;
   description: string;
   category: string;
@@ -134,8 +148,6 @@ export interface AssetDraft {
   source: GlossarySource;
   content: string;
   protect: boolean;
-  responseStyle: string;
-  preferredName: string;
 }
 
 export interface SkillTreeNode extends StructuredAsset {
@@ -158,7 +170,7 @@ export interface ShareRecord {
 
 export interface ShareTarget {
   tab: ShareableTab;
-  item: StructuredAsset | ExperienceAsset;
+  item: StructuredAsset;
 }
 
 export interface StructuredChangeProposal {
@@ -167,13 +179,7 @@ export interface StructuredChangeProposal {
   targetId: string;
   before: StructuredAsset;
   after: StructuredAsset;
-  backendDraftPreview?: {
-    currentContent: string;
-    diff: string;
-    draftContent: string;
-    draftSourceVersion: number;
-    draftStatus: string;
-  };
+  backendDraftPreview?: SkillDraftPreviewRecord;
   backendSuggestionId?: string;
   backendSuggestionIdsByField?: Partial<Record<ProposalFieldKey, string>>;
   backendSuggestions?: EvolutionSuggestionRecord[];
@@ -182,28 +188,7 @@ export interface StructuredChangeProposal {
   backendSuggestionTotal?: number;
 }
 
-export interface ExperienceChangeProposal {
-  id: string;
-  tab: "experience";
-  targetId: string;
-  before: ExperienceAsset;
-  after: ExperienceAsset;
-  backendDraftPreview?: {
-    currentContent: string;
-    diff: string;
-    draftContent: string;
-    draftSourceVersion: number;
-    draftStatus: string;
-  };
-  backendSuggestionId?: string;
-  backendSuggestionIdsByField?: Partial<Record<ProposalFieldKey, string>>;
-  backendSuggestions?: EvolutionSuggestionRecord[];
-  backendSuggestionPage?: number;
-  backendSuggestionPageSize?: number;
-  backendSuggestionTotal?: number;
-}
-
-export type ChangeProposal = StructuredChangeProposal | ExperienceChangeProposal;
+export type ChangeProposal = StructuredChangeProposal;
 
 export type DiffLineType = "add" | "remove" | "same";
 
@@ -221,8 +206,7 @@ export type ProposalFieldKey =
   | "category"
   | "tags"
   | "content"
-  | "protect"
-  | "title";
+  | "protect";
 
 export type ProposalFieldDecision = "accept" | "reject" | "pending";
 
@@ -239,14 +223,6 @@ export interface StructuredDiffLabels {
   description: string;
   category: string;
   tags: string;
-  protect: string;
-  content: string;
-  yes: string;
-  no: string;
-}
-
-export interface ExperienceDiffLabels {
-  title: string;
   protect: string;
   content: string;
   yes: string;
@@ -275,8 +251,6 @@ export const formatDateTime = (value?: string) => {
 };
 
 export const createDraft = (): AssetDraft => ({
-  title: "",
-  agentPersona: "",
   name: "",
   description: "",
   category: "",
@@ -289,8 +263,6 @@ export const createDraft = (): AssetDraft => ({
   source: "user",
   content: "",
   protect: false,
-  responseStyle: "",
-  preferredName: "",
 });
 
 export const createStructuredDraft = (
@@ -306,8 +278,6 @@ export const createStructuredDraft = (
 
   return {
     id: item.id,
-    title: "",
-    agentPersona: "",
     name: item.name,
     description: item.description,
     category: item.category,
@@ -320,8 +290,6 @@ export const createStructuredDraft = (
     source: "user",
     content: normalizedContent,
     protect: Boolean(item.protect),
-    responseStyle: "",
-    preferredName: "",
   };
 };
 
@@ -510,10 +478,6 @@ export const cloneStructuredAsset = (item: StructuredAsset): StructuredAsset => 
   tags: [...item.tags],
 });
 
-export const cloneExperienceAsset = (item: ExperienceAsset): ExperienceAsset => ({
-  ...item,
-});
-
 export const cloneGlossaryAsset = (item: GlossaryAsset): GlossaryAsset => ({
   ...item,
   aliases: [...item.aliases],
@@ -538,23 +502,18 @@ export const serializeStructuredAsset = (
   return lines.join("\n");
 };
 
-export const serializeExperienceAsset = (
-  item: ExperienceAsset,
-  labels: ExperienceDiffLabels,
-) => {
-  const lines = [
-    `${labels.title}: ${item.title}`,
-    `${labels.protect}: ${item.protect ? labels.yes : labels.no}`,
-    "",
-    `${labels.content}:`,
-    item.content,
-  ];
-
-  return lines.join("\n");
-};
-
 export const buildDiffLines = (beforeText: string, afterText: string): DiffLine[] => {
-  const segments = diffLines(beforeText, afterText);
+  // diffLines treats a missing final newline as part of the last line. When a
+  // later paragraph is deleted, that can make an unchanged final paragraph
+  // appear as a full remove/add pair. Normalize non-empty snapshots to the
+  // same EOF convention so only the actual content change is highlighted.
+  const stableBeforeText = beforeText && !beforeText.endsWith("\n")
+    ? `${beforeText}\n`
+    : beforeText;
+  const stableAfterText = afterText && !afterText.endsWith("\n")
+    ? `${afterText}\n`
+    : afterText;
+  const segments = diffLines(stableBeforeText, stableAfterText);
   const lines: DiffLine[] = [];
 
   segments.forEach((segment) => {
@@ -703,42 +662,6 @@ export const normalizeSuggestionValue = (value: string) => {
   return compact.length > 120 ? `${compact.slice(0, 120)}...` : compact;
 };
 
-const PREFERENCE_FRONTMATTER_RE = /^---\n([\s\S]*?)\n---(?:\n([\s\S]*))?$/;
-
-/**
- * Split user_preference content into YAML frontmatter text and body text.
- */
-export const parsePreferenceYamlAndBody = (
-  content: string,
-): { yamlText: string; bodyText: string } => {
-  const normalized = content.replace(/\r\n/g, "\n");
-  const matched = normalized.match(PREFERENCE_FRONTMATTER_RE);
-  if (!matched) {
-    return { yamlText: "", bodyText: normalized };
-  }
-  return {
-    yamlText: `---\n${matched[1]}\n---`,
-    bodyText: (matched[2] || "").trimStart(),
-  };
-};
-
-/**
- * Serialize a preference item's structured YAML fields into text for diffing.
- */
-export const serializePreferenceYaml = (item: {
-  agentPersona?: string;
-  preferredName?: string;
-  responseStyle?: string;
-}): string => {
-  return [
-    "---",
-    `agent_persona: "${item.agentPersona ?? ""}"`,
-    `preferred_name: "${item.preferredName ?? ""}"`,
-    `response_style: "${item.responseStyle ?? ""}"`,
-    "---",
-  ].join("\n");
-};
-
 export const defaultMemoryGenerateInstruction = "再补一条：跨团队协作时才允许使用 merge";
 
 const buildEvolutionId = (resourceType: string, resourceId: string) => {
@@ -749,18 +672,6 @@ const buildEvolutionId = (resourceType: string, resourceId: string) => {
   }
 
   return `${normalizedResourceType}:${normalizedResourceId}`;
-};
-
-export const getPreferenceSuggestionResourceParam = (item: ExperienceAsset) => {
-  const rawResourceType = (item.resourceType || "").trim();
-  const resourceType = rawResourceType.toLowerCase();
-  if (resourceType.includes("skill")) {
-    return { evolutionId: buildEvolutionId(rawResourceType || "skill", item.id) };
-  }
-  if (resourceType.includes("memory") && !resourceType.includes("preference")) {
-    return { evolutionId: buildEvolutionId(rawResourceType || "memory", item.id) };
-  }
-  return { evolutionId: buildEvolutionId(rawResourceType || "user-preference", item.id) };
 };
 
 export const getSkillSuggestionResourceParam = (item: StructuredAsset) => ({
@@ -787,33 +698,6 @@ export const buildSkillProposalFromSuggestions = (
     backendSuggestionId: suggestions[0].id,
     before: cloneStructuredAsset(item),
     after: cloneStructuredAsset(item),
-    backendSuggestions: suggestions,
-    backendSuggestionPage: metadata?.page,
-    backendSuggestionPageSize: metadata?.pageSize,
-    backendSuggestionTotal: metadata?.total ?? suggestions.length,
-  };
-};
-
-export const buildExperienceProposalFromSuggestions = (
-  item: ExperienceAsset,
-  suggestions: EvolutionSuggestionRecord[],
-  metadata?: {
-    page?: number;
-    pageSize?: number;
-    total?: number;
-  },
-): ExperienceChangeProposal | null => {
-  if (!suggestions.length) {
-    return null;
-  }
-
-  return {
-    id: `experience-suggestions-${suggestions.map((suggestion) => suggestion.id).join("-")}`,
-    tab: "experience",
-    targetId: item.id,
-    backendSuggestionId: suggestions[0].id,
-    before: cloneExperienceAsset(item),
-    after: cloneExperienceAsset(item),
     backendSuggestions: suggestions,
     backendSuggestionPage: metadata?.page,
     backendSuggestionPageSize: metadata?.pageSize,
@@ -912,7 +796,7 @@ export const parseMemoryTab = (value?: string | null): MemoryTab | null => {
 };
 
 export const parseChangeProposalTab = (value?: string | null): ChangeProposalTab | null => {
-  if (value === "skills" || value === "experience") {
+  if (value === "skills") {
     return value;
   }
 

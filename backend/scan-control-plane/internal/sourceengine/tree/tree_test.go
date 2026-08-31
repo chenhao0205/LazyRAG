@@ -34,10 +34,10 @@ func TestTargetTreeListChildrenUsesConnectorAndDoesNotUseFallbackOrStore(t *test
 	if len(spy.listRequests) != 1 || len(spy.mapObjects) != 2 {
 		t.Fatalf("expected connector list and map calls, list=%d map=%d", len(spy.listRequests), len(spy.mapObjects))
 	}
-	if len(page.Items) != 1 {
-		t.Fatalf("expected target directory tree to hide files, got %+v", page.Items)
+	if len(page.Items) != 2 {
+		t.Fatalf("expected include_files to preserve documents, got %+v", page.Items)
 	}
-	if page.Items[0].ObjectKey != "folder-1" {
+	if page.Items[0].ObjectKey != "folder-1" || page.Items[1].ObjectKey != "doc-1" {
 		t.Fatalf("unexpected target tree nodes: %+v", page.Items)
 	}
 	if fallback.called {
@@ -70,11 +70,11 @@ func TestTargetTreeAllCurrentLevelPullsPagesWithoutWritingBusinessTables(t *test
 	if len(spy.listRequests) != 2 {
 		t.Fatalf("expected connector pagination, got %d requests", len(spy.listRequests))
 	}
-	if !page.ListComplete || page.HasMore || len(page.Items) != 2 {
+	if !page.ListComplete || page.HasMore || len(page.Items) != 3 {
 		t.Fatalf("expected complete current-level directory page, got %+v", page)
 	}
-	if page.Items[0].ObjectKey != "folder-1" || page.Items[1].ObjectKey != "page-1" {
-		t.Fatalf("target directory tree should keep containers and hide files, got %+v", page.Items)
+	if page.Items[0].ObjectKey != "folder-1" || page.Items[1].ObjectKey != "doc-1" || page.Items[2].ObjectKey != "page-1" {
+		t.Fatalf("target tree should keep containers and requested files, got %+v", page.Items)
 	}
 }
 
@@ -196,6 +196,34 @@ func TestTargetTreeSearchRespectsIncludeFiles(t *testing.T) {
 	}
 }
 
+func TestTargetTreeDirectSearchUsesOnlineConnector(t *testing.T) {
+	t.Parallel()
+
+	spy := &treeConnectorSpy{supportsSearch: true}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry)
+	page, err := engine.Search(context.Background(), TargetTreeSearchRequest{
+		ConnectorType: treeTestConnectorType,
+		Keyword:       "welcome", Direct: true, IncludeFiles: true, PageSize: 10,
+		AuthConnectionID: "connection-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spy.searchRequests) != 1 || len(spy.listRequests) != 0 {
+		t.Fatalf("direct search calls=%d list calls=%d", len(spy.searchRequests), len(spy.listRequests))
+	}
+	if spy.searchRequests[0].Keyword != "welcome" || spy.searchRequests[0].AuthConnectionID != "connection-1" {
+		t.Fatalf("search request=%#v", spy.searchRequests[0])
+	}
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "doc-1" || page.SearchMode != SearchModeConnector {
+		t.Fatalf("page=%#v", page)
+	}
+}
+
 func TestLocalFSTargetSearchWithCurrentLevelBuildsRecursiveCache(t *testing.T) {
 	t.Parallel()
 
@@ -290,6 +318,246 @@ func TestLocalFSTargetSearchWithoutCurrentLevelBuildsRootCaches(t *testing.T) {
 	}
 	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 3 {
 		t.Fatalf("local search without current level should list recommended roots and subtree, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
+	}
+}
+
+func TestLocalFSRecommendationsUseConfiguredDirectoryName(t *testing.T) {
+	t.Parallel()
+
+	spy := &treeConnectorSpy{
+		connectorType:  connector.ConnectorType("local_fs"),
+		supportsSearch: true,
+		childrenByNodeRef: map[string][]connector.RawObject{
+			"": {
+				rawTreeObject("/workspace", "", "workspace", false, true),
+			},
+			"/workspace": {
+				rawTreeObject("/workspace/Downloads", "/workspace", "Downloads", false, true),
+			},
+			"/workspace/Downloads": {
+				rawTreeObject("/workspace/Downloads/MyBaiduDownload", "/workspace/Downloads", "MyBaiduDownload", false, true),
+			},
+			"/workspace/Downloads/MyBaiduDownload": {},
+		},
+	}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatalf("create registry: %v", err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry)
+
+	page, err := engine.Recommend(context.Background(), TargetTreeRecommendationRequest{AgentID: "agent-1"})
+	if err != nil {
+		t.Fatalf("recommend local paths: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace" {
+		t.Fatalf("recommendations should return the matched path root, got %+v", page.Items)
+	}
+	if len(page.Items[0].Children) != 1 ||
+		len(page.Items[0].Children[0].Children) != 1 ||
+		page.Items[0].Children[0].Children[0].ObjectKey != "/workspace/Downloads/MyBaiduDownload" {
+		t.Fatalf("recommendations should preserve the full path tree, got %+v", page.Items)
+	}
+
+	flatPage, err := engine.RecommendList(context.Background(), TargetTreeRecommendationRequest{AgentID: "agent-1"})
+	if err != nil {
+		t.Fatalf("list recommended local paths: %v", err)
+	}
+	if len(flatPage.Items) != 1 ||
+		flatPage.Items[0].ObjectKey != "/workspace/Downloads/MyBaiduDownload" ||
+		len(flatPage.Items[0].Children) != 0 {
+		t.Fatalf("recommendation list should contain only flat matched nodes, got %+v", flatPage.Items)
+	}
+}
+
+func TestLocalFSRecommendationsForceRefreshFindsNewDirectory(t *testing.T) {
+	t.Parallel()
+
+	spy := &treeConnectorSpy{
+		connectorType:  connector.ConnectorType("local_fs"),
+		supportsSearch: true,
+		childrenByNodeRef: map[string][]connector.RawObject{
+			"": {
+				rawTreeObject("/workspace", "", "workspace", false, true),
+			},
+			"/workspace": {},
+		},
+	}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatalf("create registry: %v", err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry, WithTargetSearchCacheStore(newMemoryTargetSearchCacheStore()))
+
+	page, err := engine.RecommendList(context.Background(), TargetTreeRecommendationRequest{})
+	if err != nil {
+		t.Fatalf("list initial local recommendations: %v", err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("initial recommendations should be empty, got %+v", page.Items)
+	}
+
+	spy.childrenByNodeRef["/workspace"] = []connector.RawObject{
+		rawTreeObject("/workspace/.codex", "/workspace", ".codex", false, true),
+	}
+	spy.childrenByNodeRef["/workspace/.codex"] = []connector.RawObject{
+		rawTreeObject("/workspace/.codex/skills", "/workspace/.codex", "skills", false, true),
+	}
+	spy.childrenByNodeRef["/workspace/.codex/skills"] = nil
+
+	cachedPage, err := engine.RecommendList(context.Background(), TargetTreeRecommendationRequest{})
+	if err != nil {
+		t.Fatalf("list cached local recommendations: %v", err)
+	}
+	if len(cachedPage.Items) != 0 {
+		t.Fatalf("ordinary recommendation load should keep using the fresh cache, got %+v", cachedPage.Items)
+	}
+
+	refreshedPage, err := engine.RecommendList(context.Background(), TargetTreeRecommendationRequest{ForceRefresh: true})
+	if err != nil {
+		t.Fatalf("force refresh local recommendations: %v", err)
+	}
+	if len(refreshedPage.Items) != 1 || refreshedPage.Items[0].ObjectKey != "/workspace/.codex/skills" {
+		t.Fatalf("force refresh should find the new recommended directory, got %+v", refreshedPage.Items)
+	}
+}
+
+func TestRecommendedLocalPathRulesContainConfiguredPatternsWithoutDuplicates(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		".cursor/rules",
+		".cursor/skills",
+		".agents/skills",
+		".codex/skills",
+		"Downloads/飞书",
+		"Downloads/Feishu",
+		"Downloads/Lark",
+		"Documents/飞书",
+		"Documents/Feishu",
+		"Documents/Lark",
+		"Downloads/BaiduNetdiskDownload",
+		"BaiduNetdiskDownload",
+		"BaiduYunDownload",
+		"BaiduDownload",
+	}
+	if len(RecommendedLocalPathRules) != len(expected) {
+		t.Fatalf("expected %d recommendation rules, got %d", len(expected), len(RecommendedLocalPathRules))
+	}
+	seen := make(map[string]struct{}, len(expected))
+	for index, rule := range RecommendedLocalPathRules {
+		if rule.Pattern != expected[index] {
+			t.Fatalf("recommendation rule %d: expected %q, got %q", index, expected[index], rule.Pattern)
+		}
+		if _, ok := seen[rule.Pattern]; ok {
+			t.Fatalf("duplicate recommendation path pattern %q", rule.Pattern)
+		}
+		seen[rule.Pattern] = struct{}{}
+	}
+}
+
+func TestFlattenRecommendedTreeNodesReturnsAllMatchesWithoutAncestors(t *testing.T) {
+	t.Parallel()
+
+	nodes := []TreeNode{{
+		ObjectKey:     "/workspace",
+		DisplayName:   "workspace",
+		ConnectorType: "local_fs",
+		Children: []TreeNode{
+			{ObjectKey: "/workspace/MyBaiduDownload", DisplayName: "MyBaiduDownload", ConnectorType: "local_fs"},
+			{
+				ObjectKey:     "/workspace/archive",
+				DisplayName:   "archive",
+				ConnectorType: "local_fs",
+				Children: []TreeNode{
+					{ObjectKey: "/workspace/archive/BaiduDownloadBackup", DisplayName: "BaiduDownloadBackup", ConnectorType: "local_fs"},
+				},
+			},
+		},
+	}}
+
+	items := flattenRecommendedTreeNodes(nodes, []RecommendedLocalPathRule{{Pattern: "BaiduDownload"}})
+	if len(items) != 2 || items[0].ObjectKey != "/workspace/MyBaiduDownload" || items[1].ObjectKey != "/workspace/archive/BaiduDownloadBackup" {
+		t.Fatalf("expected all matched nodes in traversal order, got %+v", items)
+	}
+	for _, item := range items {
+		if len(item.Children) != 0 {
+			t.Fatalf("flat recommendation item must not contain children, got %+v", item)
+		}
+	}
+}
+
+func TestLocalFSRecommendationsMatchMultiLevelPathByExactSegments(t *testing.T) {
+	t.Parallel()
+
+	spy := &treeConnectorSpy{
+		connectorType:  connector.ConnectorType("local_fs"),
+		supportsSearch: true,
+		childrenByNodeRef: map[string][]connector.RawObject{
+			"": {
+				rawTreeObject("/workspace", "", "workspace", false, true),
+			},
+			"/workspace": {
+				rawTreeObject("/workspace/Tencent", "/workspace", "Tencent", false, true),
+				rawTreeObject("/workspace/Tencent2", "/workspace", "Tencent2", false, true),
+			},
+			"/workspace/Tencent": {
+				rawTreeObject("/workspace/Tencent/WeChat Files", "/workspace/Tencent", "WeChat Files", false, true),
+				rawTreeObject("/workspace/Tencent/My WeChat Files", "/workspace/Tencent", "My WeChat Files", false, true),
+			},
+			"/workspace/Tencent2": {
+				rawTreeObject("/workspace/Tencent2/WeChat Files", "/workspace/Tencent2", "WeChat Files", false, true),
+			},
+			"/workspace/Tencent/WeChat Files":    {},
+			"/workspace/Tencent/My WeChat Files": {},
+			"/workspace/Tencent2/WeChat Files":   {},
+		},
+	}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatalf("create registry: %v", err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry)
+
+	page, err := engine.recommendLocalPaths(
+		context.Background(),
+		TargetTreeRecommendationRequest{},
+		[]RecommendedLocalPathRule{{ProductID: "wechat", ProductName: "微信", Pattern: `Tencent\WeChat Files`}},
+	)
+	if err != nil {
+		t.Fatalf("recommend multi-level local path: %v", err)
+	}
+	if len(page.Items) != 1 || len(page.Items[0].Children) != 1 ||
+		page.Items[0].Children[0].ObjectKey != "/workspace/Tencent" ||
+		len(page.Items[0].Children[0].Children) != 1 ||
+		page.Items[0].Children[0].Children[0].ObjectKey != "/workspace/Tencent/WeChat Files" {
+		t.Fatalf("multi-level rules should match exact trailing path segments only, got %+v", page.Items)
+	}
+}
+
+func TestTreeNodeSearchMatchModes(t *testing.T) {
+	t.Parallel()
+
+	node := TreeNode{
+		ConnectorType: "local_fs",
+		NodeRef:       `/workspace/Tencent/WeChat Files`,
+		DisplayName:   "WeChat Files",
+		SearchName:    "wechat files",
+	}
+	if !treeNodeSearchMatches(node, "Chat") {
+		t.Fatal("single-segment rules should use fuzzy directory-name matching")
+	}
+	if !treeNodeSearchMatches(node, `Tencent\WeChat Files`) {
+		t.Fatal("multi-level rules should normalize Windows separators")
+	}
+	if treeNodeSearchMatches(node, "Tencent2/WeChat Files") {
+		t.Fatal("multi-level rules should compare exact path segments")
+	}
+	if treeNodeSearchMatches(node, "Tencent/My WeChat Files") {
+		t.Fatal("multi-level rules should not fuzzy-match individual segments")
+	}
+	if !treeNodeSearchMatches(TreeNode{ConnectorType: "feishu", DisplayName: "Team/Docs"}, "Team/Docs") {
+		t.Fatal("non-local searches should preserve ordinary slash-containing keywords")
 	}
 }
 
@@ -635,6 +903,81 @@ func TestLocalFSRootCachePrewarmBuildsCachesSearchCanReuse(t *testing.T) {
 	if len(spy.listRequests) != 1 {
 		t.Fatalf("search should only refresh root list and reuse subtree cache, got %d list requests", len(spy.listRequests))
 	}
+}
+
+func TestLocalFSRootCachesSkipPermissionDeniedRoot(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryTargetSearchCacheStore()
+	spy := &treeConnectorSpy{
+		connectorType:  connector.ConnectorType("local_fs"),
+		supportsSearch: true,
+		childrenByNodeRef: map[string][]connector.RawObject{
+			"": {
+				rawTreeObject("/denied", "", "denied", false, true),
+				rawTreeObject("/allowed", "", "allowed", false, true),
+			},
+			"/allowed": {
+				rawTreeObject("/allowed/.codex", "/allowed", ".codex", false, true),
+			},
+			"/allowed/.codex": {
+				rawTreeObject("/allowed/.codex/skills", "/allowed/.codex", "skills", false, true),
+			},
+			"/allowed/.codex/skills": {},
+		},
+		listErrByNodeRef: map[string]error{
+			"/denied": connector.NewError(connector.ErrorCodePermissionDenied, "operation not permitted"),
+		},
+	}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatalf("create registry: %v", err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry, WithTargetSearchCacheStore(store))
+	engine.cache.delay = 0
+	req := TargetTreeSearchRequest{
+		ConnectorType: connector.ConnectorType("local_fs"),
+		TargetType:    connector.TargetType("local_path"),
+		IncludeFiles:  false,
+	}
+	if err := engine.PrewarmLocalFSRootCaches(context.Background(), req); err != nil {
+		t.Fatalf("permission denied root should not fail prewarm: %v", err)
+	}
+	deniedCalls := countListRequestsForPath(spy.listRequests, "/denied")
+
+	page, err := engine.Search(context.Background(), TargetTreeSearchRequest{
+		ConnectorType: connector.ConnectorType("local_fs"),
+		TargetType:    connector.TargetType("local_path"),
+		Keyword:       ".codex/skills",
+		PageSize:      10,
+		IncludeFiles:  false,
+	})
+	if err != nil {
+		t.Fatalf("search should continue with accessible roots: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/allowed" {
+		t.Fatalf("search should return the accessible root path, got %+v", page.Items)
+	}
+	if page.CacheComplete || !strings.Contains(page.CacheError, "PERMISSION_DENIED") {
+		t.Fatalf("partial root cache should report its skipped permission error, got %+v", page)
+	}
+	if got := countListRequestsForPath(spy.listRequests, "/denied"); got != deniedCalls {
+		t.Fatalf("search retried known denied root: before=%d after=%d", deniedCalls, got)
+	}
+}
+
+func countListRequestsForPath(requests []connector.ListChildrenRequest, path string) int {
+	count := 0
+	for _, req := range requests {
+		candidate := strings.TrimSpace(req.NodeRef)
+		if candidate == "" {
+			candidate = strings.TrimSpace(req.TargetRef)
+		}
+		if candidate == path {
+			count++
+		}
+	}
+	return count
 }
 
 func TestTargetTreeSearchPathTreeWrapsFeishuOrphansWithVirtualRoots(t *testing.T) {
@@ -2410,6 +2753,7 @@ type treeConnectorSpy struct {
 	childrenSet       bool
 	children          []connector.RawObject
 	childrenByNodeRef map[string][]connector.RawObject
+	listErrByNodeRef  map[string]error
 	listErr           error
 	repeatCursor      bool
 	fetchPage         connector.RawObjectPage
@@ -2439,6 +2783,15 @@ func (c *treeConnectorSpy) ValidateTarget(context.Context, connector.ValidateTar
 
 func (c *treeConnectorSpy) ListChildren(_ context.Context, req connector.ListChildrenRequest) (connector.RawObjectPage, error) {
 	c.listRequests = append(c.listRequests, req)
+	if c.listErrByNodeRef != nil {
+		key := strings.TrimSpace(req.NodeRef)
+		if key == "" {
+			key = strings.TrimSpace(req.TargetRef)
+		}
+		if err := c.listErrByNodeRef[key]; err != nil {
+			return connector.RawObjectPage{}, err
+		}
+	}
 	if c.listErr != nil {
 		return connector.RawObjectPage{}, c.listErr
 	}

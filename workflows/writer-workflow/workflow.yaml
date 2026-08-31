@@ -1,0 +1,310 @@
+id: writer-workflow
+name: AI Writer
+description: >
+  Read source documents and knowledge, create a flat article or reuse an
+  outline for a structured document, revise either the outline or full text, and produce
+  Markdown or WriterDocument IR according to the selected writing path. Exporting
+  an IR draft as Markdown is a separate user-initiated download flow.
+
+when_to_use: >
+  Always use this workflow when the user's primary request is to create a complete
+  article, report, or other long-form document, including writing from supplied
+  materials or knowledge-base evidence. Such a direct writing request matches
+  this workflow even when the user does not know or name AI Writer; do not
+  generate the requested full document directly in chat. Also use it for
+  continuing from a supplied outline, revising an existing Feishu document, or
+  delivering a generated document. When a writer session already owns the current
+  draft, requests to insert, replace, move, or delete an image are document revisions:
+  rerun write_document and keep image acquisition inside that step. Never route such
+  a request to a standalone image task or generic subagent. Do not require the
+  user to choose between creation and revision workflows; select the applicable
+  reachable step from the user's request and the available artifacts. When the
+  current turn supplies a Markdown, plain-text, or LMD file to write, continue,
+  or revise, trigger this workflow before reading or editing that file with generic
+  attachment tools. Preserve its exact basename in request_context and let the
+  prepare step load it; do not substitute the file contents for its identity.
+  When triggering after clarification or a cloud-file read, request_context must
+  likewise preserve every user-supplied source and destination URL verbatim,
+  including URLs supplied through ask_user; a content summary never replaces
+  its locator.
+
+runtime:
+  exclusive_tool_capabilities:
+    - writer.create
+    - writer.revise
+  completed_continue_steps:
+    - write_flat_document
+    - write_document
+
+tool_scripts:
+  - path: scripts/tools.py
+    functions:
+      - writer_classify_structure
+      - writer_build_writing_task
+      - writer_load_local_document
+      - writer_collect_available_media
+      - writer_load_document
+      - writer_profile_resources
+      - writer_create_writing_context
+      - writer_prepare_workspace
+      - writer_prepare_outline
+      - writer_generate_outline
+      - writer_outline_workspace
+      - writer_generate_rewrite_outline
+      - writer_generate_rewrite_section_instructions
+      - writer_generate_section_instructions
+      - writer_generate_short_writing_plan
+      - writer_generate_short_document
+      - writer_resolve_visual_media
+      - writer_resolve_revision_media
+      - writer_generate_draft_document
+      - writer_flat_draft_workspace
+      - writer_draft_workspace
+      - writer_update_writing_context
+      - writer_export_markdown
+      - writer_render_document
+      - writer_save_document
+      - writer_convert_markdown_to_ir
+      - writer_create_document
+      - writer_publish_revision
+      - writer_replace_document
+      - writer_preview_selection_rewrite
+      - writer_sync_document
+      - writer_append_document
+      - writer_build_revision_task
+      - writer_locate_revision_target
+      - writer_generate_modify_plan
+      - writer_generate_revision_set
+      - writer_apply_revision
+      - writer_publish_revision
+      - writer_replace_document
+
+artifact_actions:
+  rewrite_selection:
+    slots: [outline_document, flat_draft_document, draft_document]
+    preview_tool: writer_preview_selection_rewrite
+  sync_document:
+    slots: [draft_document]
+    execute_tool: writer_sync_document
+  render_document:
+    slots: [source_document, outline_document, flat_draft_document, draft_document]
+    preview_tool: writer_render_document
+    execute_tool: writer_render_document
+  save_document:
+    slots: [outline_document, flat_draft_document, draft_document]
+    execute_tool: writer_save_document
+
+steps:
+  - id: prepare
+  - id: outline
+  - id: write_flat_document
+  - id: write_document
+
+slots:
+  - id: writer_command
+    label: Writer Command
+    type: file
+    cardinality: single
+  - id: writing_task
+    label: Writing Task
+    type: file
+    cardinality: single
+  - id: media_assets
+    label: Available Media
+    type: file
+    cardinality: single
+  - id: resolved_media_assets
+    label: Resolved Media
+    type: file
+    cardinality: single
+  - id: visual_plan
+    label: Visual Plan
+    type: file
+    cardinality: single
+  - id: resource_profiles
+    label: Resource Profiles
+    type: file
+    cardinality: single
+  - id: writing_context
+    label: Writing Context
+    type: file
+    cardinality: single
+  - id: source_document
+    label: Source Document
+    type: file
+    cardinality: single
+  - id: target_document
+    label: Cloud Document Target
+    type: file
+    cardinality: single
+
+  - id: outline_document
+    label: Outline
+    type: file
+    cardinality: single
+  - id: writing_context_after_outline
+    label: Writing Context After Outline
+    type: file
+    cardinality: single
+
+  - id: outline_revision_task
+    label: Outline Revision Task
+    type: file
+    cardinality: single
+  - id: outline_locate_result
+    label: Outline Located Blocks
+    type: file
+    cardinality: single
+  - id: outline_modify_plan
+    label: Outline Modification Plan
+    type: file
+    cardinality: single
+  - id: outline_revision_set
+    label: Outline Revision Set
+    type: file
+    cardinality: single
+  - id: outline_revision_result
+    label: Outline Revision Result
+    type: file
+    cardinality: single
+  - id: outline_write_result
+    label: Outline Cloud Sync Result
+    type: file
+    cardinality: single
+
+  - id: section_instructions
+    label: Section Instructions
+    type: file
+    cardinality: single
+  - id: short_writing_plan
+    label: Short Writing Plan
+    type: file
+    cardinality: single
+  - id: draft_blocks
+    label: Draft Blocks
+    type: file
+    cardinality: list
+    ordered: true
+  - id: draft_document
+    label: Full Draft
+    type: file
+    cardinality: single
+  - id: flat_draft_document
+    label: Flat Draft
+    type: file
+    cardinality: single
+  - id: flat_writing_context_after_draft
+    label: Writing Context After Flat Draft
+    type: file
+    cardinality: single
+  - id: flat_visual_plan
+    label: Flat Visual Plan
+    type: file
+    cardinality: single
+  - id: flat_resolved_media_assets
+    label: Flat Resolved Media
+    type: file
+    cardinality: single
+  - id: writing_context_after_draft
+    label: Writing Context After Draft
+    type: file
+    cardinality: single
+  - id: document_revision_task
+    label: Document Revision Task
+    type: file
+    cardinality: single
+  - id: document_locate_result
+    label: Document Located Blocks
+    type: file
+    cardinality: single
+  - id: document_modify_plan
+    label: Document Modification Plan
+    type: file
+    cardinality: single
+  - id: document_revision_set
+    label: Document Revision Set
+    type: file
+    cardinality: single
+  - id: document_revision_result
+    label: Document Revision Result
+    type: file
+    cardinality: single
+  - id: document_write_result
+    label: Document Cloud Sync Result
+    type: file
+    cardinality: single
+ui:
+  slots:
+    outline_document:
+      widgetType: writer-document
+    draft_document:
+      widgetType: writer-document
+    flat_draft_document:
+      widgetType: writer-document
+  tabs:
+    - id: prepare
+      step_id: prepare
+      label: Preparation
+      layout: list
+      slots:
+        - id: source_document
+
+    - id: outline
+      step_id: outline
+      label: Outline
+      layout: list
+      slots:
+        - id: outline_document
+      completed_continue_step: write_document
+
+    - id: result
+      status_step_ids:
+        - write_document
+        - write_flat_document
+      label: Final Document
+      layout: list
+      slots:
+        - id: draft_document
+        - id: flat_draft_document
+      composite_behavior:
+        hide_empty_columns: true
+        empty_column_scope: selected
+        mutually_exclusive:
+          - slots:
+              - draft_document
+              - flat_draft_document
+            prefer:
+              - draft_document
+              - flat_draft_document
+
+i18n:
+  zh-CN:
+    name: AI 写作
+    steps:
+      prepare: {label: 写作准备}
+      outline: {label: 大纲}
+      write_flat_document: {label: 短文成稿}
+      write_document: {label: 成稿}
+    tabs:
+      prepare: {label: 写作准备}
+      outline: {label: 大纲}
+      result: {label: 成稿}
+    slots:
+      writing_task: {label: 写作任务}
+      writer_command: {label: 写作控制命令}
+      media_assets: {label: 可用图片素材}
+      resolved_media_assets: {label: 已解析图片素材}
+      visual_plan: {label: 视觉规划}
+      resource_profiles: {label: 资源画像}
+      writing_context: {label: 写作上下文}
+      source_document: {label: 资源文档}
+      target_document: {label: 云文档目标}
+      outline_document: {label: 大纲}
+      section_instructions: {label: 章节规划}
+      short_writing_plan: {label: 短文写作计划}
+      draft_blocks: {label: 章节草稿}
+      draft_document: {label: 成稿}
+      flat_draft_document: {label: 成稿}
+      flat_writing_context_after_draft: {label: 成稿写作上下文}
+      flat_visual_plan: {label: 短文视觉规划}
+      flat_resolved_media_assets: {label: 短文已解析图片素材}

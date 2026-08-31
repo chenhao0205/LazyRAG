@@ -44,6 +44,7 @@ type AgentStore interface {
 	CreateAgentCommand(ctx context.Context, command store.AgentCommand) error
 	ListPendingAgentCommands(ctx context.Context, agentID string, now time.Time, limit int) ([]store.AgentCommand, error)
 	AckAgentCommand(ctx context.Context, ack store.AgentCommandAck) error
+	EnqueueBindingReconcile(ctx context.Context, req store.ReconcileRequest) (store.ReconcileResult, error)
 }
 
 type WatchEventScheduler interface {
@@ -256,6 +257,8 @@ func (h *Handler) registerRoutes(mux *http.ServeMux) {
 	// Binding target tree — used during source creation/editing.
 	routeAPI(mux, "POST", "/api/scan/binding-targets/tree/children", []string{"scan.write"}, h.listBindingTargetChildren)
 	routeAPI(mux, "POST", "/api/scan/binding-targets/tree/search", []string{"scan.write"}, h.searchBindingTargets)
+	routeAPI(mux, "POST", "/api/scan/binding-targets/tree/recommendations", []string{"scan.write"}, h.recommendBindingTargets)
+	routeAPI(mux, "POST", "/api/scan/binding-targets/tree/recommendations-list", []string{"scan.write"}, h.listRecommendedBindingTargets)
 	routeAPI(mux, "POST", "/api/scan/binding-targets/validate", []string{"scan.write"}, h.validateBindingTarget)
 
 	// Sources CRUD.

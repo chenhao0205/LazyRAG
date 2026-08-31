@@ -45,6 +45,7 @@ func init() {
 	registerError("caller_id: required", "CALLER_ID_REQUIRED", "Caller_id is required", http.StatusBadRequest)
 	registerError("chat_enabled is required", "CHAT_ENABLED_REQUIRED", "Chat_enabled is required", http.StatusBadRequest)
 	registerError("commit scan-control-plane db bootstrap", "COMMIT_SCAN_CONTROL_PLANE_DB_BOOTSTRAP", "Failed to commit the scan-control-plane database bootstrap", http.StatusInternalServerError)
+	registerErrorPattern("command_id: %s", "COMMAND_ID_INVALID", "Command_id is invalid", http.StatusBadRequest)
 	registerError("compensation poll interval must be positive", "COMPENSATION_POLL_INTERVAL_MUST_BE_POSITIVE", "Compensation poll interval must be positive", http.StatusBadRequest)
 	registerError("configure agent client", "CONFIGURE_AGENT_CLIENT", "Failed to configure the Agent client", http.StatusInternalServerError)
 	registerError("configure auth service admin verifier", "CONFIGURE_AUTH_SERVICE_ADMIN_VERIFIER", "Failed to configure the auth service administrator verifier", http.StatusInternalServerError)
@@ -303,4 +304,6 @@ func init() {
 	registerError("document state insert was not visible", "DOCUMENT_STATE_INSERT_NOT_VISIBLE", "Inserted document state is not visible", http.StatusInternalServerError)
 	registerError("document not found", "DOCUMENT_NOT_FOUND", "Document not found", http.StatusNotFound)
 	registerError("parse task not found", "TASK_NOT_FOUND", "Task not found", http.StatusNotFound)
+	registerError("core internal token is not configured", "CORE_INTERNAL_TOKEN_NOT_CONFIGURED", "Core internal token is not configured", http.StatusInternalServerError)
+	registerError("batch get dataset usage", "DATASET_USAGE_BATCH_FAILED", "Failed to query dataset usage", http.StatusBadGateway)
 }

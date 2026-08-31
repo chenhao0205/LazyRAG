@@ -25,6 +25,7 @@ type SubAgentTask struct {
 	WorkspacePath     string          `gorm:"column:workspace_path;type:varchar(512);not null;default:''"`
 	InputSlots        json.RawMessage `gorm:"column:input_slots;type:json;not null;default:'[]'"`
 	OutputSlots       json.RawMessage `gorm:"column:output_slots;type:json;not null;default:'[]'"`
+	Sources           RawJSON         `gorm:"column:sources;type:json;not null;default:'[]'"`
 	CreateUserID      string          `gorm:"column:create_user_id;type:varchar(255);not null;default:''"`
 	CreatedAt         time.Time       `gorm:"column:created_at;not null"`
 	UpdatedAt         time.Time       `gorm:"column:updated_at;not null"`
@@ -61,10 +62,10 @@ type SubAgentArtifact struct {
 
 func (SubAgentArtifact) TableName() string { return "sub_agent_artifacts" }
 
-// PluginHumanArtifact stores content written by human edits to plugin slots.
+// WorkflowHumanArtifact stores content written by human edits to plugin slots.
 // Structure mirrors SubAgentArtifact but scoped to a session rather than a task.
 // Value format is identical to SubAgentArtifact.Value.
-type PluginHumanArtifact struct {
+type WorkflowHumanArtifact struct {
 	ID          string          `gorm:"column:id;type:varchar(36);primaryKey"`
 	SessionID   string          `gorm:"column:session_id;type:varchar(36);not null"`
 	Slot        string          `gorm:"column:slot;type:varchar(64);not null"`
@@ -74,4 +75,4 @@ type PluginHumanArtifact struct {
 	CreatedAt   time.Time       `gorm:"column:created_at;not null"`
 }
 
-func (PluginHumanArtifact) TableName() string { return "plugin_human_artifacts" }
+func (WorkflowHumanArtifact) TableName() string { return "plugin_human_artifacts" }

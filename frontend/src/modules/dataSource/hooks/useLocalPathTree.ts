@@ -2,26 +2,57 @@ import { useEffect, useRef, useState } from "react";
 import type { FormInstance, TreeSelectProps } from "antd";
 import type { TFunction } from "i18next";
 import { getLocalizedErrorMessage } from "@/components/request";
+import {
+  chooseLocalDiscoveryRoots,
+  discoverLocalFolders,
+  localFolderAccessStatus,
+  type DesktopLocalFolderAccessState,
+} from "@/runtime/desktopBridge";
+import { isDesktopRuntime } from "@/runtime/mode";
 import { dataSourceScanApi } from "../api/clients";
+import { listLocalPathRecommendations } from "../api/localPathRecommendations";
 import type { SourceFormValues } from "../constants/types";
 import { getScanTreeNodePath, type ScanV2TreeNode } from "../utils/scanAccessors";
-import type { LocalPathTreeNode } from "../utils/feishuTarget";
+import type {
+  LocalPathRecommendation,
+  LocalPathTreeNode,
+} from "../utils/feishuTarget";
 
 interface UseLocalPathTreeParams {
   t: TFunction;
   form: FormInstance<SourceFormValues>;
   getPreferredLocalAgentId: () => string;
+  recommendationsEnabled?: boolean;
+  autoPromptDiscovery?: boolean;
 }
 
 export function useLocalPathTree({
   t,
   form,
   getPreferredLocalAgentId,
+  recommendationsEnabled = false,
+  autoPromptDiscovery = true,
 }: UseLocalPathTreeParams) {
   const [localPathOptions, setLocalPathOptions] = useState<LocalPathTreeNode[]>([]);
   const [localPathLoading, setLocalPathLoading] = useState(false);
+  const [localPathRecommendations, setLocalPathRecommendations] = useState<
+    LocalPathRecommendation[]
+  >([]);
+  const [localPathRecommendationsLoading, setLocalPathRecommendationsLoading] =
+    useState(false);
+  const [localPathRecommendationsError, setLocalPathRecommendationsError] =
+    useState("");
+  const [localDiscoveryAccess, setLocalDiscoveryAccess] =
+    useState<DesktopLocalFolderAccessState | null>(null);
+  const [localDiscoveryChoosing, setLocalDiscoveryChoosing] = useState(false);
   const localPathRequestSeqRef = useRef(0);
+  const recommendationsRequestSeqRef = useRef(0);
+  const recommendationsLoadedRef = useRef(false);
+  const discoveryPromptedForOpenRef = useRef(false);
+  const recommendationsEnabledRef = useRef(recommendationsEnabled);
   const localPathSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  recommendationsEnabledRef.current = recommendationsEnabled;
 
   useEffect(
     () => () => {
@@ -31,6 +62,135 @@ export function useLocalPathTree({
     },
     [],
   );
+
+  const loadLocalPathRecommendations = async (forceRefresh = false) => {
+    if (!recommendationsEnabledRef.current) {
+      return;
+    }
+    const requestSeq = recommendationsRequestSeqRef.current + 1;
+    recommendationsRequestSeqRef.current = requestSeq;
+    setLocalPathRecommendationsLoading(true);
+    setLocalPathRecommendationsError("");
+    const recommendations: LocalPathRecommendation[] = [];
+    const errors: unknown[] = [];
+    try {
+      if (!isDesktopRuntime()) {
+        try {
+          const response = await listLocalPathRecommendations({
+            agent_id: getPreferredLocalAgentId() || undefined,
+            force_refresh: forceRefresh,
+          });
+          const items = (response.data.items || []) as ScanV2TreeNode[];
+          items.forEach((item) => {
+            const value = getScanTreeNodePath(item);
+            if (!value) {
+              return;
+            }
+            const providerPath = `${item.provider_meta?.path || ""}`.trim();
+            recommendations.push({
+              key: `${item.key || value}`,
+              value,
+              title: `${item.display_name || item.object_key || value}`,
+              path: providerPath || `${item.object_key || value}`,
+              source: "server",
+            });
+          });
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+
+      try {
+        const access = await localFolderAccessStatus();
+        if (recommendationsRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setLocalDiscoveryAccess(access);
+        if (!autoPromptDiscovery) {
+          recommendations.push(...(access?.items || []));
+        }
+        if (access?.discoveryConsentGranted && access.discoveryRoots.length > 0) {
+          const discovery = await discoverLocalFolders();
+          if (discovery) {
+            if (recommendationsRequestSeqRef.current !== requestSeq) {
+              return;
+            }
+            setLocalDiscoveryAccess(discovery);
+            recommendations.push(...(discovery.items || []));
+          }
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+
+      const merged = new Map<string, LocalPathRecommendation>();
+      recommendations.forEach((item) => {
+        const key = item.path || item.value;
+        if (!merged.has(key)) {
+          merged.set(key, item);
+        }
+      });
+      if (recommendationsRequestSeqRef.current !== requestSeq) {
+        return;
+      }
+      setLocalPathRecommendations([...merged.values()]);
+      if (merged.size === 0 && errors.length > 0) {
+        setLocalPathRecommendationsError(getLocalizedErrorMessage(errors[0]));
+      }
+      recommendationsLoadedRef.current = true;
+    } finally {
+      if (recommendationsRequestSeqRef.current === requestSeq) {
+        setLocalPathRecommendationsLoading(false);
+      }
+    }
+  };
+
+  const chooseLocalDiscoveryLocations = async () => {
+    setLocalDiscoveryChoosing(true);
+    setLocalPathRecommendationsError("");
+    try {
+      const access = await chooseLocalDiscoveryRoots();
+      if (!recommendationsEnabledRef.current) {
+        return;
+      }
+      if (access) {
+        setLocalDiscoveryAccess(access);
+      }
+      await loadLocalPathRecommendations(true);
+    } catch (error) {
+      setLocalPathRecommendationsError(getLocalizedErrorMessage(error));
+    } finally {
+      setLocalDiscoveryChoosing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!recommendationsEnabled) {
+      recommendationsRequestSeqRef.current += 1;
+      recommendationsLoadedRef.current = false;
+      discoveryPromptedForOpenRef.current = false;
+      setLocalPathRecommendations([]);
+      setLocalPathRecommendationsLoading(false);
+      setLocalPathRecommendationsError("");
+      setLocalDiscoveryAccess(null);
+      setLocalDiscoveryChoosing(false);
+      return;
+    }
+    if (!discoveryPromptedForOpenRef.current) {
+      discoveryPromptedForOpenRef.current = true;
+      if (autoPromptDiscovery) {
+        void chooseLocalDiscoveryLocations();
+      } else if (!recommendationsLoadedRef.current) {
+        void loadLocalPathRecommendations();
+      }
+    } else if (!recommendationsLoadedRef.current) {
+      void loadLocalPathRecommendations();
+    }
+    // Creating a Desktop source asks for discovery roots once per wizard
+    // opening. Editing only loads recommendations until the user explicitly
+    // chooses a broader search location. Web runtimes fall back to server data.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPromptDiscovery, recommendationsEnabled]);
 
   const buildLocalPathHelperOptions = (helperText?: string): LocalPathTreeNode[] => {
     if (!helperText) {
@@ -55,15 +215,19 @@ export function useLocalPathTree({
         const value =
           getScanTreeNodePath(node) || `${node.key || node.node_ref || node.display_name}`;
         const title = node.display_name || node.object_key || value;
+        const children = node.children?.length
+          ? mapLocalPathNodes(node.children)
+          : undefined;
         return {
           key: value,
           value,
           title,
-          isLeaf: !node.has_children,
+          isLeaf: children?.length ? false : !node.has_children,
           selectable: node.selectable !== false,
           disabled: node.selectable === false,
           nodeRef: node.node_ref,
           targetRef: node.target_ref || value,
+          children,
         };
       })
       .filter((node) => Boolean(node.value));
@@ -141,7 +305,14 @@ export function useLocalPathTree({
         return;
       }
 
-      const nodes = mapLocalPathNodes(response.data.items || []);
+      const mappedNodes = mapLocalPathNodes(response.data.items || []);
+      const nodes = normalizedPath
+        ? mappedNodes.flatMap((node) =>
+            node.targetRef === "/" && node.children?.length
+              ? node.children
+              : [node],
+          )
+        : mappedNodes;
       const nextNodes =
         nodes.length > 0
           ? nodes
@@ -231,6 +402,13 @@ export function useLocalPathTree({
   return {
     localPathOptions,
     localPathLoading,
+    localPathRecommendations,
+    localPathRecommendationsLoading,
+    localPathRecommendationsError,
+    localDiscoveryAccess,
+    localDiscoveryChoosing,
+    chooseLocalDiscoveryLocations,
+    loadLocalPathRecommendations,
     loadLocalPathOptions,
     handleSearchLocalPathOptions,
     handleLoadLocalPathChildren,

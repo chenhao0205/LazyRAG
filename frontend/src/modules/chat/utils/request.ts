@@ -27,7 +27,9 @@ import {
   DefaultApiFactory as CoreDefaultApiFactory,
   PromptsApiFactory as CorePromptsApiFactory,
   type ConversationHistoryListResponse,
+  type ConversationTrailListResponse,
   type DefaultApiApiCoreConversationsNameHistoryGetRequest,
+  type DefaultApiApiCoreConversationsNameTrailGetRequest,
   type PromptItem,
   type PromptCategory,
   type PromptCategoryListResponse,
@@ -48,6 +50,7 @@ import {
 } from "@/api/generated/knowledge-client";
 import { FileServiceApiFactory } from "@/api/generated/file-client";
 import { axiosInstance, BASE_URL } from "@/components/request";
+import type { ThinkingDepth } from "@/modules/chat/store/chatThink";
 import type { AxiosResponse, RawAxiosRequestConfig } from "axios";
 
 const coreApiBaseUrl = `${BASE_URL}/api/core`;
@@ -108,6 +111,8 @@ export interface ContextUsageReport {
   estimated_tokens: number;
   max_input_tokens?: number;
   estimated_ratio?: number;
+  compression_applied?: boolean;
+  compression_covered_through_seq?: number;
   categories: ContextUsageCategory[];
   estimation_version: string;
   preview_accuracy?: "deterministic" | "rule_only" | "llm_enhanced";
@@ -132,7 +137,8 @@ export function exportContextPrompt(payload: Record<string, unknown>) {
     .then((response) => response.data as Blob);
 }
 
-// SubAgent Task Center endpoints.
+// SubAgent task SSE endpoint. Granular execution events are streamed here so
+// they cannot crowd lifecycle events out of the conversation event channel.
 export const taskStreamUrl = (taskId: string) =>
   `${coreApiBaseUrl}/tasks/${encodeURIComponent(taskId)}:stream`;
 
@@ -180,17 +186,17 @@ export function TaskServiceApi() {
   };
 }
 
-// Plugin Info API — fetches plugin spec (including ui.tabs) from Go /api/core/plugins.
-export function PluginInfoApi() {
+// Workflow Info API — fetches workflow spec (including ui.tabs) from Go /api/core/workflows.
+export function WorkflowInfoApi() {
   return {
-    getPlugin(pluginId: string, options?: RawAxiosRequestConfig) {
+    getWorkflow(workflowId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugins/${encodeURIComponent(pluginId)}`,
+        `${coreApiBaseUrl}/workflows/${encodeURIComponent(workflowId)}`,
         options,
       );
     },
-    listPlugins(options?: RawAxiosRequestConfig) {
-      return axiosInstance.get(`${coreApiBaseUrl}/plugins`, options);
+    listWorkflows(options?: RawAxiosRequestConfig) {
+      return axiosInstance.get(`${coreApiBaseUrl}/workflows`, options);
     },
   };
 }
@@ -223,48 +229,156 @@ export interface SyncWriterDocumentResult {
   document: Record<string, unknown>;
 }
 
-// Plugin Session API.
-export function PluginSessionApi() {
+export interface WriteBackWriterDocumentResult {
+  status: "synced";
+  revision: number;
+  feishu_synced: boolean;
+  artifact_saved: boolean;
+  patch_result: SyncWriterDocumentPatchResult;
+  document: Record<string, unknown>;
+}
+
+export interface WriteBackWriterDocumentRequest {
+  base_revision: number;
+  slot?: WriterDocumentSlot;
+  source_document: Record<string, unknown>;
+  revised_document: Record<string, unknown>;
+}
+
+export type WriterDocumentSlot = 'outline_document' | 'flat_draft_document' | 'draft_document';
+export type WriterDocumentRepresentation = 'markdown' | 'ir';
+export type RenderedWriterDocument = string | Record<string, unknown>;
+
+export interface RenderWriterDocumentResult {
+  title: string;
+  representation: WriterDocumentRepresentation;
+  document: RenderedWriterDocument;
+}
+
+export interface SaveWriterDocumentResult extends RenderWriterDocumentResult {
+  revision: number;
+}
+
+export type RewriteSelection =
+  | { type: 'ir'; node_id: string }
+  | { type: 'markdown'; selected_text: string }
+  | {
+    type: 'ppt_html';
+    page: number;
+    el: string;
+    /** 1-based occurrence among elements carrying the same data-el. */
+    index?: number;
+    group?: string;
+    selected_text?: string;
+    computed_style?: {
+      font_size?: string;
+      width?: string;
+      height?: string;
+      line_height?: string;
+      letter_spacing?: string;
+      text_align?: string;
+      font_weight?: string;
+    };
+  };
+
+export interface RewriteSelectionPreviewRequest {
+  action: 'rewrite_selection';
+  base_revision: number;
+  input: {
+    instruction: string;
+    selection: RewriteSelection;
+  };
+}
+
+export interface RewriteSelectionPreview {
+  status: 'ready';
+  action: 'rewrite_selection';
+  base_revision: number;
+  representation: 'ir' | 'markdown' | 'ppt_html';
+  target: {
+    type: 'block';
+    block_type: string;
+    node_id?: string;
+    el?: string;
+    index?: number;
+    group?: string;
+    page?: number;
+  };
+  preview: {
+    old_text: string;
+    new_text: string;
+  };
+  patch: {
+    type: 'writer_ir_patch' | 'string_replace_set' | 'ppt_html_ops';
+    payload: Record<string, unknown>;
+  };
+  artifact: {
+    content_type: string;
+    value: Record<string, unknown> | string;
+    caption?: string;
+  };
+  candidate_html?: string;
+  commit?: { token: string };
+  layout_notes?: string[];
+}
+
+export interface ExecuteArtifactActionRequest {
+  action: 'rewrite_selection';
+  base_revision: number;
+  input: { commit_token: string };
+}
+
+export interface ExecuteArtifactActionResult {
+  status: 'applied';
+  action: 'rewrite_selection';
+  base_revision: number;
+  revision: number;
+  representation: 'ppt_html';
+  artifact: RewriteSelectionPreview['artifact'];
+}
+
+// Workflow Session API.
+export function WorkflowSessionApi() {
   return {
     getLatestSession(conversationId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/plugin-sessions:latest`,
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/workflow-sessions:latest`,
         options,
       );
     },
     listSessions(conversationId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/plugin-sessions`,
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/workflow-sessions`,
         options,
       );
     },
     getSession(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}`,
         options,
       );
     },
     getSlots(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots`,
         options,
       );
     },
     getSteps(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/steps`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/steps`,
         options,
       );
     },
     getProjection(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/projection`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/projection`,
         options,
       );
     },
     patchSlot(sessionId: string, slotId: string, selectedRevision: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.patch(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}`,
         { selected_revision: selectedRevision },
         options,
       );
@@ -275,7 +389,7 @@ export function PluginSessionApi() {
       options?: RawAxiosRequestConfig,
     ) {
       return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:sync-search-config`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}:sync-search-config`,
         { search_config: searchConfig },
         options,
       );
@@ -283,7 +397,7 @@ export function PluginSessionApi() {
     // Phase 3: slot item management — addressed by stable list_index (not sort_order).
     deleteSlotItem(sessionId: string, slotId: string, listIndex: number, orderVersion?: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.delete(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}`,
         { ...options, data: orderVersion !== undefined ? { order_version: orderVersion } : undefined },
       );
     },
@@ -294,15 +408,51 @@ export function PluginSessionApi() {
       value: any,
       contentType?: string,
       mode?: SlotSaveMode,
+      baseRevision?: number,
       options?: RawAxiosRequestConfig,
     ) {
       return axiosInstance.patch(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}`,
         {
           value,
           ...(contentType ? { content_type: contentType } : {}),
           ...(mode ? { mode } : {}),
+          ...(baseRevision !== undefined ? { base_revision: baseRevision } : {}),
         },
+        options,
+      );
+    },
+    previewRewriteSelection(
+      sessionId: string,
+      slotId: string,
+      listIndex: number,
+      payload: RewriteSelectionPreviewRequest,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: RewriteSelectionPreview;
+      }>(
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}:action-preview`,
+        payload,
+        options,
+      );
+    },
+    executeArtifactAction(
+      sessionId: string,
+      slotId: string,
+      listIndex: number,
+      payload: ExecuteArtifactActionRequest,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: ExecuteArtifactActionResult;
+      }>(
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}:action-execute`,
+        payload,
         options,
       );
     },
@@ -318,68 +468,131 @@ export function PluginSessionApi() {
         message: string;
         data: SyncWriterDocumentResult;
       }>(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}:sync-writer-document`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}:sync-writer-document`,
+        payload,
+        options,
+      );
+    },
+    renderWriterDocument(
+      sessionId: string,
+      slot: WriterDocumentSlot,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: RenderWriterDocumentResult;
+      }>(
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/writer-document:render`,
+        { slot },
+        options,
+      );
+    },
+    saveWriterDocument(
+      sessionId: string,
+      baseRevision: number,
+      document: RenderedWriterDocument,
+      slot: WriterDocumentSlot,
+      mode: SlotSaveMode,
+      options?: RawAxiosRequestConfig,
+    ) {
+      const payload: Record<string, unknown> = {
+        base_revision: baseRevision,
+        document,
+        mode,
+      };
+      if (slot !== 'draft_document') payload.slot = slot;
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: SaveWriterDocumentResult;
+      }>(
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/writer-document:save`,
+        payload,
+        options,
+      );
+    },
+    writeBackWriterDocument(
+      sessionId: string,
+      baseRevision: number,
+      sourceDocument?: Record<string, unknown>,
+      revisedDocument?: Record<string, unknown>,
+      slot?: WriterDocumentSlot,
+      options?: RawAxiosRequestConfig,
+    ) {
+      const payload: Record<string, unknown> = { base_revision: baseRevision };
+      // Keep the legacy IR payload compatible while the server treats the
+      // selected revision as the authoritative write-back input.
+      if (sourceDocument !== undefined) payload.source_document = sourceDocument;
+      if (revisedDocument !== undefined) payload.revised_document = revisedDocument;
+      if (slot !== undefined && slot !== 'draft_document') payload.slot = slot;
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: WriteBackWriterDocumentResult;
+      }>(
+		`${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/writer-document:write-back`,
         payload,
         options,
       );
     },
     reorderSlotItems(sessionId: string, slotId: string, order: number[], version: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.patch(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/order`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/order`,
         { order, version },
         options,
       );
     },
     getSlotOrder(sessionId: string, slotId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/order`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/order`,
         options,
       );
     },
     getSlotItemVersions(sessionId: string, slotId: string, listIndex: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/versions`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/versions`,
         options,
       );
     },
     rollbackSlotItem(sessionId: string, slotId: string, listIndex: number, revision: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/rollback`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/rollback`,
         { revision },
         options,
       );
     },
     createSlotItem(sessionId: string, slotId: string, value: any, caption?: string, insertBefore?: number, contentType?: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items`,
         { value, ...(caption !== undefined ? { caption } : {}), ...(insertBefore !== undefined ? { insert_before: insertBefore } : {}), ...(contentType ? { content_type: contentType } : {}) },
         options,
       );
     },
     patchSlotCaption(sessionId: string, slotId: string, listIndex: number, caption: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.patch(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/caption`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/caption`,
         { caption },
         options,
       );
     },
     dismissSession(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:dismiss`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}:dismiss`,
         {},
         { headers: { 'Content-Type': 'application/json' }, ...options },
       );
     },
     restoreSession(sessionId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:restore`,
+        `${coreApiBaseUrl}/workflow-sessions/${encodeURIComponent(sessionId)}:restore`,
         {},
         { headers: { 'Content-Type': 'application/json' }, ...options },
       );
     },
     listDismissedSessions(conversationId: string, options?: RawAxiosRequestConfig) {
       return axiosInstance.get(
-        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/dismissed-plugin-sessions`,
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/dismissed-workflow-sessions`,
         options,
       );
     },
@@ -400,6 +613,21 @@ function withJsonOptions(
 
 export function ChatServiceApi() {
   return {
+    patchEditableBlock(
+      payload: {
+        conversation_id: string;
+        history_id: string;
+        base_content: string;
+        content: string;
+      },
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.patch<{ content: string; result: string }>(
+        `${coreApiBaseUrl}/conversations:editable-block`,
+        payload,
+        withJsonOptions(options),
+      );
+    },
     conversationServiceGetMultiAnswersSwitchStatus(options?: RawAxiosRequestConfig) {
       return axiosInstance.get<GetMultiAnswersSwitchStatusResponse>(
         `${coreApiBaseUrl}/conversation:switchStatus`,
@@ -476,6 +704,21 @@ export function ChatServiceApi() {
         },
       );
     },
+    conversationServiceSetPinned(
+      conversationId: string,
+      pinned: boolean,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<{
+        conversation_id: string;
+        is_pinned: boolean;
+        pinned_at?: string | null;
+      }>(
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}:${pinned ? "pin" : "unpin"}`,
+        undefined,
+        options,
+      );
+    },
     conversationServiceDeleteConversation(
       requestParameters: ConversationServiceApiConversationServiceDeleteConversationRequest,
       options?: RawAxiosRequestConfig,
@@ -511,6 +754,15 @@ export function ChatServiceApi() {
         requestParameters,
         options,
       ) as Promise<AxiosResponse<ConversationHistoryListResponse>>;
+    },
+    conversationServiceGetConversationTrail(
+      requestParameters: DefaultApiApiCoreConversationsNameTrailGetRequest,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return coreDefaultClient.apiCoreConversationsNameTrailGet(
+        requestParameters,
+        options,
+      ) as Promise<AxiosResponse<ConversationTrailListResponse>>;
     },
     conversationServiceBatchChat(
       requestParameters: ConversationServiceApiConversationServiceBatchChatRequest,
@@ -646,6 +898,26 @@ export function PromptServiceApi() {
         `${coreApiBaseUrl}/prompts/${encodeURIComponent(promptID)}:use`,
         undefined,
         silentOptions,
+      );
+    },
+    polishEditableSelection(
+      payload: {
+        content: string;
+        user_instruct: string;
+        allow_empty: true;
+        full_content?: string;
+        selection_start?: number;
+        selection_end?: number;
+      },
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<PromptPolishOpenAPIResponse & {
+        target_start?: number;
+        target_end?: number;
+      }>(
+        `${coreApiBaseUrl}/prompts:polish`,
+        payload,
+        withJsonOptions(options),
       );
     },
     promptServicePolishPrompt(
@@ -802,32 +1074,197 @@ export function TempUploadServiceApi() {
   };
 }
 
-export interface ConversationPluginSettings {
-  plugin_mode?: 'dynamic' | 'auto';
-  enable_subagent?: boolean;
-  enable_plugin?: boolean;
+export type ChatExecutor = string;
+
+export interface ChatExecutorDescriptor {
+  id: string;
+  display_name: string;
+  kind: 'internal' | 'external';
+  installed: boolean;
+  host_online: boolean;
+  available: boolean;
+  unavailable_reason?: string;
 }
 
-export function parseConversationPluginSettings(
+interface ChatExecutorsResponse {
+  code: number;
+  message: string;
+  data: { executors: ChatExecutorDescriptor[] };
+}
+
+export interface ConversationRuntimeSettings {
+  workflow_mode?: 'dynamic' | 'auto';
+  enable_subagent?: boolean;
+  enable_workflow?: boolean;
+  chat_executor?: ChatExecutor;
+}
+
+export interface ChatEntryConversationSettings {
+  workflow_mode: 'dynamic' | 'auto';
+  enable_subagent: boolean;
+  enable_workflow: boolean;
+  chat_executor: ChatExecutor;
+}
+
+export interface ChatEntryDefault {
+  thinking_depth: ThinkingDepth;
+  conversation_settings: ChatEntryConversationSettings;
+}
+
+export interface ChatEntryDefaults {
+  quick_question: ChatEntryDefault;
+  new_task: ChatEntryDefault;
+}
+
+export interface ChatSettingsResponse extends ConversationRuntimeSettings, ChatEntryDefaults {
+  updated_at?: string;
+}
+
+export type ChatEntryKind = keyof ChatEntryDefaults;
+
+export const FALLBACK_CHAT_ENTRY_DEFAULTS: ChatEntryDefaults = {
+  quick_question: {
+    thinking_depth: 'medium',
+    conversation_settings: {
+      chat_executor: 'lazymind',
+      enable_workflow: false,
+      workflow_mode: 'dynamic',
+      enable_subagent: true,
+    },
+  },
+  new_task: {
+    thinking_depth: 'high',
+    conversation_settings: {
+      chat_executor: 'lazymind',
+      enable_workflow: true,
+      workflow_mode: 'dynamic',
+      enable_subagent: true,
+    },
+  },
+};
+
+const thinkingDepthValues = new Set<ThinkingDepth>(['low', 'medium', 'high', 'max']);
+
+export function parseThinkingDepth(value: unknown): ThinkingDepth | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase() as ThinkingDepth;
+  return thinkingDepthValues.has(normalized) ? normalized : undefined;
+}
+
+export function resolveConversationThinkingDepth(conversation: unknown): ThinkingDepth {
+  const value = conversation && typeof conversation === 'object'
+    ? (conversation as { thinking_depth?: unknown }).thinking_depth
+    : undefined;
+  return parseThinkingDepth(value) ?? 'medium';
+}
+
+function normalizeChatEntryDefault(
+  value: unknown,
+  fallback: ChatEntryDefault,
+): ChatEntryDefault {
+  if (!value || typeof value !== 'object') return fallback;
+  const raw = value as Partial<ChatEntryDefault>;
+  const settings = raw.conversation_settings;
+  if (!settings || typeof settings !== 'object') return fallback;
+  const executor = typeof settings.chat_executor === 'string'
+    ? settings.chat_executor.trim()
+    : '';
+  const workflowMode = settings.workflow_mode;
+  const thinkingDepth = parseThinkingDepth(raw.thinking_depth);
+  if (
+    !thinkingDepth
+    || !executor
+    || (workflowMode !== 'dynamic' && workflowMode !== 'auto')
+    || typeof settings.enable_workflow !== 'boolean'
+    || typeof settings.enable_subagent !== 'boolean'
+  ) {
+    return fallback;
+  }
+  return {
+    thinking_depth: thinkingDepth,
+    conversation_settings: {
+      chat_executor: executor,
+      enable_workflow: settings.enable_workflow,
+      workflow_mode: workflowMode,
+      enable_subagent: settings.enable_subagent,
+    },
+  };
+}
+
+function unwrapChatSettings(payload: unknown): unknown {
+  if (payload && typeof payload === 'object' && 'data' in payload) {
+    return (payload as { data?: unknown }).data;
+  }
+  return payload;
+}
+
+export function parseChatEntryDefaults(payload: unknown): ChatEntryDefaults {
+  const raw = unwrapChatSettings(payload) as Partial<ChatSettingsResponse> | undefined;
+  const legacyWorkflowMode = raw?.workflow_mode === 'auto' || raw?.workflow_mode === 'dynamic'
+    ? raw.workflow_mode
+    : 'dynamic';
+  const legacySubagent = typeof raw?.enable_subagent === 'boolean'
+    ? raw.enable_subagent
+    : true;
+  const legacyWorkflow = typeof raw?.enable_workflow === 'boolean'
+    ? raw.enable_workflow
+    : true;
+  const legacyFallbacks: ChatEntryDefaults = {
+    quick_question: {
+      thinking_depth: 'medium',
+      conversation_settings: {
+        chat_executor: 'lazymind',
+        enable_workflow: false,
+        workflow_mode: legacyWorkflowMode,
+        enable_subagent: legacySubagent,
+      },
+    },
+    new_task: {
+      thinking_depth: 'high',
+      conversation_settings: {
+        chat_executor: 'lazymind',
+        enable_workflow: legacyWorkflow,
+        workflow_mode: legacyWorkflowMode,
+        enable_subagent: legacySubagent,
+      },
+    },
+  };
+  return {
+    quick_question: normalizeChatEntryDefault(
+      raw?.quick_question,
+      legacyFallbacks.quick_question,
+    ),
+    new_task: normalizeChatEntryDefault(
+      raw?.new_task,
+      legacyFallbacks.new_task,
+    ),
+  };
+}
+
+export function parseConversationRuntimeSettings(
   conversation?: {
-    enable_plugin?: boolean | null;
-    plugin_mode?: string | null;
+    enable_workflow?: boolean | null;
+    workflow_mode?: string | null;
     enable_subagent?: boolean | null;
+    chat_executor?: string | null;
   } | null,
-): ConversationPluginSettings | undefined {
+): ConversationRuntimeSettings | undefined {
   if (!conversation) {
     return undefined;
   }
-  const settings: ConversationPluginSettings = {};
-  if (conversation.enable_plugin != null) {
-    settings.enable_plugin = conversation.enable_plugin;
+  const settings: ConversationRuntimeSettings = {};
+  if (conversation.enable_workflow != null) {
+    settings.enable_workflow = conversation.enable_workflow;
   }
-  const rawMode = conversation.plugin_mode;
+  const rawMode = conversation.workflow_mode;
   if (rawMode === 'dynamic' || rawMode === 'auto') {
-    settings.plugin_mode = rawMode;
+    settings.workflow_mode = rawMode;
   }
   if (conversation.enable_subagent != null) {
     settings.enable_subagent = conversation.enable_subagent;
+  }
+  if (typeof conversation.chat_executor === 'string' && conversation.chat_executor.trim()) {
+    settings.chat_executor = conversation.chat_executor.trim();
   }
   return Object.keys(settings).length > 0 ? settings : undefined;
 }
@@ -835,19 +1272,36 @@ export function parseConversationPluginSettings(
 export function ConversationSettingsApi() {
   return {
     getChatSettings(options?: RawAxiosRequestConfig) {
-      return axiosInstance.get<ConversationPluginSettings>(
+      return axiosInstance.get<ChatSettingsResponse>(
         `${coreApiBaseUrl}/user/chat-settings`,
         options,
       );
     },
-    patchPluginSettings(
+    patchChatEntryDefault(
+      kind: ChatEntryKind,
+      settings: ChatEntryDefault,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.patch<ChatSettingsResponse>(
+        `${coreApiBaseUrl}/user/chat-settings`,
+        { [kind]: settings },
+        options,
+      );
+    },
+    patchConversationSettings(
       conversationId: string,
-      settings: ConversationPluginSettings,
+      settings: ConversationRuntimeSettings,
       options?: RawAxiosRequestConfig,
     ) {
       return axiosInstance.patch(
-        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/plugin-settings`,
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/settings`,
         settings,
+        options,
+      );
+    },
+    listChatExecutors(options?: RawAxiosRequestConfig) {
+      return axiosInstance.get<ChatExecutorsResponse>(
+        `${coreApiBaseUrl}/chat/executors`,
         options,
       );
     },

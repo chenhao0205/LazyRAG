@@ -1,5 +1,9 @@
+import type { ReactNode } from "react";
 import { Alert, Form, Input, Modal, Skeleton, Tag } from "antd";
-import { ArrowRightOutlined, FolderOpenOutlined } from "@ant-design/icons";
+import {
+  ArrowRightOutlined,
+  FolderOpenOutlined,
+} from "@ant-design/icons";
 import { FeishuCredentialHintAlertFromForm } from "@/modules/dataSource/common/FeishuCredentialHintAlert";
 import { formatValidFeishuAccountNames } from "@/modules/dataSource/utils/feishuAccount";
 import { cloudAuthProviderOptions, cloudProviderOptions } from "../constants/cloudProviderOptions";
@@ -30,6 +34,9 @@ function getProviderDescription(
   t: CloudDocumentProvidersVm["t"],
   vm: CloudDocumentProvidersVm,
 ) {
+  if (type === "local") {
+    return t("modelProvider.cloudDocuments.localDetailSubtitle");
+  }
   if (type === "feishu") {
     if (vm.isFeishuAuthValid) {
       return t("modelProvider.cloudDocuments.feishuConnectedHint", {
@@ -63,6 +70,43 @@ function getProviderDescription(
   return t("modelProvider.cloudDocuments.notionAuthPendingHint");
 }
 
+function ProviderLogo({
+  type,
+  icon,
+  logoUrl,
+}: {
+  type: string;
+  icon: ReactNode;
+  logoUrl?: string;
+}) {
+  if (type === "local") {
+    return (
+      <span className="model-provider-cloud-doc-resource-logo">
+        <FolderOpenOutlined />
+      </span>
+    );
+  }
+  return (
+    <span className="model-provider-cloud-doc-resource-logo">
+      <span className="model-provider-cloud-doc-resource-fallback-icon">{icon}</span>
+      {logoUrl ? (
+        <img
+          alt=""
+          aria-hidden="true"
+          loading="lazy"
+          src={logoUrl}
+          onLoad={(event) => {
+            event.currentTarget.classList.add("is-loaded");
+          }}
+          onError={(event) => {
+            event.currentTarget.style.display = "none";
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
 export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentProvidersVm }) {
   const {
     t,
@@ -80,15 +124,12 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
 
   if (vm.loading) {
     return (
-      <div
-        className="model-provider-cloud-doc-grid"
-        aria-busy="true"
-      >
+      <div className="model-provider-cloud-doc-grid" aria-busy="true">
         {cloudProviderOptions
           .filter((item) => item.type !== "local" || canCreateLocalSource)
           .map((item) => (
             <div className="model-provider-cloud-doc-skeleton" key={item.type}>
-              <Skeleton active avatar={{ shape: "square", size: 44 }} paragraph={{ rows: 1 }} />
+              <Skeleton active avatar={{ shape: "square", size: 44 }} paragraph={{ rows: 3 }} />
             </div>
           ))}
       </div>
@@ -98,27 +139,27 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
   return (
     <div className="model-provider-cloud-doc-grid">
       {canCreateLocalSource ? (
-        <button
-          type="button"
-          className="model-provider-cloud-doc-resource-row"
-          onClick={handleManageLocalSource}
-        >
-          <span className="model-provider-cloud-doc-resource-logo">
-            <FolderOpenOutlined />
-          </span>
+        <div className="model-provider-cloud-doc-resource-row">
+          <ProviderLogo type="local" icon={<FolderOpenOutlined />} />
           <div className="model-provider-cloud-doc-resource-copy">
-            <h2>{getProviderTitle("local", t)}</h2>
-            <p>{t("modelProvider.cloudDocuments.localDetailSubtitle")}</p>
+            <h3>{getProviderTitle("local", t)}</h3>
+            <p>{getProviderDescription("local", t, vm)}</p>
           </div>
-          <div className="model-provider-cloud-doc-directory-count">
+          <div className="model-provider-cloud-doc-resource-count">
             <strong>{vm.localSourceCount}</strong>
-            <span>{t("modelProvider.cloudDocuments.directoryCountUnit")}</span>
+            {t("modelProvider.cloudDocuments.directoryUnit")}
           </div>
-          <span className="model-provider-cloud-doc-resource-action">
-            {t("modelProvider.cloudDocuments.manageLocal")}
-            <ArrowRightOutlined />
-          </span>
-        </button>
+          <div className="model-provider-cloud-doc-resource-controls">
+            <button
+              type="button"
+              className="model-provider-cloud-doc-resource-action"
+              onClick={handleManageLocalSource}
+            >
+              {t("modelProvider.cloudDocuments.manageLocal")}
+              <ArrowRightOutlined />
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {cloudAuthProviderOptions.map((item) => {
@@ -137,44 +178,26 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
             ? t("modelProvider.cloudDocuments.credentialMissing")
             : t("modelProvider.cloudDocuments.authPending");
 
+        const handleManage = () => {
+          if (isFeishu) {
+            handleManageFeishuAuth();
+            return;
+          }
+          if (isGoogleDrive) {
+            handleManageGoogleDrive();
+            return;
+          }
+          handleOpenNotionSetup();
+        };
+
         return (
-          <button
+          <div
             key={item.type}
-            type="button"
             className={`model-provider-cloud-doc-resource-row${isProviderLocked ? " is-locked" : ""}`}
-            onClick={() => {
-              if (isFeishu) {
-                handleManageFeishuAuth();
-                return;
-              }
-              if (isGoogleDrive) {
-                handleManageGoogleDrive();
-                return;
-              }
-              handleOpenNotionSetup();
-            }}
           >
-            <span className="model-provider-cloud-doc-resource-logo">
-              <span className="model-provider-cloud-doc-resource-fallback-icon">
-                {item.icon}
-              </span>
-              {item.logoUrl ? (
-                <img
-                  alt=""
-                  aria-hidden="true"
-                  loading="lazy"
-                  src={item.logoUrl}
-                  onLoad={(event) => {
-                    event.currentTarget.classList.add("is-loaded");
-                  }}
-                  onError={(event) => {
-                    event.currentTarget.style.display = "none";
-                  }}
-                />
-              ) : null}
-            </span>
+            <ProviderLogo type={item.type} icon={item.icon} logoUrl={item.logoUrl} />
             <div className="model-provider-cloud-doc-resource-copy">
-              <h2>{getProviderTitle(item.type, t)}</h2>
+              <h3>{getProviderTitle(item.type, t)}</h3>
               <p>{getProviderDescription(item.type, t, vm)}</p>
             </div>
             <Tag
@@ -185,13 +208,19 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
             >
               {authStatusText}
             </Tag>
-            <span className="model-provider-cloud-doc-resource-action">
-              {isAuthValid
-                ? t("modelProvider.cloudDocuments.manageAccount")
-                : t("modelProvider.cloudDocuments.configureConnection")}
-              <ArrowRightOutlined />
-            </span>
-          </button>
+            <div className="model-provider-cloud-doc-resource-controls">
+              <button
+                type="button"
+                className="model-provider-cloud-doc-resource-action"
+                onClick={handleManage}
+              >
+                {isAuthValid
+                  ? t("modelProvider.cloudDocuments.manageAccount")
+                  : t("modelProvider.cloudDocuments.configureConnection")}
+                <ArrowRightOutlined />
+              </button>
+            </div>
+          </div>
         );
       })}
     </div>
@@ -243,7 +272,13 @@ export function CloudDocumentModals({ vm }: { vm: CloudDocumentProvidersVm }) {
           name="appId"
           rules={[{ required: true, message: t("modelProvider.cloudDocuments.appIdRequired") }]}
         >
-          <Input placeholder={t("modelProvider.cloudDocuments.appIdPlaceholder")} />
+          <Input
+            placeholder={t(
+              cloudSetupProvider === "notion"
+                ? "modelProvider.cloudDocuments.notionAppIdPlaceholder"
+                : "modelProvider.cloudDocuments.appIdPlaceholder",
+            )}
+          />
         </Form.Item>
         <Form.Item
           label={t("modelProvider.cloudDocuments.appSecret")}

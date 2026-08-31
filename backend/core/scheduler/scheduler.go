@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/settings"
 	"lazymind/core/store"
 	"lazymind/core/taskcenter"
 )
@@ -27,6 +30,10 @@ import (
 
 // CreateSchedule inserts a new UserSchedule and computes the first next_run_at.
 func CreateSchedule(ctx context.Context, db *gorm.DB, s *orm.UserSchedule) error {
+	s.Name = strings.TrimSpace(s.Name)
+	if s.Name == "" {
+		return errors.New("name required")
+	}
 	if s.ID == "" {
 		s.ID = common.GeneratePrefixedID("sched_", 36)
 	}
@@ -66,6 +73,30 @@ func CancelSchedule(ctx context.Context, db *gorm.DB, userID, id string) error {
 	return db.WithContext(ctx).Model(&orm.UserSchedule{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Updates(map[string]any{"enabled": false}).Error
+}
+
+// DeleteSchedule permanently removes a schedule rule and its dependency edges.
+// Historical task-center runs are intentionally kept; they are independent
+// execution records and can still be removed from the task center separately.
+func DeleteSchedule(ctx context.Context, db *gorm.DB, userID, id string) error {
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var schedule orm.UserSchedule
+		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&schedule).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ? AND (source_schedule_id = ? OR target_schedule_id = ?)", userID, id, id).
+			Delete(&orm.ScheduleDependency{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id = ? AND user_id = ?", id, userID).Delete(&orm.UserSchedule{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
 }
 
 // nextCronTime parses a cron expression and returns the next fire time.
@@ -230,11 +261,24 @@ func truncateRunes(s string, maxRunes int, suffix string) string {
 // ── Scheduler loop ────────────────────────────────────────────────────────────
 
 // RunScheduler starts a goroutine that fires due schedules every 30 seconds.
-// Call once at application startup. The goroutine stops when ctx is cancelled.
-// Task status is now derived on read via resolveTaskStatus (chat_histories presence),
-// so no periodic reconciler is needed here.
-func RunScheduler(ctx context.Context, db *gorm.DB, chatBaseURL string) {
+// Call once at application startup. The goroutine stops when ctx is cancelled,
+// at which point the returned channel is closed so callers can wait for the
+// ticker loop to fully exit. Task status is now derived on read via
+// resolveTaskStatus (chat_histories presence), so no periodic reconciler is
+// needed here.
+//
+// The returned channel only tracks the ticker goroutine. fireOne may launch
+// detached task-execution goroutines (sendScheduledChatRequest) that run with
+// context.Background and outlive this loop — they are deliberately not waited
+// on, because scheduled tasks are user business work that should complete even
+// when the process is stopping. Callers that close shared resources (e.g. the
+// DB pool) on Done() must account for those detached writes still being in
+// flight; in core, the DB/Redis pools are intentionally not closed on shutdown
+// for this reason.
+func RunScheduler(ctx context.Context, db *gorm.DB, chatBaseURL string) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		repairFutureScheduleNextRunsAt(ctx, db, time.Now().UTC())
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -248,6 +292,7 @@ func RunScheduler(ctx context.Context, db *gorm.DB, chatBaseURL string) {
 			}
 		}
 	}()
+	return done
 }
 
 // repairFutureScheduleNextRunsAt corrects future timestamps produced when a
@@ -279,6 +324,31 @@ func repairFutureScheduleNextRunsAt(ctx context.Context, db *gorm.DB, now time.T
 	}
 }
 
+// RecomputeEnabledSchedules moves an enabled user's schedules forward from now.
+// It deliberately does not create work or alter run history, which means a
+// task-center resume never backfills triggers missed while the master switch was
+// paused.
+func RecomputeEnabledSchedules(ctx context.Context, db *gorm.DB, userID string, now time.Time) error {
+	var schedules []orm.UserSchedule
+	if err := db.WithContext(ctx).
+		Where("user_id = ? AND enabled = ?", userID, true).
+		Find(&schedules).Error; err != nil {
+		return err
+	}
+	for _, schedule := range schedules {
+		next, err := nextCronTimeAfter(schedule.CronExpr, schedule.Timezone, now)
+		if err != nil {
+			return err
+		}
+		if err := db.WithContext(ctx).Model(&orm.UserSchedule{}).
+			Where("id = ? AND user_id = ?", schedule.ID, userID).
+			Update("next_run_at", next.UTC()).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // maxConcurrentFires is the maximum number of schedules fired concurrently in one tick.
 const maxConcurrentFires = 50
 
@@ -296,6 +366,14 @@ func fireSchedules(ctx context.Context, db *gorm.DB, _ string) {
 	var wg sync.WaitGroup
 	for _, s := range due {
 		s := s
+		controls, err := settings.LoadFeatureControls(ctx, db, s.UserID)
+		if err != nil {
+			continue
+		}
+		if !controls.SchedulesEnabled {
+			_ = RecomputeEnabledSchedules(ctx, db, s.UserID, now)
+			continue
+		}
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
@@ -309,6 +387,10 @@ func fireSchedules(ctx context.Context, db *gorm.DB, _ string) {
 }
 
 func fireOne(ctx context.Context, db *gorm.DB, s orm.UserSchedule, firedAt time.Time) {
+	controls, err := settings.LoadFeatureControls(ctx, db, s.UserID)
+	if err != nil || !controls.SchedulesEnabled {
+		return
+	}
 	scheduledAt := s.NextRunAt.UTC()
 	// Compute next run time first so we can CAS before creating any records.
 	next, err := nextCronTime(s.CronExpr, s.Timezone)
@@ -397,23 +479,24 @@ func fireOne(ctx context.Context, db *gorm.DB, s orm.UserSchedule, firedAt time.
 }
 
 // createTaskConversation creates a new conversation flagged as is_task_conv=true.
-// Plugin and subagent are explicitly enabled so scheduled tasks always run regardless
+// Workflow and subagent are explicitly enabled so scheduled tasks always run regardless
 // of the user's global chat settings.
 // Returns the new conversation ID, or "" on failure.
 func createTaskConversation(ctx context.Context, db *gorm.DB, userID, promptTemplate string) string {
 	displayName := truncateRunes(promptTemplate, 40, "...")
 	now := time.Now().UTC()
-	enablePlugin := true
-	pluginMode := "auto"
+	enableWorkflow := true
+	workflowMode := "auto"
 	enableSubagent := true
 	conv := orm.Conversation{
 		ID:             common.GeneratePrefixedID("conv_", 36),
 		DisplayName:    displayName,
 		ChannelID:      "default",
 		IsTaskConv:     true,
-		EnablePlugin:   &enablePlugin,
-		PluginMode:     &pluginMode,
+		EnableWorkflow: &enableWorkflow,
+		WorkflowMode:   &workflowMode,
 		EnableSubagent: &enableSubagent,
+		ThinkingDepth:  "high",
 		BaseModel: orm.BaseModel{
 			CreateUserID: userID,
 			CreatedAt:    now,
@@ -438,16 +521,20 @@ func renderPromptTemplate(tpl string, t time.Time) string {
 }
 
 // sendScheduledChatRequest fires a chat request for a scheduled task in a background
-// goroutine. Status is no longer written here; resolveTaskStatus derives it on read
-// from chat_histories (present = completed, absent + old = failed).
+// goroutine and persists either the finalized output or a concrete failure reason.
 func sendScheduledChatRequest(userID, convID, taskID string, db *gorm.DB, reqBody map[string]any) {
 	coreURL := common.CoreSelfEndpoint() + "/conversations:chat"
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		failScheduledTask(db, taskID, "创建任务请求失败："+err.Error())
+		return
+	}
 	reqCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, coreURL, bytes.NewReader(body))
 	if err != nil {
 		fmt.Printf("[Scheduler] sendScheduledChatRequest: build request failed for task %s: %v\n", taskID, err)
+		failScheduledTask(db, taskID, "创建任务请求失败："+err.Error())
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -456,19 +543,39 @@ func sendScheduledChatRequest(userID, convID, taskID string, db *gorm.DB, reqBod
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Printf("[Scheduler] sendScheduledChatRequest: HTTP error for task %s: %v\n", taskID, err)
+		failScheduledTask(db, taskID, scheduledRequestFailureReason(err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		failScheduledTask(db, taskID, fmt.Sprintf("任务请求失败：服务返回 HTTP %d", resp.StatusCode))
 		return
 	}
 	// Drain the response body so the upstream goroutines can finish writing to
-	// Redis and DB before we exit. We do not use the status code to set task
-	// status — resolveTaskStatus handles that on read.
-	buf := make([]byte, 4096)
-	for {
-		if _, err := resp.Body.Read(buf); err != nil {
-			break
-		}
+	// Redis and DB before the task output is finalized.
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		fmt.Printf("[Scheduler] sendScheduledChatRequest: response stream failed for task %s: %v\n", taskID, err)
+		failScheduledTask(db, taskID, scheduledRequestFailureReason(err))
+		return
 	}
-	resp.Body.Close()
 	finalizeTaskOutput(context.Background(), db, taskID, convID)
+}
+
+func scheduledRequestFailureReason(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "任务执行超时（超过2小时）"
+	case errors.Is(err, context.Canceled):
+		return "任务执行被中断"
+	default:
+		return "任务请求失败：" + err.Error()
+	}
+}
+
+func failScheduledTask(db *gorm.DB, taskID, reason string) {
+	if err := taskcenter.UpdateTaskFailure(context.Background(), db, taskID, reason); err != nil {
+		fmt.Printf("[Scheduler] failed to persist failure reason for task %s: %v\n", taskID, err)
+	}
 }
 
 // ── API handlers ──────────────────────────────────────────────────────────────
@@ -633,12 +740,46 @@ func CancelScheduleHandler(w http.ResponseWriter, r *http.Request) {
 	common.ReplyOK(w, nil)
 }
 
+// DeleteScheduleHandler handles DELETE /schedules/{schedule_id}.
+func DeleteScheduleHandler(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(store.UserID(r))
+	if userID == "" {
+		common.ReplyErr(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/schedules/")
+	if id == "" {
+		common.ReplyErr(w, "schedule_id required", http.StatusBadRequest)
+		return
+	}
+
+	err := DeleteSchedule(r.Context(), store.DB(), userID, id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		common.ReplyErr(w, "schedule not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		common.ReplyErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	common.ReplyOK(w, nil)
+}
+
 // EnableScheduleHandler handles POST /schedules/{schedule_id}:enable
 func EnableScheduleHandler(w http.ResponseWriter, r *http.Request) {
 	userID := store.UserID(r)
 	path := strings.TrimPrefix(r.URL.Path, "/schedules/")
 	id := strings.TrimSuffix(path, ":enable")
 	db := store.DB()
+	controls, err := settings.LoadFeatureControls(r.Context(), db, userID)
+	if err != nil {
+		common.ReplyErr(w, "query task center settings failed", http.StatusInternalServerError)
+		return
+	}
+	if !controls.SchedulesEnabled {
+		common.ReplyErr(w, "scheduled tasks are paused in settings", http.StatusConflict)
+		return
+	}
 	// Recompute next_run_at from now so the schedule fires at the correct future time.
 	var s orm.UserSchedule
 	if err := db.WithContext(r.Context()).
@@ -765,6 +906,15 @@ func RunNowHandler(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/schedules/")
 	id := strings.TrimSuffix(path, ":run-now")
 	db := store.DB()
+	controls, err := settings.LoadFeatureControls(r.Context(), db, userID)
+	if err != nil {
+		common.ReplyErr(w, "query task center settings failed", http.StatusInternalServerError)
+		return
+	}
+	if !controls.SchedulesEnabled {
+		common.ReplyErr(w, "scheduled tasks are paused in settings", http.StatusConflict)
+		return
+	}
 	var s orm.UserSchedule
 	if err := db.WithContext(r.Context()).
 		Where("id = ? AND user_id = ?", id, userID).First(&s).Error; err != nil {

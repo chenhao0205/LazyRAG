@@ -11,8 +11,8 @@ type TaskCenterTask struct {
 	ID                string     `gorm:"column:id;type:varchar(36);primaryKey"`
 	UserID            string     `gorm:"column:user_id;type:varchar(255);not null;index:idx_tct_user_status,priority:1"`
 	ConversationID    string     `gorm:"column:conversation_id;type:varchar(36);not null"`
-	PluginSessionID   *string    `gorm:"column:plugin_session_id;type:varchar(36)"`
-	TaskType          string     `gorm:"column:task_type;type:varchar(32);not null"` // plugin_run | background_chat | scheduled
+	WorkflowSessionID *string    `gorm:"column:plugin_session_id;type:varchar(36)"`
+	TaskType          string     `gorm:"column:task_type;type:varchar(32);not null"` // workflow_run | background_chat | scheduled
 	Title             *string    `gorm:"column:title;type:text"`
 	Status            string     `gorm:"column:status;type:varchar(16);not null;default:pending;index:idx_tct_user_status,priority:2"` // pending|running|waiting|succeeded|failed|canceled
 	ScheduleID        *string    `gorm:"column:schedule_id;type:varchar(36)"`                                                          // FK → user_schedules.id; non-null when task_type=scheduled
@@ -22,7 +22,7 @@ type TaskCenterTask struct {
 	WindowStart       *time.Time `gorm:"column:window_start"`
 	WindowEnd         *time.Time `gorm:"column:window_end"`
 	TriggerType       string     `gorm:"column:trigger_type;type:varchar(32);not null;default:'manual'"`
-	Attempt           int        `gorm:"column:attempt;not null;default:1"`
+	Attempt           int        `gorm:"column:attempt;not null;default:1"` // Dependency scheduler increments this to fence stale claims.
 	DefinitionVersion int        `gorm:"column:definition_version;not null;default:1"`
 	DependencyStatus  string     `gorm:"column:dependency_status;type:varchar(32);not null;default:'none'"`
 	HasLateInputs     bool       `gorm:"column:has_late_inputs;not null;default:false"`
@@ -32,6 +32,7 @@ type TaskCenterTask struct {
 	UpdatedAt         time.Time  `gorm:"column:updated_at;not null"`
 	FinishedAt        *time.Time `gorm:"column:finished_at"`
 	ArchivedAt        *time.Time `gorm:"column:archived_at"` // non-null = hidden from task center list
+	ArchivedReason    string     `gorm:"column:archived_reason;type:varchar(32);not null;default:''"`
 }
 
 func (TaskCenterTask) TableName() string { return "task_center_tasks" }

@@ -10,6 +10,7 @@ func init() {
 	registerAdditionalError("active plugin session already exists for conversation", http.StatusConflict, 2001603)
 	registerAdditionalErrorPattern("active thread reservation no longer owns user %s", "Active thread reservation no longer owns the user", http.StatusInternalServerError, 2001604)
 	registerAdditionalError("another active or waiting session exists for this conversation", http.StatusConflict, 2001605)
+	registerAdditionalErrorAlias("another non-dismissed workflow session exists for this conversation", "another active or waiting session exists for this conversation", http.StatusConflict, 2001605)
 	registerAdditionalError("artifact caption is too long", http.StatusBadRequest, 2001606)
 	registerAdditionalError("artifact event is required", http.StatusBadRequest, 2001607)
 	registerAdditionalError("artifact id already exists", http.StatusConflict, 2001608)
@@ -24,6 +25,7 @@ func init() {
 	registerAdditionalError("binary blob has no storage key", http.StatusInternalServerError, 2001617)
 	registerAdditionalErrorPattern("binary blob storage key missing for %s", "Binary blob storage key is missing", http.StatusInternalServerError, 2001618)
 	registerAdditionalError("binary content is not available", http.StatusBadRequest, 2001619)
+	registerAdditionalErrorAlias("basic chat does not support workflow mentions", "Conflict", http.StatusConflict, 2000107)
 	registerAdditionalError("build invalid rows csv url failed", http.StatusInternalServerError, 2001620)
 	registerAdditionalErrorPattern("builtin skill %s missing skill.md", "Built-in skill is missing skill.md", http.StatusInternalServerError, 2001621)
 	registerAdditionalError("builtin skills root not found", http.StatusNotFound, 2001622)
@@ -192,6 +194,7 @@ func init() {
 	registerAdditionalError("mention resource_id required", http.StatusBadRequest, 2001785)
 	registerAdditionalError("mentioned skill is not accessible", http.StatusForbidden, 2001786)
 	registerAdditionalError("mentioned skill is unpublished", http.StatusInternalServerError, 2001787)
+	registerAdditionalErrorAlias("workflow mention is not accessible", "forbidden", http.StatusForbidden, 2000102)
 	registerAdditionalError("merge part failed", http.StatusInternalServerError, 2001788)
 	registerAdditionalErrorPattern("missing down migration for version %d", "Down migration is missing", http.StatusInternalServerError, 2001789)
 	registerAdditionalErrorPattern("missing migration file for applied version %d", "Applied migration file is missing", http.StatusNotFound, 2001790)
@@ -201,6 +204,7 @@ func init() {
 	registerAdditionalError("model name and type are required", http.StatusBadRequest, 2001794)
 	registerAdditionalError("move file failed", http.StatusInternalServerError, 2001795)
 	registerAdditionalError("no healthy router child process", http.StatusInternalServerError, 2001796)
+	registerAdditionalErrorAlias("non-dismissed workflow session already exists for conversation", "another active or waiting session exists for this conversation", http.StatusConflict, 2001605)
 	registerAdditionalError("no tasks submitted successfully", http.StatusInternalServerError, 2001797)
 	registerAdditionalError("no uploaded parts", http.StatusInternalServerError, 2001798)
 	registerAdditionalError("no valid tasks to start", http.StatusBadRequest, 2001799)
@@ -222,13 +226,33 @@ func init() {
 	registerAdditionalError("personal resource revision not found", http.StatusNotFound, 2001815)
 	registerAdditionalError("phase1 skeleton", http.StatusInternalServerError, 2001816)
 	registerAdditionalError("phase2 state_machine", http.StatusInternalServerError, 2001817)
-	registerAdditionalErrorAlias("plugin", "Plugin operation failed", http.StatusInternalServerError, 2001818)
+	registerAdditionalError("invalid start_phase", http.StatusBadRequest, 2001995)
+	registerAdditionalError("invalid generation resume point", http.StatusBadRequest, 2001996)
+	registerAdditionalError("resume point invalid", http.StatusBadRequest, 2001997)
+	registerAdditionalError("phase1 skeleton invalid", http.StatusBadGateway, 2001998)
+	registerAdditionalError("phase2 workflow invalid", http.StatusBadGateway, 2001999)
+	registerAdditionalError("workflow_yaml is empty", http.StatusBadGateway, 2002000)
+	registerAdditionalError("workflow_yaml invalid", http.StatusBadGateway, 2002001)
+	registerAdditionalError("workflow name is required", http.StatusBadGateway, 2002002)
+	registerAdditionalError("at least one slot is required", http.StatusBadGateway, 2002003)
+	registerAdditionalErrorPattern("slots[%d].id is required", "Generated workflow slot is missing an id", http.StatusBadGateway, 2002004)
+	registerAdditionalError("at least one step is required", http.StatusBadGateway, 2002005)
+	registerAdditionalErrorPattern("steps[%d].id is required", "Generated workflow step is missing an id", http.StatusBadGateway, 2002006)
+	registerAdditionalError("scenario.md is empty", http.StatusBadGateway, 2002007)
+	registerAdditionalError("scenario.md contains placeholder text", http.StatusBadGateway, 2002008)
+	registerAdditionalError("state_yaml invalid while checking scenario.md", http.StatusBadGateway, 2002009)
+	registerAdditionalErrorPattern("scenario.md does not document step %s", "Generated description is missing a workflow step", http.StatusBadGateway, 2002010)
+	registerAdditionalErrorPattern("scenario.md has no description after step %s", "Generated workflow step description is missing", http.StatusBadGateway, 2002011)
+	registerAdditionalErrorPattern("scenario.md description for step %s is too short", "Generated workflow step description is too short", http.StatusBadGateway, 2002012)
+	registerAdditionalError("design brief is not available", http.StatusBadRequest, 2002013)
+	registerAdditionalError("state machine is not valid", http.StatusBadRequest, 2002014)
+	registerAdditionalErrorAlias("plugin", "Workflow operation failed", http.StatusInternalServerError, 2001818)
 	registerAdditionalError("plugin mention is not accessible", http.StatusForbidden, 2001819)
-	registerAdditionalErrorPattern("plugin revision %s has no compiled graph", "Plugin revision has no compiled graph", http.StatusInternalServerError, 2001820)
+	registerAdditionalErrorPattern("plugin revision %s has no compiled graph", "Workflow revision has no compiled graph", http.StatusInternalServerError, 2001820)
 	registerAdditionalError("plugin source skill not found", http.StatusNotFound, 2001821)
 	registerAdditionalError("plugin step was accepted but task lookup failed", http.StatusInternalServerError, 2001822)
-	registerAdditionalError("plugin_id or step_id missing", http.StatusInternalServerError, 2001823)
-	registerAdditionalError("plugin.yaml, state.yml and scenario.md are required", http.StatusBadRequest, 2001824)
+	registerAdditionalError("workflow_id or step_id missing", http.StatusInternalServerError, 2001823)
+	registerAdditionalError("workflow.yaml, state.yml and scenario.md are required", http.StatusBadRequest, 2001824)
 	registerAdditionalError("precreate target document failed", http.StatusInternalServerError, 2001825)
 	registerAdditionalErrorPattern("provider %q requires non-empty %s and %s descriptions", "Provider descriptions must not be empty", http.StatusBadRequest, 2001826)
 	registerAdditionalError("provider name is required", http.StatusBadRequest, 2001827)
@@ -430,9 +454,10 @@ func init() {
 
 	// Stable aliases found by the repository-wide API/error-constructor audit.
 	// Reuse the public generic codes while preserving the source text as Detail.
+	registerAdditionalErrorPattern("call_mode must be '%s', '%s' or '%s'", "Invalid request", http.StatusBadRequest, 2000103)
+	registerAdditionalErrorAlias("workflow is paused", "Conflict", http.StatusConflict, 2000107)
 	for _, source := range []string{
-		"invalid channel intent request", "invalid channel intent state", "invalid channel command registry",
-		"invalid channel intent response", "basic chat does not support background execution",
+		"basic chat does not support background execution",
 		"basic chat does not support ask answers", "basic chat does not support plugin mentions",
 		"conversation_id, decision_id and a valid action are required", "conversation and x-user-id are required",
 		"invalid search config patch", "at most 20 knowledge bases are allowed",
@@ -442,36 +467,132 @@ func init() {
 		"session_ids required", "invalid cadence expression", "invalid cadence metadata",
 		"cadence interval must be between 1 and 52", "task description contains sensitive content",
 		"task description contains sensitive word",
+		"invalid artifact action preview request", "invalid artifact action target",
+		"base_revision must be greater than zero", "invalid target_document",
+		"invalid current writerdocument", "invalid resolved_media_assets",
+		"file slot requires file or file_list content type", "invalid writerdocument state",
+		"blocks must be an array", "source blocks must be an array",
+		"invalid writer artifact", "writer artifact has no local path",
+		"active draft_document must be an .lmd artifact",
+		"writer artifact path is outside allowed storage", "read writer artifact",
+		"active draft_document markdown is empty",
+		"active draft_document must be an .lmd or .md artifact",
+		"invalid writer download conversion key", "invalid writer download filename",
+		"invalid writer download conversion request", "invalid writer download source format",
+		"invalid writer download target format", "writer download conversion failed",
 	} {
 		registerAdditionalErrorAlias(source, "Invalid request", http.StatusBadRequest, 2000103)
 	}
 	for _, source := range []string{
 		"cannot disable workflows while a workflow is attached to the conversation", "revision conflict",
 		"tool-limit decision is no longer active",
+		"revision conflict; refresh and retry",
+		"current draft_document revision is already synchronized",
+		"initial feishu write-back has not completed",
+		"invalid synchronized writerdocument baseline",
+		"writerdocument identity does not match synchronized baseline",
+		"synchronized baseline is not bound to a feishu document",
+		"current writerdocument feishu binding does not match baseline",
+		"task center is paused in settings",
+		"scheduled tasks are paused in settings",
+		"skills and plugins are paused in settings", "workflows are paused in settings",
+		"document parsing is paused in settings",
 	} {
 		registerAdditionalErrorAlias(source, "Conflict", http.StatusConflict, 2000107)
 	}
 	registerAdditionalErrorAlias("knowledge base is not readable", "forbidden", http.StatusForbidden, 2000102)
+	registerAdditionalErrorAlias("workflow not found", "Resource not found", http.StatusNotFound, 2000408)
+	for _, source := range []string{
+		"workflow session not found", "selected artifact not found",
+		"writer session not found", "active draft_document not found",
+		"writer download conversion not found",
+	} {
+		registerAdditionalErrorAlias(source, "Resource not found", http.StatusNotFound, 2000106)
+	}
 	registerAdditionalErrorAlias("feishu authorization required", "unauthorized", http.StatusUnauthorized, 2000104)
 	registerAdditionalErrorAlias("dataset_ids is required", "dataset_ids required", http.StatusBadRequest, 2001349)
 	for _, source := range []string{
 		"no chat model configured", "failed to deliver tool-limit decision", "update search config failed",
 		"marshal writerdocument artifact failed", "artifact save failed", "decrypt api key failed",
 		"encrypt api key failed", "failed to create waiting task",
+		"invalid workflow action response",
 		"unsupported model provider credential ciphertext", "decode sensitive-word check",
+		"built-in workflow package directory not found", "workflow.yaml missing from revision",
+		"pin legacy workflow session revision", "resolve conversation plugin binding failed",
+		"decode conversation ext",
+		"load artifact action head revision", "parse artifact action policy",
+		"artifact action head revision is incomplete",
+		"decode sync_document action response", "artifact sync state save failed",
+		"invalid render response",
+		"task unavailable",
+		"query task center settings failed", "query settings controls failed",
+		"query document parsing settings failed",
+		"query writer download conversion failed", "writer download conversion path is invalid",
+		"open writer download conversion failed", "read writer download conversion failed",
+		"save writer download conversion failed", "index writer download conversion failed",
+		"encode writer download conversion request failed",
 	} {
 		registerAdditionalErrorAlias(source, "Internal server error", http.StatusInternalServerError, 2000000)
 	}
 	for _, source := range []string{
-		"channel intent classification failed", "writer document sync failed", "sensitive-word check unavailable",
+		"writer document sync failed", "sensitive-word check unavailable",
 		"sensitive-word check failed",
+		"workflow artifact action failed",
+		"writer document write-back failed",
+		"render writer document failed",
+		"writer download conversion service unavailable",
 	} {
 		registerAdditionalErrorAlias(source, "Upstream service error", http.StatusBadGateway, 2000110)
 	}
 	registerAdditionalErrorPattern("chat service returned status %d", "Upstream service error", http.StatusBadGateway, 2000110)
 	registerAdditionalErrorPattern("migrate model provider credential %s", "Internal server error", http.StatusInternalServerError, 2000000)
+	registerAdditionalErrorPattern("load workflow head revision %s", "Internal server error", http.StatusInternalServerError, 2000000)
 	registerAdditionalErrorPattern("session_ids must belong to user %q and must not contain plugin conversations", "Invalid request", http.StatusBadRequest, 2000103)
 	registerAdditionalErrorAlias("cron expression produces no future times within 5 years", "Invalid request", http.StatusBadRequest, 2000103)
 	registerAdditionalErrorAlias("cron expression has no previous time within 5 years", "Invalid request", http.StatusBadRequest, 2000103)
 	registerAdditionalErrorPattern("no sql block for database dialect %q", "Database migration configuration is invalid", http.StatusBadRequest, 2001991)
+	for _, source := range []string{
+		"invalid source_type", "skill_id, revision_id and tree_hash are required",
+		"invalid package", "workflow id is required",
+		"attempt_id and operation are required",
+	} {
+		registerAdditionalErrorAlias(source, "Invalid request", http.StatusBadRequest, 2000103)
+	}
+	registerAdditionalErrorPattern("seed builtin workflow %s", "Internal server error", http.StatusInternalServerError, 2000000)
+	registerAdditionalErrorPattern("lazymind host execution failed: %s", "Internal server error", http.StatusInternalServerError, 2000000)
+	registerAdditionalErrorAlias("lazymind host execution failed", "Internal server error", http.StatusInternalServerError, 2000000)
+	registerAdditionalErrorPattern("save sources task=%s", "Internal server error", http.StatusInternalServerError, 2000000)
+	registerAdditionalErrorPattern("invalid sources snapshot", "Internal server error", http.StatusInternalServerError, 2000000)
+	for _, source := range []string{
+		"chat service returned no run terminal",
+		"invalid algorithm stream frame",
+		"read algorithm stream",
+		"algorithm emitted payload after run_finished",
+		"algorithm combined run_finished with business payload",
+		"algorithm emitted duplicate run_finished",
+		"algorithm stream ended without run_finished",
+		"runtime event is nil",
+		"invalid runtime event envelope",
+		"runtime event run_id mismatch",
+		"unsupported runtime event type",
+		"invalid model_retry_scheduled data",
+		"model_retry_scheduled fields are required",
+		"invalid model_retry_scheduled values",
+		"invalid model_call_finished data",
+		"model_call_finished fields are required",
+		"model_call_finished finish outcome is invalid",
+		"unsupported model finish",
+		"model_call_finished failure outcome is invalid",
+		"unsupported model failure origin",
+		"unsupported model failure code",
+		"unsupported model_call_finished kind",
+		"runtime event is not run_finished",
+		"invalid run_finished data",
+		"run_finished partial_output is required",
+		"run_finished partial_output must be boolean",
+		"run_finished code must be a string",
+		"invalid run status/reason combination",
+	} {
+		registerAdditionalErrorAlias(source, "algorithm chat stream failed", http.StatusBadGateway, 2002077)
+	}
 }

@@ -1,19 +1,16 @@
 package userprefs
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"lazymind/core/common/orm"
-	"lazymind/core/preferencefile"
 	"lazymind/core/store"
+	"lazymind/core/workflow"
 )
 
 type uiPreferencesAPITestResponse struct {
@@ -23,6 +20,12 @@ type uiPreferencesAPITestResponse struct {
 		ChatPreferenceNoticeDismissed bool   `json:"chat_preference_notice_dismissed"`
 		DeveloperModeActive           bool   `json:"developer_mode_active"`
 		AcceptedUserAgreementVersion  string `json:"accepted_user_agreement_version"`
+		TaskCenterEnabled             bool   `json:"task_center_enabled"`
+		SchedulesEnabled              bool   `json:"schedules_enabled"`
+		SkillsEnabled                 bool   `json:"skills_enabled"`
+		WorkflowsEnabled              bool   `json:"workflows_enabled"`
+		MCPEnabled                    bool   `json:"mcp_enabled"`
+		DocumentParsingEnabled        bool   `json:"document_parsing_enabled"`
 		UserPreferenceConfigured      bool   `json:"user_preference_configured"`
 		UpdatedAt                     string `json:"updated_at"`
 	} `json:"data"`
@@ -31,15 +34,7 @@ type uiPreferencesAPITestResponse struct {
 func newUIPreferencesTestDB(t *testing.T) *orm.DB {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, err := orm.Connect(orm.DriverSQLite, dbPath)
-	if err != nil {
-		t.Fatalf("connect db: %v", err)
-	}
-	if err := db.AutoMigrate(orm.AllModelsForDDL()...); err != nil {
-		t.Fatalf("auto migrate: %v", err)
-	}
-	return db
+	return orm.MigrateAllModelsForTest(t)
 }
 
 func decodeUIPreferencesResponse(t *testing.T, rec *httptest.ResponseRecorder) uiPreferencesAPITestResponse {
@@ -67,11 +62,19 @@ func TestGetUIPreferencesDefaultsAndDerivedPreferenceStatus(t *testing.T) {
 		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	resp := decodeUIPreferencesResponse(t, rec)
-	if resp.Data.ChatPreferenceNoticeDismissed || resp.Data.DeveloperModeActive || resp.Data.UserPreferenceConfigured {
-		t.Fatalf("expected all default booleans false, got %#v", resp.Data)
+	if resp.Data.ChatPreferenceNoticeDismissed || resp.Data.DeveloperModeActive || resp.Data.UserPreferenceConfigured ||
+		!resp.Data.TaskCenterEnabled || !resp.Data.SchedulesEnabled || !resp.Data.SkillsEnabled || !resp.Data.WorkflowsEnabled || !resp.Data.MCPEnabled ||
+		!resp.Data.DocumentParsingEnabled {
+		t.Fatalf("expected legacy flags false and feature controls true, got %#v", resp.Data)
 	}
 
-	seedUserPreferenceFile(t, db, "u1", preferencefile.BuildInitialFileContent(orm.SystemUserPreference{AgentPersona: "严谨助手"}))
+	seedUserPreferenceFile(t, db, "u1", `preferences:
+  - name: pref.response.concise
+    summary: Keep answers concise.
+    ref: references/response-concise.md
+    created_at: "2026-07-24T00:00:00Z"
+    updated_at: "2026-07-24T00:00:00Z"
+`)
 
 	req = httptest.NewRequest(http.MethodGet, "/api/core/user/ui-preferences", nil)
 	req.Header.Set("X-User-Id", "u1")
@@ -88,53 +91,345 @@ func TestGetUIPreferencesDefaultsAndDerivedPreferenceStatus(t *testing.T) {
 	}
 }
 
+func TestPatchUIPreferencesPreservesOtherFeatureControls(t *testing.T) {
+	db := newUIPreferencesTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(`{"task_center_enabled":false,"mcp_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-Id", "u1")
+	rec := httptest.NewRecorder()
+
+	PatchUIPreferences(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeUIPreferencesResponse(t, rec)
+	if resp.Data.TaskCenterEnabled || !resp.Data.SchedulesEnabled || resp.Data.MCPEnabled || !resp.Data.SkillsEnabled || !resp.Data.WorkflowsEnabled ||
+		!resp.Data.DocumentParsingEnabled {
+		t.Fatalf("unexpected controls after patch: %#v", resp.Data)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(`{"skills_enabled":false}`))
+	secondReq.Header.Set("Content-Type", "application/json")
+	secondReq.Header.Set("X-User-Id", "u1")
+	secondRec := httptest.NewRecorder()
+	PatchUIPreferences(secondRec, secondReq)
+	secondResp := decodeUIPreferencesResponse(t, secondRec)
+	if secondRec.Code != http.StatusOK || secondResp.Data.TaskCenterEnabled || !secondResp.Data.SchedulesEnabled || secondResp.Data.MCPEnabled || secondResp.Data.SkillsEnabled ||
+		!secondResp.Data.WorkflowsEnabled || !secondResp.Data.DocumentParsingEnabled {
+		t.Fatalf("feature controls should patch independently, got %#v status=%d", secondResp.Data, secondRec.Code)
+	}
+
+	thirdReq := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(`{"schedules_enabled":false}`))
+	thirdReq.Header.Set("Content-Type", "application/json")
+	thirdReq.Header.Set("X-User-Id", "u1")
+	thirdRec := httptest.NewRecorder()
+	PatchUIPreferences(thirdRec, thirdReq)
+	thirdResp := decodeUIPreferencesResponse(t, thirdRec)
+	if thirdRec.Code != http.StatusOK || thirdResp.Data.TaskCenterEnabled || thirdResp.Data.SchedulesEnabled || thirdResp.Data.MCPEnabled || thirdResp.Data.SkillsEnabled ||
+		!thirdResp.Data.WorkflowsEnabled || !thirdResp.Data.DocumentParsingEnabled {
+		t.Fatalf("schedules control should patch independently, got %#v status=%d", thirdResp.Data, thirdRec.Code)
+	}
+}
+
+func TestPatchUIPreferencesTaskControlsAreIndependent(t *testing.T) {
+	db := newUIPreferencesTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Now().UTC()
+
+	resources := []orm.WorkflowResource{
+		{ID: "workflow-user", WorkflowRef: "user:u1", WorkflowID: "user", OwnerUserID: "u1", OwnerScope: "user:u1", RelativeRoot: "workflows/user", Status: "active", CreatedAt: now, UpdatedAt: now},
+		{ID: "workflow-builtin", WorkflowRef: "builtin:shared", WorkflowID: "shared", OwnerScope: "builtin", RelativeRoot: "workflows/shared", Status: "active", CreatedAt: now, UpdatedAt: now},
+	}
+	if err := db.Create(&resources).Error; err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+
+	patch := func(body string) uiPreferencesAPITestResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-Id", "u1")
+		rec := httptest.NewRecorder()
+		PatchUIPreferences(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch %s: status=%d body=%s", body, rec.Code, rec.Body.String())
+		}
+		return decodeUIPreferencesResponse(t, rec)
+	}
+	assertWorkflowSettings := func(enabled bool) {
+		t.Helper()
+		var settings []orm.UserWorkflowSetting
+		if err := db.Where("user_id = ?", "u1").Order("plugin_ref").Find(&settings).Error; err != nil {
+			t.Fatalf("load workflow settings: %v", err)
+		}
+		if len(settings) != 2 {
+			t.Fatalf("expected both available workflows to be synchronized, got %#v", settings)
+		}
+		for _, setting := range settings {
+			expectedCallMode := workflow.WorkflowCallModeDisabled
+			if enabled {
+				expectedCallMode = workflow.WorkflowCallModeAuto
+			}
+			if setting.Enabled != enabled || setting.CallMode != expectedCallMode {
+				t.Fatalf("workflow should be enabled=%v with call mode %s, got %#v", enabled, expectedCallMode, setting)
+			}
+		}
+	}
+
+	resp := patch(`{"workflows_enabled":true}`)
+	if !resp.Data.TaskCenterEnabled || !resp.Data.WorkflowsEnabled || !resp.Data.SchedulesEnabled {
+		t.Fatalf("enabling workflows must preserve task center, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(true)
+
+	resp = patch(`{"task_center_enabled":false}`)
+	if resp.Data.TaskCenterEnabled || !resp.Data.WorkflowsEnabled || !resp.Data.SchedulesEnabled {
+		t.Fatalf("disabling task center must preserve workflows, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(true)
+
+	resp = patch(`{"workflows_enabled":false}`)
+	if resp.Data.TaskCenterEnabled || resp.Data.WorkflowsEnabled || !resp.Data.SchedulesEnabled {
+		t.Fatalf("disabling workflows must preserve task center, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(false)
+
+	resp = patch(`{"workflows_enabled":true}`)
+	if resp.Data.TaskCenterEnabled || !resp.Data.WorkflowsEnabled || !resp.Data.SchedulesEnabled {
+		t.Fatalf("workflows must be independently enabled while task center is off, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(true)
+
+	resp = patch(`{"schedules_enabled":false}`)
+	if resp.Data.TaskCenterEnabled || !resp.Data.WorkflowsEnabled || resp.Data.SchedulesEnabled {
+		t.Fatalf("disabling schedules must preserve subtasks and workflows, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(true)
+
+	resp = patch(`{"task_center_enabled":true}`)
+	if !resp.Data.TaskCenterEnabled || !resp.Data.WorkflowsEnabled || resp.Data.SchedulesEnabled {
+		t.Fatalf("re-enabling task center must preserve workflows, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(true)
+
+	resp = patch(`{"workflows_enabled":false}`)
+	if !resp.Data.TaskCenterEnabled || resp.Data.WorkflowsEnabled || resp.Data.SchedulesEnabled {
+		t.Fatalf("disabling workflows must not disable task center, got %#v", resp.Data)
+	}
+	assertWorkflowSettings(false)
+
+	resp = patch(`{"schedules_enabled":true}`)
+	if !resp.Data.TaskCenterEnabled || resp.Data.WorkflowsEnabled || !resp.Data.SchedulesEnabled {
+		t.Fatalf("re-enabling schedules must preserve subtasks and workflows, got %#v", resp.Data)
+	}
+}
+
+func TestPatchUIPreferencesBulkControlsSkillsAndWorkflowsIndependently(t *testing.T) {
+	db := newUIPreferencesTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Now().UTC()
+
+	seedSkill := func(id, owner, root string, enabled bool) {
+		t.Helper()
+		if err := db.Model(&orm.SkillV2Skill{}).Create(map[string]any{
+			"id": id, "owner_user_id": owner, "create_user_id": owner,
+			"category": "internal", "skill_name": id, "relative_root": root,
+			"is_enabled": enabled, "created_at": now, "updated_at": now,
+		}).Error; err != nil {
+			t.Fatalf("seed skill %s: %v", id, err)
+		}
+	}
+	seedSkill("skill-u1-on", "u1", "skills/u1/on", true)
+	seedSkill("skill-u1-off", "u1", "skills/u1/off", false)
+	seedSkill("skill-u2-on", "u2", "skills/u2/on", true)
+
+	workflows := []orm.WorkflowResource{
+		{ID: "workflow-u1", WorkflowRef: "user:u1", WorkflowID: "u1", OwnerUserID: "u1", OwnerScope: "user:u1", RelativeRoot: "workflows/u1", Status: "active", CreatedAt: now, UpdatedAt: now},
+		{ID: "workflow-shared", WorkflowRef: "builtin:shared", WorkflowID: "shared", OwnerUserID: "", OwnerScope: "builtin", RelativeRoot: "workflows/shared", Status: "active", CreatedAt: now, UpdatedAt: now},
+		{ID: "workflow-u2", WorkflowRef: "user:u2", WorkflowID: "u2", OwnerUserID: "u2", OwnerScope: "user:u2", RelativeRoot: "workflows/u2", Status: "active", CreatedAt: now, UpdatedAt: now},
+		{ID: "workflow-archived", WorkflowRef: "user:u1:archived", WorkflowID: "archived", OwnerUserID: "u1", OwnerScope: "user:u1", RelativeRoot: "workflows/u1-archived", Status: "archived", CreatedAt: now, UpdatedAt: now},
+	}
+	if err := db.Create(&workflows).Error; err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+	if err := db.Create(&orm.UserWorkflowSetting{UserID: "u1", WorkflowRef: "user:u1", Enabled: true, CallMode: workflow.WorkflowCallModeAuto, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("seed workflow setting: %v", err)
+	}
+
+	patch := func(field string, enabled bool) uiPreferencesAPITestResponse {
+		t.Helper()
+		body := `{"` + field + `":` + map[bool]string{true: "true", false: "false"}[enabled] + `}`
+		req := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-Id", "u1")
+		rec := httptest.NewRecorder()
+		PatchUIPreferences(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch %s=%v: status=%d body=%s", field, enabled, rec.Code, rec.Body.String())
+		}
+		return decodeUIPreferencesResponse(t, rec)
+	}
+	assertSkills := func(enabled bool) {
+		t.Helper()
+		var userSkills []orm.SkillV2Skill
+		if err := db.Where("owner_user_id = ?", "u1").Order("id").Find(&userSkills).Error; err != nil {
+			t.Fatalf("load user skills: %v", err)
+		}
+		if len(userSkills) != 2 || userSkills[0].IsEnabled != enabled || userSkills[1].IsEnabled != enabled {
+			t.Fatalf("user skills should all be enabled=%v, got %#v", enabled, userSkills)
+		}
+		var otherSkill orm.SkillV2Skill
+		if err := db.Where("id = ?", "skill-u2-on").Take(&otherSkill).Error; err != nil || !otherSkill.IsEnabled {
+			t.Fatalf("other user's skill should remain enabled, row=%#v err=%v", otherSkill, err)
+		}
+	}
+	assertWorkflows := func(enabled bool, expectedCount int) {
+		t.Helper()
+		expectedCallMode := workflow.WorkflowCallModeDisabled
+		if enabled {
+			expectedCallMode = workflow.WorkflowCallModeAuto
+		}
+		var settings []orm.UserWorkflowSetting
+		if err := db.Where("user_id = ?", "u1").Order("plugin_ref").Find(&settings).Error; err != nil {
+			t.Fatalf("load workflow settings: %v", err)
+		}
+		if len(settings) != expectedCount {
+			t.Fatalf("expected %d workflow settings, got %#v", expectedCount, settings)
+		}
+		for _, setting := range settings {
+			if setting.Enabled != enabled || setting.CallMode != expectedCallMode {
+				t.Fatalf("workflow %s should be enabled=%v call_mode=%s, got %#v", setting.WorkflowRef, enabled, expectedCallMode, setting)
+			}
+		}
+	}
+
+	resp := patch("skills_enabled", false)
+	assertSkills(false)
+	assertWorkflows(true, 1)
+	if resp.Data.SkillsEnabled || !resp.Data.WorkflowsEnabled {
+		t.Fatalf("skill bulk change must preserve workflow control, got %#v", resp.Data)
+	}
+
+	resp = patch("workflows_enabled", false)
+	assertSkills(false)
+	assertWorkflows(false, 2)
+	if resp.Data.SkillsEnabled || resp.Data.WorkflowsEnabled {
+		t.Fatalf("workflow bulk change must preserve skill control, got %#v", resp.Data)
+	}
+
+	patch("skills_enabled", true)
+	assertSkills(true)
+	assertWorkflows(false, 2)
+
+	patch("workflows_enabled", true)
+	assertSkills(true)
+	assertWorkflows(true, 2)
+}
+
+func TestReenablingSchedulesMovesNextRunForwardWithoutChangingHistory(t *testing.T) {
+	db := newUIPreferencesTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Now().UTC()
+	schedule := orm.UserSchedule{
+		ID: "sched-1", UserID: "u1", CronExpr: "*/10 * * * *", Timezone: "UTC", PromptTemplate: "daily", Enabled: true,
+		NextRunAt: now.Add(-time.Hour), RunCount: 7, CreatedAt: now.Add(-time.Hour),
+	}
+	if err := db.Create(&schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+	runningTask := orm.TaskCenterTask{
+		ID: "running-task", UserID: "u1", ConversationID: "conversation-1", TaskType: "scheduled",
+		Status: "running", TriggerType: "scheduled", CreatedAt: now.Add(-30 * time.Minute), UpdatedAt: now,
+	}
+	if err := db.Create(&runningTask).Error; err != nil {
+		t.Fatalf("seed running task: %v", err)
+	}
+	for _, body := range []string{`{"schedules_enabled":false}`, `{"schedules_enabled":true}`} {
+		req := httptest.NewRequest(http.MethodPatch, "/api/core/user/ui-preferences", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-Id", "u1")
+		rec := httptest.NewRecorder()
+		PatchUIPreferences(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch %s: status=%d body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+	var saved orm.UserSchedule
+	if err := db.Where("id = ?", schedule.ID).Take(&saved).Error; err != nil {
+		t.Fatalf("load schedule: %v", err)
+	}
+	if !saved.NextRunAt.After(now) {
+		t.Fatalf("expected next run in the future, got %s", saved.NextRunAt)
+	}
+	if saved.RunCount != schedule.RunCount || saved.LastRunAt != nil {
+		t.Fatalf("resume must not backfill or alter history: %#v", saved)
+	}
+	var preservedTask orm.TaskCenterTask
+	if err := db.Where("id = ?", runningTask.ID).Take(&preservedTask).Error; err != nil {
+		t.Fatalf("load running task: %v", err)
+	}
+	if preservedTask.Status != "running" || preservedTask.FinishedAt != nil {
+		t.Fatalf("schedules toggle must not stop an in-flight task: %#v", preservedTask)
+	}
+}
+
+func TestSettingsOverviewExposesRawAndEffectiveStates(t *testing.T) {
+	db := newUIPreferencesTestDB(t)
+	now := time.Now().UTC()
+	if err := db.Create(&orm.UserSchedule{
+		ID: "sched-overview", UserID: "u1", CronExpr: "0 9 * * *", Timezone: "UTC", PromptTemplate: "daily", Enabled: true,
+		NextRunAt: now.Add(time.Hour), CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+	if err := db.Model(&orm.UserUIPreferences{}).Create(map[string]any{"user_id": "u1", "task_center_enabled": false, "schedules_enabled": false, "skills_enabled": true, "workflows_enabled": false, "mcp_enabled": true, "created_at": now, "updated_at": now}).Error; err != nil {
+		t.Fatalf("seed preferences: %v", err)
+	}
+	overview, err := buildSettingsOverview(httptest.NewRequest(http.MethodGet, "/settings/overview", nil), db.DB, "u1")
+	if err != nil {
+		t.Fatalf("build overview: %v", err)
+	}
+	if overview.Controls.TaskCenterEnabled {
+		t.Fatal("expected task center control to be disabled")
+	}
+	if overview.Controls.SchedulesEnabled {
+		t.Fatal("expected schedules control to be disabled")
+	}
+	var taskSection settingsOverviewSection
+	for _, section := range overview.Sections {
+		if section.ID == "tasks" {
+			taskSection = section
+			break
+		}
+	}
+	if taskSection.RawEnabled == nil || *taskSection.RawEnabled || taskSection.EffectiveEnabled == nil || *taskSection.EffectiveEnabled || taskSection.Counts.Enabled != 1 {
+		t.Fatalf("unexpected task section: %#v", taskSection)
+	}
+}
+
 func seedUserPreferenceFile(t *testing.T, db *orm.DB, userID, content string) {
 	t.Helper()
 
 	now := time.Now()
-	sum := sha256.Sum256([]byte(content))
-	hash := hex.EncodeToString(sum[:])
-	revisionID := "pref-rev-" + userID
-	head := revisionID
-	if err := db.Create(&orm.PersonalResourceBlob{
-		Hash:           hash,
-		Size:           int64(len([]byte(content))),
-		Mime:           "text/markdown; charset=utf-8",
-		FileType:       "markdown",
-		Binary:         false,
-		StorageBackend: "postgres",
-		Content:        []byte(content),
-		CreatedAt:      now,
+	if err := db.Create(&orm.MemoryCurrentEntry{
+		UserID:    userID,
+		Path:      "memory/users/preference.yaml",
+		EntryType: "file",
+		Content:   []byte(content),
+		Size:      int64(len([]byte(content))),
+		Mime:      "application/yaml; charset=utf-8",
+		FileType:  "yaml",
+		Binary:    false,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}).Error; err != nil {
-		t.Fatalf("create preference blob: %v", err)
-	}
-	if err := db.Create(&orm.PersonalResource{
-		ID:             "pref-resource-" + userID,
-		UserID:         userID,
-		ResourceType:   "user_preference",
-		HeadRevisionID: &head,
-		Version:        1,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}).Error; err != nil {
-		t.Fatalf("create preference resource: %v", err)
-	}
-	if err := db.Create(&orm.PersonalResourceRevision{
-		ID:           revisionID,
-		ResourceID:   "pref-resource-" + userID,
-		RevisionNo:   1,
-		Path:         "memory/user.md",
-		BlobHash:     hash,
-		ContentHash:  hash,
-		Size:         int64(len([]byte(content))),
-		Mime:         "text/markdown; charset=utf-8",
-		FileType:     "markdown",
-		Binary:       false,
-		Message:      "seed",
-		ChangeSource: "test",
-		CreatedAt:    now,
-	}).Error; err != nil {
-		t.Fatalf("create preference revision: %v", err)
+		t.Fatalf("create current preference file: %v", err)
 	}
 }
 

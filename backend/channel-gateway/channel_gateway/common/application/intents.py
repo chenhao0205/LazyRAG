@@ -9,24 +9,24 @@ from pydantic import ValidationError
 from channel_gateway.common.domain.commands import (
     COMMAND_ADAPTER,
     RESOURCE_CHANGE_ADAPTER,
+    RESOLVED_CONVERSATION_TARGET_KEY,
+    RESOLVED_RESOURCE_SELECTIONS_KEY,
     SCHEMA_VERSION,
-    ActionKind,
     CapabilityConfigureCommand,
     CapabilityConfigureParameters,
     ChatCommand,
     CommandEnvelope,
     ConversationSwitchCommand,
     ConversationSwitchParameters,
+    ConversationSettingsUpdateCommand,
+    ConversationSettingsUpdateParameters,
     IndexTarget,
     ResourceChange,
     ResourceIndexSelector,
     SelectionContinuation,
     SelectionChooseCommand,
-    WorkflowInvokeCommand,
-    command_registry,
 )
 from channel_gateway.common.errors import LazyMindError
-from channel_gateway.common.ports.core import IntentClient
 from channel_gateway.common.ports.repository import IntentRepository
 
 
@@ -82,6 +82,12 @@ class ExactShortcutParser:
                 evidence=value,
                 selection=selection,
             )
+        if kind == 'workflow':
+            return self._workflow_selection(
+                index=match.group(1),
+                evidence=value,
+                selection=selection,
+            )
         if kind in ('knowledge_base', 'skill', 'tool', 'personalization'):
             return self._capability_selection(
                 kind=kind,
@@ -90,6 +96,39 @@ class ExactShortcutParser:
                 selection=selection,
             )
         return None
+
+    @staticmethod
+    def _workflow_selection(
+        *,
+        index: str,
+        evidence: str,
+        selection: dict[str, Any],
+    ) -> ShortcutMatch | None:
+        items = selection.get('items')
+        position = int(index) - 1
+        if not isinstance(items, list) or not 0 <= position < len(items):
+            return None
+        item = items[position]
+        if not isinstance(item, dict):
+            return None
+        workflow_ref = str(item.get('id') or item.get('name') or '').strip()
+        if not workflow_ref:
+            return None
+        return ExactShortcutParser._match(
+            ConversationSettingsUpdateCommand(
+                schema_version=SCHEMA_VERSION,
+                command='conversation.settings.update',
+                parameters=ConversationSettingsUpdateParameters(
+                    change={
+                        'setting': 'workflow',
+                        'workflow_ref': workflow_ref,
+                        'enabled': True,
+                    },
+                    evidence=[evidence],
+                ),
+            ),
+            evidence,
+        )
 
     @staticmethod
     def _switch(index: str, evidence: str) -> ShortcutMatch:
@@ -118,15 +157,7 @@ class ExactShortcutParser:
         if resumed is not None:
             return resumed
         raw_change: dict[str, Any]
-        if (
-            isinstance(continuation, dict)
-            and continuation.get('command') == 'capability.configure'
-            and isinstance(continuation.get('resource_change'), dict)
-        ):
-            raw_change = dict(continuation['resource_change'])
-            raw_change['selector'] = {'kind': 'index', 'value': index}
-            raw_change['evidence'] = evidence
-        elif kind == 'personalization':
+        if kind == 'personalization':
             raw_change = {
                 'resource_type': 'personalization',
                 'operation': 'use',
@@ -178,8 +209,10 @@ def _resume_continuation(
     index: str,
     evidence: str,
 ) -> ShortcutMatch | None:
-    if not isinstance(raw, dict) or 'selection_field' not in raw:
+    if raw is None:
         return None
+    if not isinstance(raw, dict):
+        raise LazyMindError('Saved channel selection is invalid')
     try:
         continuation = SelectionContinuation.model_validate(raw)
         command = COMMAND_ADAPTER.validate_python(continuation.command)
@@ -218,10 +251,23 @@ def _resume_continuation(
     )
     if len(grounding_messages) > 10:
         grounding_messages = [grounding_messages[0], *grounding_messages[-9:]]
+    prepared_catalog: dict[str, Any] = {}
+    if continuation.prepared_resources:
+        prepared_catalog[RESOLVED_RESOURCE_SELECTIONS_KEY] = {
+            position: {
+                'resource_type': selection.resource_type,
+                'items': [selection.item.model_dump(mode='json')],
+            }
+            for position, selection in continuation.prepared_resources.items()
+        }
+    if continuation.prepared_conversation_target is not None:
+        prepared_catalog[RESOLVED_CONVERSATION_TARGET_KEY] = (
+            continuation.prepared_conversation_target.model_dump(mode='json')
+        )
     return ShortcutMatch(
         command=resumed,
         grounding_messages=tuple(grounding_messages),
-        prepared_catalog=dict(continuation.prepared_catalog),
+        prepared_catalog=prepared_catalog,
     )
 
 
@@ -258,76 +304,12 @@ def resolve_pending_selection(
     raise LazyMindError('Saved channel selection has no continuation')
 
 
-class ChannelIntentClassifier:
-    """Calls the stateless classifier with the Gateway-owned command registry."""
-
-    def __init__(self, client: IntentClient):
-        self._client = client
-
-    def classify(
-        self,
-        *,
-        provider: str,
-        owner_user_id: str,
-        message: str,
-        request_id: str,
-        state: dict[str, Any],
-    ) -> CommandEnvelope:
-        payload = self._client.classify_intent(
-            owner_user_id=owner_user_id,
-            request_id=request_id,
-            provider=provider,
-            message=message,
-            state=state,
-            command_registry=command_registry(
-                self._allowed_commands(state)
-            ),
-        )
-        try:
-            return COMMAND_ADAPTER.validate_python(payload)
-        except ValidationError as exc:
-            raise LazyMindError('Core returned an invalid channel command') from exc
-
-    @staticmethod
-    def _allowed_commands(state: dict[str, Any]) -> set[ActionKind]:
-        allowed = set(ActionKind)
-        allowed.discard(ActionKind.CONVERSATION_SETTINGS_UPDATE)
-        latest_selection = state.get('latest_selection')
-        if (
-            not isinstance(latest_selection, dict)
-            or not latest_selection.get('has_continuation')
-        ):
-            allowed.discard(ActionKind.SELECTION_CHOOSE)
-        workflows = state.get('available_workflows')
-        if not isinstance(workflows, list) or not workflows:
-            allowed.discard(ActionKind.WORKFLOW_INVOKE)
-        return allowed
-
-    def catalog(
-        self,
-        *,
-        owner_user_id: str,
-        request_id: str,
-        kinds: set[str],
-    ) -> dict[str, Any]:
-        return self._client.get_capability_catalog(
-            owner_user_id=owner_user_id,
-            request_id=f'{request_id}_catalog',
-            kinds=kinds,
-        )
-
-
 def canonicalize_command(
     command: CommandEnvelope,
     current_message: str,
 ) -> CommandEnvelope:
     """Apply parameter identities declared by the command contract."""
 
-    if isinstance(command, WorkflowInvokeCommand):
-        parameters = command.parameters.model_copy(
-            update={'message': current_message}
-        )
-        return command.model_copy(update={'parameters': parameters})
     if isinstance(command, ChatCommand) and not command.parameters.resource_changes:
         parameters = command.parameters.model_copy(
             update={'message': current_message}
@@ -366,11 +348,6 @@ def validate_command(
         and task != grounding_messages[-1]
     ):
         raise LazyMindError('Plain chat must preserve the complete user message')
-    if (
-        isinstance(command, WorkflowInvokeCommand)
-        and task != grounding_messages[-1]
-    ):
-        raise LazyMindError('Workflow task must preserve the complete user message')
     if isinstance(command, ConversationSwitchCommand):
         target = parameters.target
         if target.kind == 'index':
@@ -387,25 +364,6 @@ def validate_command(
         capabilities = list(parameters.capabilities)
         if len(set(capabilities)) != len(capabilities):
             raise LazyMindError('Capability categories contain duplicates')
-    return command
-
-
-def validate_workflow_catalog(
-    command: CommandEnvelope,
-    catalog: dict[str, Any],
-) -> CommandEnvelope:
-    if not isinstance(command, WorkflowInvokeCommand):
-        return command
-    workflows = catalog.get('workflow')
-    if not isinstance(workflows, list):
-        raise LazyMindError('No workflow catalog is available for this channel')
-    available_refs = {
-        str(item.get('id') or '')
-        for item in workflows
-        if isinstance(item, dict) and bool(item.get('enabled', False))
-    }
-    if command.parameters.workflow_ref not in available_refs:
-        raise LazyMindError('The selected workflow is not available to this user')
     return command
 
 

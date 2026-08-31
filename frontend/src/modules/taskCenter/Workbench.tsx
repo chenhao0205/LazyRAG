@@ -6,7 +6,8 @@ import { useTranslation } from 'react-i18next';
 import { listTasks, removeTask } from './api';
 import type { Task } from './api';
 import TaskDetail, { StatusTag, formatDate } from './TaskDetail';
-import { CHAT_RESUME_CONVERSATION_KEY, selectChatConversationFilter } from '@/modules/chat/constants/chat';
+import { isTaskFinishedWithinDays } from './recentResults';
+import { getChatConversationPath, selectChatConversationFilter } from '@/modules/chat/constants/chat';
 import StateGraphModal from '@/components/StateGraphModal';
 
 const SECTION_LIMIT = 5;
@@ -14,9 +15,10 @@ const ATTENTION_LIMIT = 3;
 
 interface WorkbenchProps {
   active: boolean;
+  onViewAllStatus: (status: 'failed' | 'canceled') => void;
 }
 
-export default function Workbench({ active }: WorkbenchProps) {
+export default function Workbench({ active, onViewAllStatus }: WorkbenchProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -28,8 +30,6 @@ export default function Workbench({ active }: WorkbenchProps) {
   const [graphTask, setGraphTask] = useState<Task | null>(null);
   const [attentionExpanded, setAttentionExpanded] = useState(false);
   const [runningExpanded, setRunningExpanded] = useState(false);
-  const [failedExpanded, setFailedExpanded] = useState(false);
-  const [canceledExpanded, setCanceledExpanded] = useState(false);
   const [recentExpanded, setRecentExpanded] = useState(false);
 
   const load = useCallback(async () => {
@@ -54,12 +54,11 @@ export default function Workbench({ active }: WorkbenchProps) {
   const failed = tasks.filter((task) => task.status === 'failed');
   const canceled = tasks.filter((task) => task.status === 'canceled');
   const completed = tasks.filter((task) => ['completed', 'succeeded'].includes(task.status));
-  const completedToday = completed.filter(isTaskFinishedToday);
-  const recent = completed.filter((task) => isTaskFinishedWithinDays(task, 7));
+  const recentReferenceTime = Date.now();
+  const recent = completed.filter((task) => isTaskFinishedWithinDays(task, 7, recentReferenceTime));
   const openConversation = (id: string) => {
     selectChatConversationFilter('task');
-    sessionStorage.setItem(CHAT_RESUME_CONVERSATION_KEY, id);
-    navigate('/agent/chat/home');
+    navigate(getChatConversationPath(id));
   };
 
   return (
@@ -67,7 +66,7 @@ export default function Workbench({ active }: WorkbenchProps) {
       <div className='task-metrics'>
         <Metric icon={<UserOutlined />} tone='orange' label={t('taskCenter.needsAttention')} value={waiting.length} />
         <Metric icon={<ClockCircleOutlined />} tone='blue' label={t('taskCenter.helpingYou')} value={running.length} />
-        <Metric icon={<CheckCircleFilled />} tone='green' label={t('taskCenter.completedToday')} value={completedToday.length} />
+        <Metric icon={<CheckCircleFilled />} tone='green' label={t('taskCenter.completedLastSevenDays')} value={recent.length} />
         <Metric icon={<CloseCircleOutlined />} tone='red' label={t('taskCenter.statusFailed')} value={statusCounts.failed} />
         <Metric icon={<StopOutlined />} tone='gray' label={t('taskCenter.statusCanceled')} value={statusCounts.canceled} />
         <span className='task-metrics-note'>{t('taskCenter.summaryHint')}</span>
@@ -76,7 +75,7 @@ export default function Workbench({ active }: WorkbenchProps) {
         <Input prefix={<SearchOutlined />} allowClear placeholder={t('taskCenter.searchPlaceholder')} value={keyword} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setKeyword(event.target.value)} />
         <Select value={type} onChange={setType} options={[
           { value: '', label: t('taskCenter.triggerAll') },
-          { value: 'plugin_run', label: t('taskCenter.typePluginRun') },
+          { value: 'workflow_run', label: t('taskCenter.typeWorkflowRun') },
           { value: 'background_chat', label: t('taskCenter.typeBackgroundChat') },
           { value: 'scheduled', label: t('taskCenter.typeScheduled') },
         ]} />
@@ -86,12 +85,12 @@ export default function Workbench({ active }: WorkbenchProps) {
       <Spin spinning={loading}>
         <AttentionSection tasks={waiting} expanded={attentionExpanded} onToggle={() => setAttentionExpanded((value) => !value)} onSelect={setSelected} onOpenGraph={setGraphTask} />
         <RunningSection tasks={running} expanded={runningExpanded} onToggle={() => setRunningExpanded((value) => !value)} onSelect={setSelected} onOpenGraph={setGraphTask} />
-        <StatusCardSection status='failed' tasks={failed} expanded={failedExpanded} onToggle={() => setFailedExpanded((value) => !value)} onSelect={setSelected} onOpenGraph={setGraphTask} />
-        <StatusCardSection status='canceled' tasks={canceled} expanded={canceledExpanded} onToggle={() => setCanceledExpanded((value) => !value)} onSelect={setSelected} onOpenGraph={setGraphTask} />
+        <StatusCardSection status='failed' tasks={failed} totalCount={statusCounts.failed} onViewAll={() => onViewAllStatus('failed')} onSelect={setSelected} onOpenGraph={setGraphTask} />
+        <StatusCardSection status='canceled' tasks={canceled} totalCount={statusCounts.canceled} onViewAll={() => onViewAllStatus('canceled')} onSelect={setSelected} onOpenGraph={setGraphTask} />
         <RecentSection tasks={recent} expanded={recentExpanded} onToggle={() => setRecentExpanded((value) => !value)} onSelect={setSelected} />
       </Spin>
       <TaskDetail task={selected} onClose={() => setSelected(null)} onOpenConversation={openConversation} onOpenGraph={() => selected && setGraphTask(selected)} onDelete={async (task) => { await removeTask(task.id); setSelected(null); await load(); }} />
-      {graphTask?.plugin_session_id && <StateGraphModal open onClose={() => setGraphTask(null)} sessionId={graphTask.plugin_session_id} pluginId='' liveRefresh={false} fallbackSteps={graphTask.steps} />}
+      {graphTask?.workflow_session_id && <StateGraphModal open onClose={() => setGraphTask(null)} sessionId={graphTask.workflow_session_id} workflowId='' liveRefresh={false} fallbackSteps={graphTask.steps} />}
     </div>
   );
 }
@@ -121,7 +120,7 @@ function AttentionSection({ tasks, expanded, onToggle, onSelect, onOpenGraph }: 
       <article className='attention-task-card' key={task.id}>
         <div className='attention-task-card-top'>
           <span className={`task-type-icon task-type-${task.task_type}`}><ClockCircleOutlined /></span>
-          <StatusTag status={task.status} onClick={task.plugin_session_id ? () => onOpenGraph(task) : undefined} />
+          <StatusTag status={task.status} onClick={task.workflow_session_id ? () => onOpenGraph(task) : undefined} />
         </div>
         <div className='attention-task-card-title'>
           <Tooltip title={taskTitle(task, t)}><strong>{taskTitle(task, t)}</strong></Tooltip>
@@ -145,7 +144,7 @@ function RunningSection({ tasks, expanded, onToggle, onSelect, onOpenGraph }: { 
         return <button type='button' className='running-task-row' key={task.id} onClick={() => onSelect(task)}>
           <span className='task-leading-icon running'><SyncOutlined spin /></span>
           <span className='workbench-task-main'><Tooltip title={taskTitle(task, t)}><strong>{taskTitle(task, t)}</strong></Tooltip><small>{taskMeta(task, t)}</small></span>
-          <span className='running-task-state'><span><StatusTag status={task.status} onClick={task.plugin_session_id ? () => onOpenGraph(task) : undefined} /><small>{taskDescription(task, t)}</small></span>{progress !== null ? <Progress percent={progress} size='small' /> : null}</span>
+          <span className='running-task-state'><span><StatusTag status={task.status} onClick={task.workflow_session_id ? () => onOpenGraph(task) : undefined} /><small>{taskDescription(task, t)}</small></span>{progress !== null ? <Progress percent={progress} size='small' /> : null}</span>
           <time>{formatDate(task.updated_at)}</time>
           <span className='workbench-row-action'>{t('taskCenter.viewAction')} <RightOutlined /></span>
         </button>;
@@ -154,7 +153,7 @@ function RunningSection({ tasks, expanded, onToggle, onSelect, onOpenGraph }: { 
   </section>;
 }
 
-function StatusCardSection({ status, tasks, expanded, onToggle, onSelect, onOpenGraph }: { status: 'failed' | 'canceled'; tasks: Task[]; expanded: boolean; onToggle: () => void; onSelect: (task: Task) => void; onOpenGraph: (task: Task) => void }) {
+function StatusCardSection({ status, tasks, totalCount, onViewAll, onSelect, onOpenGraph }: { status: 'failed' | 'canceled'; tasks: Task[]; totalCount: number; onViewAll: () => void; onSelect: (task: Task) => void; onOpenGraph: (task: Task) => void }) {
   const { t } = useTranslation();
   const failed = status === 'failed';
   return <section className={`workbench-section ${status}`}>
@@ -163,16 +162,16 @@ function StatusCardSection({ status, tasks, expanded, onToggle, onSelect, onOpen
       tone={status}
       title={t(failed ? 'taskCenter.statusFailed' : 'taskCenter.statusCanceled')}
       description={t(failed ? 'taskCenter.failedDescription' : 'taskCenter.canceledDescription')}
-      count={tasks.length}
-      expanded={expanded}
-      canExpand={tasks.length > ATTENTION_LIMIT}
-      onToggle={onToggle}
+      count={totalCount}
+      expanded={false}
+      canExpand={totalCount > Math.min(tasks.length, ATTENTION_LIMIT)}
+      onToggle={onViewAll}
     />
-    {tasks.length ? <div className='attention-task-grid'>{tasks.slice(0, expanded ? undefined : ATTENTION_LIMIT).map((task) => (
+    {tasks.length ? <div className='attention-task-grid'>{tasks.slice(0, ATTENTION_LIMIT).map((task) => (
       <article className='attention-task-card' key={task.id}>
         <div className='attention-task-card-top'>
           <span className={`task-type-icon task-type-${task.task_type}`}>{failed ? <CloseCircleOutlined /> : <StopOutlined />}</span>
-          <StatusTag status={task.status} onClick={task.plugin_session_id ? () => onOpenGraph(task) : undefined} />
+          <StatusTag status={task.status} onClick={task.workflow_session_id ? () => onOpenGraph(task) : undefined} />
         </div>
         <div className='attention-task-card-title'>
           <Tooltip title={taskTitle(task, t)}><strong>{taskTitle(task, t)}</strong></Tooltip>
@@ -215,7 +214,7 @@ function taskDescription(task: Task, t: (key: string) => string) {
 }
 
 function taskMeta(task: Task, t: (key: string) => string) {
-  const labels: Record<string, string> = { plugin_run: t('taskCenter.typePluginRun'), background_chat: t('taskCenter.typeBackgroundChat'), scheduled: t('taskCenter.typeScheduled') };
+  const labels: Record<string, string> = { workflow_run: t('taskCenter.typeWorkflowRun'), background_chat: t('taskCenter.typeBackgroundChat'), scheduled: t('taskCenter.typeScheduled') };
   return labels[task.task_type] ?? task.task_type;
 }
 
@@ -223,23 +222,4 @@ function taskProgress(task: Task) {
   if (!task.steps?.length) return null;
   const done = task.steps.filter((step) => ['completed', 'succeeded'].includes(step.status)).length;
   return Math.round((done / task.steps.length) * 100);
-}
-
-function taskFinishedAt(task: Task) {
-  return new Date(task.finished_at || task.updated_at);
-}
-
-function isTaskFinishedToday(task: Task) {
-  const finishedAt = taskFinishedAt(task);
-  const today = new Date();
-  return finishedAt.getFullYear() === today.getFullYear()
-    && finishedAt.getMonth() === today.getMonth()
-    && finishedAt.getDate() === today.getDate();
-}
-
-function isTaskFinishedWithinDays(task: Task, days: number) {
-  const finishedAt = taskFinishedAt(task);
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-  return finishedAt >= cutoff;
 }

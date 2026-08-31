@@ -20,11 +20,11 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load repository migration catalog: %v", err)
 	}
-	if len(catalog.VersionMigrations) != 2 {
-		t.Fatalf("version migration count=%d, want 2", len(catalog.VersionMigrations))
+	if len(catalog.VersionMigrations) != 3 {
+		t.Fatalf("version migration count=%d, want 3", len(catalog.VersionMigrations))
 	}
-	if len(catalog.Modes) != 2 {
-		t.Fatalf("mode count=%d, want 2", len(catalog.Modes))
+	if len(catalog.Modes) != 3 {
+		t.Fatalf("mode count=%d, want 3", len(catalog.Modes))
 	}
 	v01 := catalog.Modes[0]
 	if v01.Name != "v0_1" || v01.ModeVersion != 1 ||
@@ -48,12 +48,16 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 	if !containsVersion(mode.Aggregate.Supersedes, 20260703130000) {
 		t.Fatal("v0_2 aggregate Supersedes is missing create_plugin_step_intents")
 	}
-	if len(mode.Aggregate.Supersedes) != len(mode.Dev)-3 {
+	if len(mode.Aggregate.Supersedes) != 88 {
 		t.Fatalf(
-			"v0_2 aggregate Supersedes count=%d, pre-aggregate dev migration count=%d",
+			"v0_2 aggregate Supersedes count=%d, want frozen baseline count 88",
 			len(mode.Aggregate.Supersedes),
-			len(mode.Dev)-3,
 		)
+	}
+	for _, version := range mode.Aggregate.Supersedes {
+		if !containsMigrationFileVersion(mode.Dev, version) {
+			t.Fatalf("v0_2 aggregate Supersedes references missing dev migration %d", version)
+		}
 	}
 	for _, migration := range mode.Dev {
 		wantVersion, err := combineDevVersion(2, migration.FileVersion)
@@ -67,9 +71,6 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 				migration.Version,
 				wantVersion,
 			)
-		}
-		if migration.FileVersion <= mode.Aggregate.Version && !containsVersion(mode.Aggregate.Supersedes, migration.FileVersion) {
-			t.Fatalf("v0_2 aggregate Supersedes is missing dev migration %d", migration.FileVersion)
 		}
 	}
 	up, err := os.ReadFile(mode.Aggregate.UpPath)
@@ -94,6 +95,38 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 	if !strings.Contains(string(down), `DROP COLUMN "api_key_ciphertext"`) ||
 		!strings.Contains(string(down), `DROP COLUMN "credential_version"`) {
 		t.Fatal("v0_2 aggregate down is missing encrypted provider credential rollback")
+	}
+
+	v03 := catalog.Modes[2]
+	if v03.Name != "v0_3" || v03.ModeVersion != 3 ||
+		v03.Aggregate == nil || v03.Aggregate.Version != 20260805000000 {
+		t.Fatalf("unexpected v0_3 mode: %#v", v03)
+	}
+	if len(v03.Dev) != 44 {
+		t.Fatalf("v0_3 dev migration count=%d, want 44", len(v03.Dev))
+	}
+	for _, version := range []uint64{20260730100000, 20260803120000, 20260803150000, 20260803160000, 20260803220000, 20260804090000, 20260804100000, 20260805100000, 20260805120000, 20260805121000, 20260805173000, 20260806110000, 20260806120000, 20260806173000, 20260807120000, 20260807160000, 20260809203000, 20260810100000, 20260811120000, 20260811153000, 20260811173000, 20260813120000, 20260813140000, 20260813190000, 20260814110000, 20260814120000, 20260814121000, 20260815160000, 20260816120000, 20260817084853, 20260817120000, 20260818064304, 20260820190000, 20260821120000, 20260822013000, 20260822193000, 20260824120000, 20260824140000, 20260825022749, 20260825031307, 20260826065814, 20260826190000, 20260827120000, 20260830120000} {
+		if !containsMigrationFileVersion(v03.Dev, version) {
+			t.Fatalf("v0_3 dev migrations are missing %d", version)
+		}
+	}
+	v03Up, err := os.ReadFile(v03.Aggregate.UpPath)
+	if err != nil {
+		t.Fatalf("read v0_3 aggregate up: %v", err)
+	}
+	for _, token := range []string{"workflow_preparations", "workflow_outbox", "workflow_input_resources", "driver_content", "chat_executor", "thinking_depth VARCHAR(16)", "conversation_policy_snapshot_backups", "conversation.enable_plugin IS NULL", "external_chat_run_events", "external_chat_hosts", "external_agent_bindings", "conversation_archive_folders", "idx_conversations_user_pinned_history", "lease_token", "sub_agent_tasks", "sources", "plugin_step_intents", "run_id", "run_status", "run_terminal", "schedules_enabled", "quick_question_defaults", "new_task_defaults", "skill_distribution_artifacts", "workflow_run", "free_auto_select_priority", "free_auto_select_base_urls", "ON public.skills(owner_user_id, category, skill_name)", "ON public.skills(owner_user_id, relative_root)"} {
+		if !strings.Contains(string(v03Up), token) {
+			t.Fatalf("v0_3 aggregate up is missing %s", token)
+		}
+	}
+	v03Down, err := os.ReadFile(v03.Aggregate.DownPath)
+	if err != nil {
+		t.Fatalf("read v0_3 aggregate down: %v", err)
+	}
+	for _, token := range []string{"enable_plugin_was_null", "DROP TABLE IF EXISTS conversation_policy_snapshot_backups", "DROP COLUMN IF EXISTS pinned_at", "DROP COLUMN IF EXISTS free_auto_select_priority", "DROP COLUMN IF EXISTS free_auto_select_base_urls", "ON public.skills(owner_user_id, category, skill_name)", "AS identity_conflicts", "AS relative_root_conflicts"} {
+		if !strings.Contains(string(v03Down), token) {
+			t.Fatalf("v0_3 aggregate down is missing %s", token)
+		}
 	}
 }
 
@@ -143,7 +176,7 @@ func TestVersionModeRejectsMigrationOutsideReleaseDirectory(t *testing.T) {
 	}
 }
 
-func TestRunnerUsesAggregateForUntouchedMode(t *testing.T) {
+func TestRunnerPrefersDevForUntouchedMode(t *testing.T) {
 	dir := newStructuredMigrationDir(t)
 	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
 CREATE TABLE users (id integer PRIMARY KEY, source text NOT NULL);
@@ -153,6 +186,7 @@ DROP TABLE users;
 `)
 	writeMigrationPair(t, devModeDir(t, dir, "v0_1"), "20260725093000_create_users", `
 CREATE TABLE users (id integer PRIMARY KEY, source text NOT NULL);
+INSERT INTO users (id, source) VALUES (1, 'dev');
 `, `
 DROP TABLE users;
 `)
@@ -170,14 +204,14 @@ DROP TABLE users;
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHistoryVersionCount(t, db, testAggregateV1, 1)
-	assertHistoryVersionCount(t, db, devVersion, 0)
+	assertHistoryVersionCount(t, db, testAggregateV1, 0)
+	assertHistoryVersionCount(t, db, devVersion, 1)
 	var source string
 	if err := db.QueryRow(`SELECT source FROM users WHERE id = 1`).Scan(&source); err != nil {
 		t.Fatalf("read users: %v", err)
 	}
-	if source != "aggregate" {
-		t.Fatalf("source=%q, want aggregate", source)
+	if source != "dev" {
+		t.Fatalf("source=%q, want dev", source)
 	}
 }
 
@@ -268,7 +302,7 @@ SELECT GROUP_CONCAT(sequence, ',') FROM (SELECT sequence FROM migration_order OR
 	}
 }
 
-func TestRunnerContinuesPartialDevModeThenCanonicalizesHistory(t *testing.T) {
+func TestRunnerContinuesPartialDevModeAndKeepsHistory(t *testing.T) {
 	dir := newStructuredMigrationDir(t)
 	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
 CREATE TABLE users (id integer PRIMARY KEY);
@@ -309,16 +343,14 @@ DROP INDEX idx_users_id;
 	if err := runner.Up(0); err != nil {
 		t.Fatalf("continue partial dev mode: %v", err)
 	}
-	removeMigrationPair(t, devDir, "20260725093000_create_users")
-	removeMigrationPair(t, devDir, "20260801110000_add_user_index")
 	if err := runner.Up(0); err != nil {
-		t.Fatalf("up after canonicalized dev files are deleted: %v", err)
+		t.Fatalf("repeat completed dev mode: %v", err)
 	}
 
-	assertHistoryVersionCount(t, db, firstFullVersion, 0)
-	assertHistoryVersionCount(t, db, secondFullVersion, 0)
-	assertHistoryVersionCount(t, db, testAggregateV1, 1)
-	assertMigrationState(t, db, testAggregateV1)
+	assertHistoryVersionCount(t, db, firstFullVersion, 1)
+	assertHistoryVersionCount(t, db, secondFullVersion, 1)
+	assertHistoryVersionCount(t, db, testAggregateV1, 0)
+	assertMigrationState(t, db, secondFullVersion)
 	var indexCount int
 	if err := db.QueryRow(`
 SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_id'
@@ -328,6 +360,137 @@ SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_id
 	if indexCount != 1 {
 		t.Fatalf("index count=%d, want 1", indexCount)
 	}
+}
+
+func TestRunnerRecognizesCompleteArchivedDevHistory(t *testing.T) {
+	dir := newStructuredMigrationDir(t)
+	versionDir := versionModeDir(t, dir, "v0_1")
+	writeMigrationPair(t, versionDir, "20260802120000_release", `
+CREATE TABLE users (id integer PRIMARY KEY);
+CREATE INDEX idx_users_id ON users(id);
+`, `
+DROP TABLE users;
+`)
+	devDir := devModeDir(t, dir, "v0_1")
+	writeMigrationPair(t, devDir, "20260725093000_create_users", `
+CREATE TABLE users (id integer PRIMARY KEY);
+`, `
+DROP TABLE users;
+`)
+	writeMigrationPair(t, devDir, "20260801110000_add_user_index", `
+CREATE INDEX idx_users_id ON users(id);
+`, `
+DROP INDEX idx_users_id;
+`)
+
+	dbPath := filepath.Join(t.TempDir(), "acl.db")
+	runner := openSquashTestRunner(t, dbPath, dir)
+	if err := runner.Up(0); err != nil {
+		t.Fatalf("apply dev mode: %v", err)
+	}
+	runner.Close()
+
+	removeMigrationPair(t, devDir, "20260725093000_create_users")
+	removeMigrationPair(t, devDir, "20260801110000_add_user_index")
+	if err := os.Remove(devDir); err != nil {
+		t.Fatalf("archive dev directory: %v", err)
+	}
+	runner = openSquashTestRunner(t, dbPath, dir)
+	defer runner.Close()
+	if err := runner.Up(0); err != nil {
+		t.Fatalf("recognize complete archived dev history: %v", err)
+	}
+
+	db := openSquashTestDB(t, dbPath)
+	defer db.Close()
+	firstFullVersion, err := combineDevVersion(1, testDevV1A)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFullVersion, err := combineDevVersion(1, testDevV1B)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHistoryVersionCount(t, db, firstFullVersion, 1)
+	assertHistoryVersionCount(t, db, secondFullVersion, 1)
+	assertHistoryVersionCount(t, db, testAggregateV1, 0)
+	assertTableExists(t, db, "users", true)
+}
+
+func TestRunnerTreatsAnyArchivedDevHistoryAsCompletedDevPath(t *testing.T) {
+	dir := newStructuredMigrationDir(t)
+	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
+CREATE TABLE aggregate_should_not_run (id integer PRIMARY KEY);
+`, `
+DROP TABLE aggregate_should_not_run;
+`)
+
+	firstFullVersion, err := combineDevVersion(1, testDevV1A)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "acl.db")
+	db := openSquashTestDB(t, dbPath)
+	defer db.Close()
+	seedHistory(t, db, []historyRecord{{Version: firstFullVersion, Name: "v0_1/create_users"}})
+
+	runner := openSquashTestRunner(t, dbPath, dir)
+	defer runner.Close()
+	if err := runner.Up(0); err != nil {
+		t.Fatalf("recognize archived dev path: %v", err)
+	}
+	assertHistoryVersionCount(t, db, firstFullVersion, 1)
+	assertHistoryVersionCount(t, db, testAggregateV1, 0)
+	assertTableExists(t, db, "aggregate_should_not_run", false)
+}
+
+func TestRunnerSkipsOlderDevAfterAggregate(t *testing.T) {
+	dir := newStructuredMigrationDir(t)
+	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
+-- +migrate Supersedes: 20260725093000
+CREATE TABLE users (id integer PRIMARY KEY);
+`, `
+DROP TABLE users;
+`)
+	devDir := devModeDir(t, dir, "v0_1")
+	writeMigrationPair(t, devDir, "20260725093000_create_users", `
+CREATE TABLE users (id integer PRIMARY KEY);
+`, `
+DROP TABLE users;
+`)
+	const lateMergedVersion = uint64(20260710120000)
+	writeMigrationPair(t, devDir, "20260710120000_create_late_project", `
+CREATE TABLE late_project (id integer PRIMARY KEY);
+`, `
+DROP TABLE late_project;
+`)
+
+	dbPath := filepath.Join(t.TempDir(), "acl.db")
+	db := openSquashTestDB(t, dbPath)
+	defer db.Close()
+	seedHistory(t, db, []historyRecord{{Version: testAggregateV1, Name: "release"}})
+	if _, err := db.Exec(`CREATE TABLE users (id integer PRIMARY KEY)`); err != nil {
+		t.Fatalf("seed aggregate schema: %v", err)
+	}
+
+	runner := openSquashTestRunner(t, dbPath, dir)
+	defer runner.Close()
+	if err := runner.Up(0); err != nil {
+		t.Fatalf("skip older dev covered by aggregate cutoff: %v", err)
+	}
+
+	coveredVersion, err := combineDevVersion(1, testDevV1A)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateFullVersion, err := combineDevVersion(1, lateMergedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHistoryVersionCount(t, db, testAggregateV1, 1)
+	assertHistoryVersionCount(t, db, coveredVersion, 0)
+	assertHistoryVersionCount(t, db, lateFullVersion, 0)
+	assertTableExists(t, db, "late_project", false)
 }
 
 func TestRunnerAllowsDifferentModesToUseDifferentSources(t *testing.T) {
@@ -402,6 +565,79 @@ DROP TABLE aggregate_should_not_run;
 	assertTableExists(t, db, "aggregate_should_not_run", false)
 	assertHistoryVersionCount(t, db, deletedFullVersion, 1)
 	assertHistoryVersionCount(t, db, testAggregateV1, 0)
+}
+
+func TestRunnerReconcilesUnknownMigrationFromOpenDevMode(t *testing.T) {
+	dir := newStructuredMigrationDir(t)
+	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
+CREATE TABLE aggregate_should_not_run (id integer PRIMARY KEY);
+`, `
+DROP TABLE aggregate_should_not_run;
+`)
+	writeMigrationPair(t, devModeDir(t, dir, "v0_1"), "20260725093000_create_users", `
+CREATE TABLE IF NOT EXISTS users (id integer PRIMARY KEY);
+`, `
+DROP TABLE IF EXISTS users;
+`)
+
+	knownVersion, err := combineDevVersion(1, testDevV1A)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownVersion, err := combineDevVersion(1, 20260725100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "acl.db")
+	db := openSquashTestDB(t, dbPath)
+	defer db.Close()
+	seedHistory(t, db, []historyRecord{
+		{Version: knownVersion, Name: "v0_1/create_users"},
+		{Version: unknownVersion, Name: "v0_1/removed_branch_migration"},
+	})
+
+	t.Setenv(reconcileUnknownDevHistoryEnv, "true")
+	runner := openSquashTestRunner(t, dbPath, dir)
+	defer runner.Close()
+	if err := runner.Up(0); err != nil {
+		t.Fatalf("reconcile open dev history: %v", err)
+	}
+
+	assertHistoryVersionCount(t, db, knownVersion, 1)
+	assertHistoryVersionCount(t, db, unknownVersion, 0)
+	assertMigrationState(t, db, knownVersion)
+	assertTableExists(t, db, "aggregate_should_not_run", false)
+}
+
+func TestRunnerDoesNotReconcileUnknownDevHistoryWithoutKnownDevPath(t *testing.T) {
+	dir := newStructuredMigrationDir(t)
+	writeMigrationPair(t, versionModeDir(t, dir, "v0_1"), "20260802120000_release", `
+SELECT 1;
+`, `
+SELECT 1;
+`)
+	devModeDir(t, dir, "v0_1")
+
+	unknownVersion, err := combineDevVersion(1, 20260725100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "acl.db")
+	db := openSquashTestDB(t, dbPath)
+	defer db.Close()
+	seedHistory(t, db, []historyRecord{{
+		Version: unknownVersion,
+		Name:    "v0_1/removed_branch_migration",
+	}})
+
+	t.Setenv(reconcileUnknownDevHistoryEnv, "true")
+	runner := openSquashTestRunner(t, dbPath, dir)
+	defer runner.Close()
+	err = runner.Up(0)
+	if err == nil || !strings.Contains(err.Error(), "has no migration file or release directory") {
+		t.Fatalf("expected unknown migration error without known dev path, got %v", err)
+	}
+	assertHistoryVersionCount(t, db, unknownVersion, 1)
 }
 
 func TestRunnerRejectsMixedAggregateAndDevHistoryForSameMode(t *testing.T) {

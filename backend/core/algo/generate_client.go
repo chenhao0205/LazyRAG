@@ -22,16 +22,19 @@ func GenerateSkill(ctx context.Context, req SkillGenerateRequest) (string, error
 	return generate(ctx, rewritePayload("skill", req.Content, req.UserInstruct, req.LLMConfig))
 }
 
-func GenerateMemory(ctx context.Context, req ManagedGenerateRequest) (string, error) {
-	return generate(ctx, rewritePayload("memory", req.Content, req.UserInstruct, req.LLMConfig))
-}
-
-func GenerateUserPreference(ctx context.Context, req ManagedGenerateRequest) (string, error) {
-	return generate(ctx, rewritePayload("user_preference", req.Content, req.UserInstruct, req.LLMConfig))
-}
-
 func GeneratePolish(ctx context.Context, req PolishGenerateRequest) (string, error) {
 	return generate(ctx, rewritePayload("polish", req.Content, req.UserInstruct, req.LLMConfig))
+}
+
+func GenerateEditablePolish(ctx context.Context, req RewriteRequest) (map[string]any, error) {
+	var response map[string]any
+	if err := common.ApiPost(ctx, generateURL(rewritePath), req, nil, &response, generateTimeout); err != nil {
+		return nil, err
+	}
+	if _, ok := response["content"].(string); !ok {
+		return nil, fmt.Errorf("generate endpoint returned invalid editable polish content")
+	}
+	return response, nil
 }
 
 func generateURL(path string) string {

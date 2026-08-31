@@ -46,6 +46,14 @@ def test_system_prompt_omits_tool_policy_without_tools() -> None:
     assert '# Tool use policy' not in prompt
 
 
+def test_main_chat_prompt_describes_editable_writing_blocks() -> None:
+    prompt = build_system_prompt(False)
+
+    assert '# Editable writing blocks' in prompt
+    assert '```editable' in prompt
+    assert 'articles, marketing or sales copy' in prompt
+
+
 def test_system_prompt_does_not_embed_tool_specific_web_guidance() -> None:
     prompt = build_system_prompt(True)
 
@@ -86,7 +94,7 @@ def test_system_prompt_appends_partitioned_active_tool_contracts() -> None:
 def test_tool_output_contract_keeps_detailed_image_and_citation_guards() -> None:
     from lazymind.chat.service.component.tool_registry import (
         IMAGE_MARKDOWN_OUTPUT_APPENDIX,
-        KNOWLEDGE_CITATION_OUTPUT_APPENDIX,
+        RETRIEVAL_CITATION_OUTPUT_APPENDIX,
         collect_system_prompt_appendices,
     )
 
@@ -96,17 +104,16 @@ def test_tool_output_contract_keeps_detailed_image_and_citation_guards() -> None
             [],
             extra_appendices=(
                 IMAGE_MARKDOWN_OUTPUT_APPENDIX,
-                KNOWLEDGE_CITATION_OUTPUT_APPENDIX,
+                RETRIEVAL_CITATION_OUTPUT_APPENDIX,
             ),
         ),
     )
 
     assert 'NEVER invent hosts or prefixes' in prompt
     assert 'Do not paste bare filesystem paths' in prompt
-    assert 'you MUST cite that evidence in the user-visible final answer' in prompt
-    assert 'MUST contain at least one such marker' in prompt
-    assert 'builds the references panel automatically' in prompt
-    assert 'do not invent' in prompt
+    assert 'For any used retrieval result containing `ref`' in prompt
+    assert 'cite at least one result from each category' in prompt
+    assert 'Never invent or rewrite refs' in prompt
 
 
 def test_system_prompt_ignores_tool_appendices_when_no_tools_are_registered() -> None:
@@ -116,3 +123,33 @@ def test_system_prompt_ignores_tool_appendices_when_no_tools_are_registered() ->
     )
 
     assert 'Must not be injected.' not in prompt
+
+
+def test_system_prompt_explains_profile_operations_by_yaml_type() -> None:
+    prompt = build_system_prompt(
+        True,
+        profile=(
+            'personal:\n'
+            '  nickname: Neo\n'
+            '  interests: [AI]\n'
+            '  headline: null\n'
+        ),
+    )
+
+    assert 'nickname: Neo' in prompt
+    assert 'A YAML string supports `set` and `clear`' in prompt
+    assert 'A YAML `null` supports `set` and `clear`' in prompt
+    assert 'A YAML list of strings supports `add`, `remove`, and `clear`' in prompt
+    assert 'Use only existing leaf dot paths' in prompt
+
+
+def test_system_prompt_uses_query_history_and_environment_not_profile_language() -> None:
+    prompt = build_system_prompt(
+        True,
+        current_query='What changed?',
+        profile='locale:\n  languages: [Chinese]\n',
+        environment_context={'locale': 'zh-CN'},
+    )
+
+    assert 'Selected response language for this turn: English' in prompt
+    assert 'profile locale.languages' not in prompt

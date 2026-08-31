@@ -6,13 +6,43 @@ drive run_subagent_stream without any real database, LLM, or network calls.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import lazymind.chat.engine.subagent.runner as runner_mod
+
+
+def test_workflow_script_tool_is_loaded_from_pinned_revision():
+    source = 'def create_list_fixtures():\n    return ["one", "two"]\n'
+    response = MagicMock()
+    response.result = {
+        'revision_id': 'revision-1',
+        'tree_hash': 'tree-1',
+        'files': {
+            'scripts/tools.py': base64.b64encode(source.encode()).decode(),
+        },
+    }
+    client = MagicMock()
+    client.get_workflow.return_value = response
+
+    with patch('lazymind.workflow_sdk.WorkflowClient', return_value=client):
+        tools = runner_mod._resolve_runtime_tools(
+            ['create_list_fixtures'],
+            {
+                'workflow_id': 'test-workflow',
+                'revision_id': 'revision-1',
+                'tree_hash': 'tree-1',
+                'user_id': 'user-1',
+            },
+        )
+
+    assert [tool.__name__ for tool in tools] == ['create_list_fixtures']
+    assert tools[0]() == ['one', 'two']
+    client.get_workflow.assert_called_once_with('test-workflow', 'revision-1')
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +189,10 @@ def test_subagent_plan_preserves_extension_params_without_structured_duplicates(
             'history_files_per_turn': {'1': ['/tmp/input.txt']},
             'partial_indices': {'items': [0]},
             'required_output_artifact_keys': ['result'],
+            'workflow_id': 'test-workflow',
+            'session_id': 'session-1',
+            'step_id': 'prompt',
+            'user_input': 'run the whole workflow',
         },
         workspace_path=str(tmp_path),
         input_slots=[],
@@ -183,21 +217,30 @@ def test_subagent_plan_preserves_extension_params_without_structured_duplicates(
     assert 'history_files_per_turn' not in parameter_section.content
     assert 'partial_indices' not in parameter_section.content
     assert 'required_output_artifact_keys' not in parameter_section.content
+    assert 'workflow_id' not in parameter_section.content
+    assert 'session_id' not in parameter_section.content
+    assert 'user_input' not in parameter_section.content
+    role_section = next(
+        section for section in plan.prompt.sections
+        if section.section_id == 'subagent_role'
+    )
+    assert 'must never ask the user a question' in role_section.content
+    assert 'Never emit a fenced Markdown block with the language `editable`' in role_section.content
+    assert all(section.section_id != 'editable_writing' for section in plan.prompt.sections)
 
 
-@pytest.mark.parametrize('thinking_depth', ['low', 'medium', 'high', 'max'])
-def test_subagent_plan_uses_200_rounds_in_every_thinking_mode(tmp_path, thinking_depth):
+def test_subagent_plan_uses_200_rounds_in_max_mode(tmp_path):
     import lazyllm
     from lazymind.chat.engine.subagent.context import SubAgentContext
 
     ctx = SubAgentContext(
-        task_id=f'task-{thinking_depth}', conversation_id='conv-1', agent_type='research',
-        objective='deep research', params={'_thinking_depth': thinking_depth}, workspace_path=str(tmp_path),
+        task_id='task-max', conversation_id='conv-1', agent_type='research',
+        objective='deep research', params={'_thinking_depth': 'max'}, workspace_path=str(tmp_path),
         input_slots=[], output_slots=[], db=None, emit=lambda _event: None,
     )
     previous = lazyllm.globals.get('agentic_config')
     try:
-        lazyllm.globals['agentic_config'] = {'thinking_depth': thinking_depth}
+        lazyllm.globals['agentic_config'] = {'thinking_depth': 'max'}
         with runner_mod._cfg.temp('agentic_expanded_max_rounds', 200):
             plan = runner_mod._build_subagent_plan(
                 ctx, None, tools=[], tool_prompt_appendices={},
@@ -206,6 +249,22 @@ def test_subagent_plan_uses_200_rounds_in_every_thinking_mode(tmp_path, thinking
         lazyllm.globals['agentic_config'] = previous or {}
 
     assert plan.execution_options.max_retries == 199
+
+
+def test_subagent_plan_forwards_llm_config_for_context_budget(tmp_path):
+    from lazymind.chat.engine.subagent.context import SubAgentContext
+
+    ctx = SubAgentContext(
+        task_id='task-budget', conversation_id='conv-1', agent_type='workflow_step',
+        objective='retrieve literature', params={}, workspace_path=str(tmp_path),
+        input_slots=[], output_slots=[], db=None, emit=lambda _event: None,
+    )
+    llm_config = {'llm': {'source': 'deepseek', 'model': 'deepseek-v4-flash', 'max_input_tokens': '1M'}}
+    plan = runner_mod._build_subagent_plan(
+        ctx, None, tools=[], tool_prompt_appendices={}, llm_config=llm_config,
+    )
+
+    assert plan.execution_options.llm_config == llm_config
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +415,48 @@ def test_run_subagent_stream_text_think_events(monkeypatch):
     assert 'text' in types_out
 
 
+def test_run_subagent_stream_emits_task_scoped_source_snapshot(monkeypatch):
+    _install_fake_db(monkeypatch)
+    _install_fake_lazyllm(monkeypatch)
+    _install_fake_build(monkeypatch)
+    _install_fake_translator(monkeypatch)
+    _install_fake_drive(monkeypatch, [{
+        'tag': 'tool_results',
+        'tool_results': [{'id': 'search-1', 'name': 'web_search', 'result': 'ok'}],
+    }])
+    monkeypatch.setattr(
+        runner_mod,
+        'materialize_source_views',
+        MagicMock(side_effect=[[], [{
+            'index': '1.1',
+            'source_type': 'external',
+            'title': 'Example',
+            'url': 'https://example.test',
+            'source_roles': ['searched'],
+        }], [{
+            'index': '1.1',
+            'source_type': 'external',
+            'title': 'Example',
+            'url': 'https://example.test',
+            'source_roles': ['searched'],
+        }]]),
+    )
+
+    def pre_save_ctx(ctx):
+        ctx._artifact_counts['result'] = 1
+
+    monkeypatch.setattr(runner_mod, 'set_context', pre_save_ctx)
+
+    async def run():
+        return await _collect(runner_mod.run_subagent_stream(_DEFAULT_TASK_ID, 'dsn://'))
+
+    events_out = _sse_to_events(asyncio.run(run()))
+    source_events = [event for event in events_out if event.get('type') == 'sources']
+    assert len(source_events) == 1
+    assert source_events[0]['task_id'] == _DEFAULT_TASK_ID
+    assert source_events[0]['sources'][0]['source_roles'] == ['searched']
+
+
 # ---------------------------------------------------------------------------
 # Test: _rebuild_history_from_steps pairing validation
 # ---------------------------------------------------------------------------
@@ -366,13 +467,40 @@ def test_rebuild_history_valid_pairs():
         {'task_id': 't1', 'seq': 0, 'role': 'assistant',
          'content': {'text': '', 'tool_calls': [{'id': 'c1', 'name': 'tool_a', 'args': {}}]}},
         {'task_id': 't1', 'seq': 1, 'role': 'tool',
-         'content': {'tool_results': [{'tool_call_id': 'c1', 'name': 'tool_a', 'result': 'res'}]}},
+         'content': {'tool_results': [{
+             'tool_call_id': 'c1',
+             'name': 'tool_a',
+             'result': {'path': '/tmp/result.txt', 'offset': 4},
+         }]}},
     ]
     history = runner_mod._rebuild_history_from_steps(db, 't1')
     assert len(history) == 2
     assert history[0]['role'] == 'assistant'
     assert history[1]['role'] == 'tool'
     assert history[1]['tool_call_id'] == 'c1'
+    assert history[1][runner_mod.TOOL_OBSERVATION_KEY] == {
+        'version': 1,
+        'ok': None,
+        'value': {'path': '/tmp/result.txt', 'offset': 4},
+        'error': '',
+    }
+
+
+def test_rebuild_history_skips_observation_for_string_tool_results():
+    db = FakeDB()
+    db.steps = [
+        {'task_id': 't1', 'seq': 0, 'role': 'assistant',
+         'content': {'text': '', 'tool_calls': [{'id': 'c1', 'name': 'tool_a', 'args': {}}]}},
+        {'task_id': 't1', 'seq': 1, 'role': 'tool',
+         'content': {'tool_results': [{
+             'tool_call_id': 'c1',
+             'name': 'tool_a',
+             'result': 'plain tool output',
+         }]}},
+    ]
+    history = runner_mod._rebuild_history_from_steps(db, 't1')
+    assert history[1]['content'] == 'plain tool output'
+    assert runner_mod.TOOL_OBSERVATION_KEY not in history[1]
 
 
 def test_rebuild_history_orphan_tool_result_dropped():

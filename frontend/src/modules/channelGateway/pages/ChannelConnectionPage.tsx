@@ -90,7 +90,10 @@ function statusColor(status: string): string {
   }
 }
 
-function canAct(session: ConnectionSession | null, action: string): boolean {
+function canAct(
+  session: ConnectionSession | null,
+  action: ConnectionSession['allowed_actions'][number],
+): boolean {
   return Boolean(session?.allowed_actions?.includes(action));
 }
 
@@ -384,7 +387,9 @@ export function TerminalConnectionPage() {
   }, [loadAccounts]);
 
   const selectProvider = (nextProvider: ChannelProvider) => {
-    setSearchParams({ provider: nextProvider }, { replace: true });
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set('provider', nextProvider);
+    setSearchParams(nextSearchParams, { replace: true });
   };
 
   const openAccountsPanel = () => {

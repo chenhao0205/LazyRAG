@@ -1,10 +1,21 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 from fastapi.responses import StreamingResponse
 
 from lazymind.chat.service.chat_request import ChatRequest
 from lazymind.chat.service import chat_service
+
+
+def test_old_request_cleanup_does_not_unregister_newer_chat_session():
+    chat_service._active_sessions['conversation-race'] = 'new-session'
+
+    chat_service._unregister_active_session('conversation-race', 'old-session')
+
+    assert chat_service._active_sessions['conversation-race'] == 'new-session'
+    chat_service._unregister_active_session('conversation-race', 'new-session')
+    assert 'conversation-race' not in chat_service._active_sessions
 
 
 async def _collect_streaming_response(response):
@@ -38,8 +49,34 @@ def test_handle_chat_constructs_react_agent_from_runtime_context(monkeypatch):
         def _prepare_tool_context(self, _query, _history):
             return None
 
+        def _model_facing_prefix(self):
+            return {
+                'system_prompt': '',
+                'tool_definitions': [],
+                'skills_prompt': '',
+                'skill_prompt_parts': [],
+            }
+
     monkeypatch.setattr(chat_service, 'AutoModel', lambda model, config=False: f'{model}:{config}')
     monkeypatch.setattr(chat_service.lazyllm.tools.agent, 'ReactAgent', FakeAgent)
+    monkeypatch.setattr(
+        chat_service,
+        'get_episode_store',
+        lambda: SimpleNamespace(
+            search=lambda *_args, **_kwargs: [],
+            list_recent=lambda *_args, **_kwargs: [],
+            render=lambda _episode: '',
+        ),
+    )
+    monkeypatch.setattr(
+        chat_service,
+        'load_memory_context',
+        lambda: SimpleNamespace(
+            soul='identity:\n  name: LazyMind',
+            profile='identity:\n  preferred_name: null',
+            preference='preferences: []',
+        ),
+    )
 
     async def drive():
         response = await chat_service.handle_chat(ChatRequest(
@@ -55,7 +92,6 @@ def test_handle_chat_constructs_react_agent_from_runtime_context(monkeypatch):
             agent={
                 'disabled_tools': [
                     'kb',
-                    'temp_kb',
                     'wikipedia',
                     'arxiv',
                     'sciverse',
@@ -71,7 +107,7 @@ def test_handle_chat_constructs_react_agent_from_runtime_context(monkeypatch):
                 'available_skills': ['skill-a'],
                 'enable_subagent': False,
             },
-            plugin={'enable_plugin': False},
+            workflow={'enable_workflow': False},
         ))
         return await _collect_streaming_response(response)
 
@@ -81,6 +117,7 @@ def test_handle_chat_constructs_react_agent_from_runtime_context(monkeypatch):
     assert agent_calls[0]['llm'].startswith('llm:')
     assert agent_calls[0]['tools']
     assert agent_calls[0]['kwargs']['skills'] is False
+    assert callable(agent_calls[0]['kwargs']['extra_stop_condition'])
     assert agent_calls[0]['kwargs']['stream'] is True
     tool_names = {getattr(tool, '__name__', '') for tool in agent_calls[0]['tools']}
     assert {'read_file', 'write_file', 'list_dir'} <= tool_names
@@ -88,10 +125,21 @@ def test_handle_chat_constructs_react_agent_from_runtime_context(monkeypatch):
     assert agent_calls[0]['kwargs']['workspace'] == workspace
     assert f'Use `{workspace}` as the single working directory' in agent_calls[0]['kwargs']['prompt']
     assert '## Attached Files' not in agent_calls[0]['kwargs']['prompt']
-    assert '### User Instruction\n\nhello\n\nATTENTION — `ask_user`' in agent_queries[0]
+    query = agent_queries[0]
+    instruction_idx = query.index('### User Instruction\n\nhello')
+    assert instruction_idx >= 0
+    assert query.index('ATTENTION — if this turn supplies an environment variable') > instruction_idx
+    assert query.index('ATTENTION — `ask_user`') > instruction_idx
     assert 'answer:### Runtime Context' in body
     assert 'hello' in body
-    assert '"status": "FINISHED"' in body
+    payloads = [json.loads(chunk) for chunk in body.strip().split('\n\n')]
+    terminal = payloads[-1]['data']['runtime_event']
+    assert terminal['type'] == 'run_finished'
+    assert terminal['data'] == {
+        'status': 'completed',
+        'reason': 'normal',
+        'partial_output': True,
+    }
 
 
 def test_sensitive_input_is_blocked_before_model_execution(monkeypatch):
@@ -125,7 +173,17 @@ def test_sensitive_input_is_blocked_before_model_execution(monkeypatch):
         'text': chat_service.SENSITIVE_FILTER_RESPONSE_TEXT,
         'sources': [],
     }
-    assert payloads[1]['data'] == {'status': 'FINISHED', 'tool_call_turns': 0}
+    terminal_payload = payloads[1]['data']
+    assert terminal_payload['think'] is None
+    assert terminal_payload['text'] is None
+    assert terminal_payload['sources'] == []
+    terminal = terminal_payload['runtime_event']
+    assert terminal['type'] == 'run_finished'
+    assert terminal['data'] == {
+        'status': 'completed',
+        'reason': 'normal',
+        'partial_output': True,
+    }
 
 
 def test_task_profile_review_emits_ephemeral_pseudo_stream(monkeypatch):
@@ -136,12 +194,12 @@ def test_task_profile_review_emits_ephemeral_pseudo_stream(monkeypatch):
         runtime={'llm_config': {}, 'thinking_depth': 'medium'},
         personalization={'use_memory': True},
         agent={'enable_subagent': False},
-        plugin={'enable_plugin': False},
+        workflow={'enable_workflow': False},
     )
     original_history = list(request.message.history)
     sensitive_checks = []
 
-    def fake_resolve(inputs):
+    def fake_resolve(inputs, **_kwargs):
         return chat_service.resolve_task_profile(
             inputs['query'], enable_llm_fallback=False,
         )
@@ -185,7 +243,7 @@ def test_context_usage_preview_only_uses_model_when_explicitly_requested(monkeyp
     model_calls = []
     sensitive_checks = []
 
-    def fake_model_resolve(inputs):
+    def fake_model_resolve(inputs, **_kwargs):
         model_calls.append(inputs)
         return chat_service.resolve_task_profile(
             inputs['query'], enable_llm_fallback=False,
@@ -253,7 +311,7 @@ def test_context_prompt_export_and_driver_skip_sensitive_detection(monkeypatch):
         ChatRequest(
             message={'query': '你是傻逼', 'history': []},
             conversation={'session_id': 'sid-driver'},
-            plugin={'plugin_context': {'synthetic_source': 'driver'}},
+            workflow={'workflow_context': {'synthetic_source': 'driver'}},
         ),
     )
 

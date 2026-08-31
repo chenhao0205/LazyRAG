@@ -49,7 +49,7 @@ export const allowedImageTypes = [".png", ".jpg", ".jpeg"];
 export const allowedFileTypes = [".pdf", ".docx", ".doc", ".pptx"];
 // Keep this list aligned with algorithm CHAT_TEXT_EXTENSIONS and core common textFileExtensions.
 export const allowedTextTypes = [
-  ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
+  ".txt", ".md", ".markdown", ".lmd", ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
   ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".log", ".sql",
   ".html", ".htm", ".css", ".scss", ".sass", ".less",
   ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
@@ -246,7 +246,9 @@ const ImageUpload = forwardRef<ImageUploadImperativeProps, Props>(
     const uploadProps: UploadProps = {
       multiple: false,
       showUploadList: false,
-      disabled: disabled || listNum >= max,
+      // Keep Upload enabled at max count so openFileDialog can still fire and
+      // checkFileCountLimit can surface the blocking limit warning.
+      disabled,
       accept: types.join(","),
       // Do not bind fileList/maxCount here — file list is managed locally and
       // rendered via ShowChatFileList. Controlled fileList + beforeUpload:false
@@ -266,13 +268,41 @@ const ImageUpload = forwardRef<ImageUploadImperativeProps, Props>(
       clear: () => commitFiles([]),
       getUploadingCount: () => uploadingCount,
       openFileDialog: () => {
-        uploadRootRef.current?.querySelector<HTMLInputElement>('input[type="file"]')?.click();
+        if (disabled) {
+          if (disabledReason) {
+            message.warning(disabledReason);
+          }
+          return;
+        }
+        if (filesRef.current.length >= max || listNum >= max) {
+          message.warning(t("chat.maxThreeFilesAndImages"));
+          return;
+        }
+        const input =
+          uploadRootRef.current?.querySelector<HTMLInputElement>(
+            'input[type="file"]',
+          );
+        if (!input) {
+          return;
+        }
+        // Temporarily clear disabled so programmatic click opens the picker.
+        const wasDisabled = input.disabled;
+        input.disabled = false;
+        input.click();
+        input.disabled = wasDisabled;
       },
       uploadFiles: (droppedFiles: File[]) => {
         if (disabled) {
           if (disabledReason) {
             message.warning(disabledReason);
           }
+          return;
+        }
+        if (
+          filesRef.current.length >= max &&
+          droppedFiles.length > 0
+        ) {
+          message.warning(t("chat.maxThreeFilesAndImages"));
           return;
         }
         const current = [...files];

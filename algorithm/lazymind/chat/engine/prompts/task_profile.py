@@ -69,7 +69,7 @@ class RequestAssessment:
 
 @dataclass(frozen=True)
 class ResourceMention:
-    resource_type: Literal['skill', 'knowledge_base', 'plugin']
+    resource_type: Literal['skill', 'knowledge_base', 'workflow']
     resource_ref: str
     display_name: str = ''
 
@@ -78,7 +78,7 @@ class ResourceMention:
 class ExplicitResourceBindings:
     skill_names: tuple[str, ...] = ()
     knowledge_base_ids: tuple[str, ...] = ()
-    plugin_refs: tuple[str, ...] = ()
+    workflow_refs: tuple[str, ...] = ()
     mentions: tuple[ResourceMention, ...] = ()
 
 
@@ -171,17 +171,20 @@ _SIGNALS: tuple[tuple[Outcome, re.Pattern[str]], ...] = (
     ('execute', re.compile(
         r'替我|帮我(?:发送|发布|修改|运行|删除|安装|部署)|直接(?:发送|发布|修改|运行|部署)|'
         r'^(?:发送|发布|修改|运行|删除|安装|部署)|(?:然后|再|并且|并)(?:发送|发布|修改|运行|删除|安装|部署)|'
-        r'帮我(?:修复|更新|升级|替换|重构|新增|添加|移除|重命名|移动|复制|'
+        r'帮我(?:修复|更新|升级|替换|重构|新增|添加|插入|移除|重命名|移动|复制|'
         r'上传|下载|导入|导出|提交|推送|合并|回滚|配置|连接|同步|迁移|'
         r'启动|停止|重启|回复|转发|预约|取消|邀请|批准|填写)|'
-        r'^(?:修复|更新|升级|新增|添加|移除|重命名|上传|提交|推送|合并|回滚|'
+        r'^(?:修复|更新|升级|新增|添加|插入|移除|重命名|上传|提交|推送|合并|回滚|'
         r'配置|迁移|启动|停止|重启)|execute|deploy\s+it|fix\s+(?:this|the)|'
-        r'(?:把|将).{0,30}(?:修复|更新|升级|替换|重构|新增|添加|移除|重命名|移动|'
+        r'(?:插入|嵌入).{0,16}(?:图片|配图|插图|图像|表格|内容|段落|章节|文本|链接|引用|'
+        r'(?:这个|当前|该)?(?:成稿|文档|文章|报告|大纲))|'
+        r'(?:把|将).{0,30}(?:修复|更新|升级|替换|重构|新增|添加|插入|移除|重命名|移动|'
         r'提交|推送|合并|回滚|配置|迁移)|update\s+(?:this|the)|'
+        r'insert\s+(?:this|the|an?|one)|'
         r'\bcommit\b|\bpush\b|\bmerge\b|\brevert\b|\brename\b|\bupload\b', re.I,
     )),
     ('create', re.compile(
-        r'创建|生成|编写|撰写|写一份|写个|帮我写|制作一份|做一个|设计一个|画一个|'
+        r'创建|生成|编写|撰写|写一份|写一篇|写篇|写个|帮我写|制作一份|做一个|设计一个|画一个|'
         r'起草|拟一份|想几个|给.{0,4}个点子|搭一个原型|实现一个|补一个测试|'
         r'产出|create|generate|draft|design|compose|implement|brainstorm|mock\s+up|\bwrite\b', re.I,
     )),
@@ -268,6 +271,16 @@ def _ordered_outcomes(text: str, *, current: bool) -> list[Outcome]:
         found.append((research_match.start(), priority['research'], 'research'))
     found.sort(key=lambda item: (item[0], item[1]))
     outcomes = list(dict.fromkeys(outcome for _, _, outcome in found))
+    # A document insertion is the enclosing outcome even when creating its content
+    # is an earlier prerequisite. Keep create as a secondary outcome without
+    # changing the normal ordering of unrelated multi-outcome requests.
+    document_insertion = re.search(
+        r'(?:插入|嵌入).{0,32}(?:成稿|文档|文章|报告|大纲|图片|配图|插图|图像)|'
+        r'\binsert\b.{0,48}\b(?:document|article|report|draft|image)\b',
+        routing_text, re.I,
+    )
+    if document_insertion and 'execute' in outcomes and outcomes[0] != 'execute':
+        outcomes = ['execute', *(item for item in outcomes if item != 'execute')]
     if 'create' in outcomes and 'plan' in outcomes and re.search(
         r'(?:create|build)\s+(?:an?\s+)?(?:launch\s+|implementation\s+)?'
         r'(?:plan|roadmap)|(?:创建|生成|写)(?:一个|一份)?\s*(?:计划|路线图|方案)',
@@ -589,7 +602,7 @@ def _normalize_explicit_resources(value: Any) -> ExplicitResourceBindings:
             continue
         resource_type = str(item.get('resource_type') or '').strip()
         resource_ref = str(item.get('resource_ref') or '').strip()
-        if resource_type in {'skill', 'knowledge_base', 'plugin'} and resource_ref:
+        if resource_type in {'skill', 'knowledge_base', 'workflow'} and resource_ref:
             mentions.append(ResourceMention(
                 resource_type=resource_type,
                 resource_ref=resource_ref[:240],
@@ -598,7 +611,7 @@ def _normalize_explicit_resources(value: Any) -> ExplicitResourceBindings:
     return ExplicitResourceBindings(
         skill_names=strings('skill_names'),
         knowledge_base_ids=strings('knowledge_base_ids'),
-        plugin_refs=strings('plugin_refs'),
+        workflow_refs=strings('workflow_refs'),
         mentions=tuple(mentions),
     )
 
@@ -622,7 +635,7 @@ def _resource_usage_policy(
     query: str, resources: ExplicitResourceBindings,
 ) -> tuple[ExplicitResourceBindings, ExplicitResourceBindings, bool]:
     """Split current-turn mentions into usable/excluded sets; return whether intent is ambiguous."""
-    excluded: dict[str, set[str]] = {'skill': set(), 'knowledge_base': set(), 'plugin': set()}
+    excluded: dict[str, set[str]] = {'skill': set(), 'knowledge_base': set(), 'workflow': set()}
     ambiguous = False
     for mention in resources.mentions:
         labels = [label for label in (mention.display_name, mention.resource_ref) if label]
@@ -654,7 +667,7 @@ def _resource_usage_policy(
     active = ExplicitResourceBindings(
         skill_names=remaining(resources.skill_names, 'skill'),
         knowledge_base_ids=remaining(resources.knowledge_base_ids, 'knowledge_base'),
-        plugin_refs=remaining(resources.plugin_refs, 'plugin'),
+        workflow_refs=remaining(resources.workflow_refs, 'workflow'),
         mentions=active_mentions,
     )
     denied = ExplicitResourceBindings(
@@ -662,7 +675,7 @@ def _resource_usage_policy(
         knowledge_base_ids=tuple(
             value for value in resources.knowledge_base_ids if value in excluded['knowledge_base']
         ),
-        plugin_refs=tuple(value for value in resources.plugin_refs if value in excluded['plugin']),
+        workflow_refs=tuple(value for value in resources.workflow_refs if value in excluded['workflow']),
         mentions=excluded_mentions,
     )
     return active, denied, ambiguous
@@ -679,13 +692,13 @@ def _apply_explicit_resources(
         all_resources = ExplicitResourceBindings(
             skill_names=resources.skill_names + excluded.skill_names,
             knowledge_base_ids=resources.knowledge_base_ids + excluded.knowledge_base_ids,
-            plugin_refs=resources.plugin_refs + excluded.plugin_refs,
+            workflow_refs=resources.workflow_refs + excluded.workflow_refs,
             mentions=resources.mentions + excluded.mentions,
         )
         allowed_refs = {
             *all_resources.skill_names,
             *all_resources.knowledge_base_ids,
-            *all_resources.plugin_refs,
+            *all_resources.workflow_refs,
         }
         denied_refs = set(model_excluded_refs)
         if not denied_refs.issubset(allowed_refs):
@@ -693,13 +706,13 @@ def _apply_explicit_resources(
         resources = ExplicitResourceBindings(
             skill_names=tuple(x for x in all_resources.skill_names if x not in denied_refs),
             knowledge_base_ids=tuple(x for x in all_resources.knowledge_base_ids if x not in denied_refs),
-            plugin_refs=tuple(x for x in all_resources.plugin_refs if x not in denied_refs),
+            workflow_refs=tuple(x for x in all_resources.workflow_refs if x not in denied_refs),
             mentions=tuple(x for x in all_resources.mentions if x.resource_ref not in denied_refs),
         )
         excluded = ExplicitResourceBindings(
             skill_names=tuple(x for x in all_resources.skill_names if x in denied_refs),
             knowledge_base_ids=tuple(x for x in all_resources.knowledge_base_ids if x in denied_refs),
-            plugin_refs=tuple(x for x in all_resources.plugin_refs if x in denied_refs),
+            workflow_refs=tuple(x for x in all_resources.workflow_refs if x in denied_refs),
             mentions=tuple(x for x in all_resources.mentions if x.resource_ref in denied_refs),
         )
     updates: dict[str, Any] = {
@@ -717,8 +730,8 @@ def _apply_explicit_resources(
         reasons.append('explicit knowledge-base selection')
     elif excluded.knowledge_base_ids:
         updates['source_strategy'] = 'web' if _EXPLICIT_WEB.search(query) else 'model_knowledge'
-    if resources.plugin_refs:
-        reasons.extend(('explicit plugin selection', 'explicit workflow selection'))
+    if resources.workflow_refs:
+        reasons.extend(('explicit workflow selection', 'explicit workflow selection'))
     assessment = profile.request_assessment
     issues = list(assessment.issues)
     questions = list(assessment.clarification_questions)
@@ -908,7 +921,7 @@ def resolve_task_profile(
     stripped_query = str(query or '').strip()
     has_explicit_resources = bool(
         resources.skill_names or resources.knowledge_base_ids
-        or resources.plugin_refs or resources.mentions
+        or resources.workflow_refs or resources.mentions
     )
     trivial_input = (
         not has_attachments

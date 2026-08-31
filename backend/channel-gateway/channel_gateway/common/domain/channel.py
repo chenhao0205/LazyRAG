@@ -15,7 +15,7 @@ ACTIVE_CONNECTION_SESSION_STATUSES = (
     'confirming',
 )
 
-WELCOME_MESSAGE = """我是 LazyMind，你的个人 AI 助手。这里与 LazyMind 网页端使用同一账号、普通会话和历史记录。
+WELCOME_MESSAGE = """我是 LazyMind，你的个人 AI 助手。这里与 LazyMind 使用同一账号、普通会话和历史记录。
 
 你可以直接用自然语言：
 1. “帮我创建一个新会话，并整理今天的周报”
@@ -25,6 +25,16 @@ WELCOME_MESSAGE = """我是 LazyMind，你的个人 AI 助手。这里与 LazyMi
 5. “总结当前会话的进展并给出下一步”
 
 直接发送消息即可继续。"""
+
+WECHAT_WELCOME_MESSAGE = (
+    '我是 LazyMind，你可以在这里继续对话，发送文字、语音、图片和文档。'
+    '也可以用自然语言管理会话和能力；出现选项时直接回复编号即可。'
+)
+
+
+def welcome_message(provider: str) -> str:
+    return WECHAT_WELCOME_MESSAGE if provider == 'wechat' else WELCOME_MESSAGE
+
 
 _HIDDEN_PROTOCOL_TAGS = re.compile(
     r'(?s)<(?:think|tool_call|tool_result|tp|trp)\b[^>]*>'
@@ -83,6 +93,7 @@ class InboundEnvelope:
     recipient_id: str
     text: str
     provider_context: dict[str, Any] = field(default_factory=dict)
+    sensitive_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +140,7 @@ class OutboundMessage:
 @dataclass(frozen=True, slots=True)
 class ClaimedOutbound:
     outbox_id: str
+    created_sequence: int
     provider: str
     account_id: str
     order_key: str

@@ -14,7 +14,12 @@ import {
   GLOSSARY_ALIAS_MAX_LENGTH,
   GLOSSARY_CONTENT_MAX_LENGTH,
   GLOSSARY_TERM_MAX_LENGTH,
+  SKILL_CHAR_COUNT_STYLE,
+  SKILL_DESCRIPTION_MAX_LENGTH,
+  SKILL_NAME_MAX_LENGTH,
   SKILL_TAG_MAX_COUNT,
+  countSkillCharacters,
+  skillCharCountConfig,
 } from "../shared";
 
 export type SkillCreateSource = "zip" | "url";
@@ -26,7 +31,6 @@ interface MemoryDraftModalProps {
   closeModal: () => void;
   saveDraft: () => Promise<void>;
   activeTab: string;
-  experienceSaving: boolean;
   glossarySaving: boolean;
   skillSaving: boolean;
   isReadOnly: boolean;
@@ -49,7 +53,6 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
     closeModal,
     saveDraft,
     activeTab,
-    experienceSaving,
     glossarySaving,
     skillSaving,
     isReadOnly,
@@ -69,6 +72,34 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
   const isExternalSkillImport = Boolean(
     pendingSkillPackageFile || pendingSkillSourceUrl.trim(),
   );
+  const skillNameLength = countSkillCharacters(draft.name);
+  const skillDescriptionLength = countSkillCharacters(draft.description);
+  const skillNameTooLong = activeTab === "skills" && skillNameLength > SKILL_NAME_MAX_LENGTH;
+  const skillDescriptionTooLong =
+    activeTab === "skills" && skillDescriptionLength > SKILL_DESCRIPTION_MAX_LENGTH;
+  const skillMetadataLengthError = skillNameTooLong
+    ? t("admin.memorySkillNameMaxLength", { count: SKILL_NAME_MAX_LENGTH })
+    : skillDescriptionTooLong
+      ? t("admin.memorySkillDescriptionMaxLength", {
+          count: SKILL_DESCRIPTION_MAX_LENGTH,
+        })
+      : "";
+  const shouldDisableSkillSave =
+    !isReadOnly &&
+    activeTab === "skills" &&
+    Boolean(skillMetadataLengthError);
+
+  const handleModalOk = () => {
+    if (shouldDisableSkillSave) {
+      message.warning(skillMetadataLengthError);
+      return;
+    }
+    if (isReadOnly) {
+      closeModal();
+      return;
+    }
+    void saveDraft();
+  };
 
   const handleGlossaryAliasesChange = (value: string[]) => {
     const normalizedAliases = Array.from(
@@ -95,15 +126,17 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
       open={modalOpen}
       title={modalTitle}
       onCancel={closeModal}
-      onOk={isReadOnly ? closeModal : saveDraft}
+      onOk={handleModalOk}
+      okButtonProps={{
+        disabled: shouldDisableSkillSave,
+        title: skillMetadataLengthError || undefined,
+      }}
       confirmLoading={
-        activeTab === "experience"
-          ? experienceSaving
-          : activeTab === "glossary"
-            ? glossarySaving
-            : activeTab === "skills"
-              ? skillSaving
-              : false
+        activeTab === "glossary"
+          ? glossarySaving
+          : activeTab === "skills"
+            ? skillSaving
+            : false
       }
       okText={isReadOnly ? t("common.close") : t("common.save")}
       cancelText={t("common.cancel")}
@@ -118,44 +151,7 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
           .join(" ") || undefined
       }
     >
-      {activeTab === "experience" ? (
-        <div className="memory-modal-grid">
-          <div className="memory-form-field">
-            <label>{t("admin.memoryTitle")}</label>
-            <Input
-              value={draft.title}
-              readOnly={isReadOnly || modalMode === "edit"}
-              className={
-                modalMode === "edit"
-                  ? "memory-experience-title-readonly"
-                  : undefined
-              }
-              placeholder={t("common.pleaseInput") + t("admin.memoryTitle")}
-              onChange={(event) =>
-                setDraft((previous: any) => ({
-                  ...previous,
-                  title: event.target.value,
-                }))
-              }
-            />
-          </div>
-          <div className="memory-form-field memory-form-field-full">
-            <label>{t("admin.memoryContent")}</label>
-            <Input.TextArea
-              rows={9}
-              value={draft.content}
-              readOnly={isReadOnly}
-              placeholder={t("common.pleaseInput") + t("admin.memoryContent")}
-              onChange={(event) =>
-                setDraft((previous: any) => ({
-                  ...previous,
-                  content: event.target.value,
-                }))
-              }
-            />
-          </div>
-        </div>
-      ) : activeTab === "glossary" ? (
+      {activeTab === "glossary" ? (
         <div className="memory-modal-grid">
           {pendingGlossaryMergeSourceIds.length ? (
             <Alert
@@ -260,11 +256,14 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
               message={t("admin.memorySkillEditMetadataHint")}
             />
           ) : null}
-          <div className="memory-form-field memory-form-field-full">
+          <div className="memory-form-field memory-form-field-full memory-char-count">
             <label>{t("admin.memoryName")}</label>
             <Input
               value={draft.name}
               readOnly={isReadOnly}
+              status={skillNameTooLong ? "error" : undefined}
+              styles={{ count: SKILL_CHAR_COUNT_STYLE }}
+              count={skillCharCountConfig(SKILL_NAME_MAX_LENGTH, !isReadOnly)}
               placeholder={t("common.pleaseInput") + t("admin.memoryName")}
               onChange={(event) =>
                 setDraft((previous: any) => ({
@@ -274,7 +273,7 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
               }
             />
           </div>
-          <div className="memory-form-field memory-form-field-full">
+          <div className="memory-form-field memory-form-field-full memory-char-count">
             <label>{t("admin.memoryDescription")}</label>
             <Input.TextArea
               rows={isSkillCreateModal ? 2 : 3}
@@ -284,6 +283,12 @@ export default function MemoryDraftModal(props: MemoryDraftModalProps) {
               }}
               value={draft.description}
               readOnly={isReadOnly}
+              status={skillDescriptionTooLong ? "error" : undefined}
+              styles={{ count: SKILL_CHAR_COUNT_STYLE }}
+              count={skillCharCountConfig(
+                SKILL_DESCRIPTION_MAX_LENGTH,
+                !isReadOnly,
+              )}
               placeholder={
                 t("common.pleaseInput") + t("admin.memoryDescription")
               }

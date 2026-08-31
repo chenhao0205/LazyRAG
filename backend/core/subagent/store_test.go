@@ -11,14 +11,7 @@ import (
 
 func newTestDB(t *testing.T) *orm.DB {
 	t.Helper()
-	db, err := orm.Connect(orm.DriverSQLite, t.TempDir()+"/subagent.db")
-	if err != nil {
-		t.Fatalf("connect db: %v", err)
-	}
-	if err := db.AutoMigrate(&orm.SubAgentTask{}, &orm.SubAgentStep{}, &orm.SubAgentArtifact{}); err != nil {
-		t.Fatalf("auto migrate: %v", err)
-	}
-	return db
+	return orm.MigrateTestDB(t, &orm.SubAgentTask{}, &orm.SubAgentStep{}, &orm.SubAgentArtifact{})
 }
 
 func TestCreateTaskAllocatesSequentialSeq(t *testing.T) {
@@ -110,6 +103,32 @@ func TestStatusAndArtifactLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpdateSourcesReplacesTaskSnapshot(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if _, err := CreateTask(ctx, db.DB, CreateTaskInput{
+		TaskID: "task-sources", ConversationID: "conv-sources", AgentType: "research",
+		Title: "research", Mode: "auto",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sources := json.RawMessage(`[{"index":"1.1","title":"Example","source_roles":["searched"]}]`)
+	if err := UpdateSources(ctx, db.DB, "task-sources", sources); err != nil {
+		t.Fatalf("update sources: %v", err)
+	}
+	task, err := GetTask(ctx, db.DB, "task-sources")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if string(task.Sources) != string(sources) {
+		t.Fatalf("sources: got %s, want %s", task.Sources, sources)
+	}
+	if err := UpdateSources(ctx, db.DB, "task-sources", json.RawMessage(`{"bad":true}`)); err == nil {
+		t.Fatal("expected object snapshot to be rejected")
+	}
+}
+
 func TestListTasksByConversationForUserEnforcesOwnership(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -145,6 +164,26 @@ func TestListTasksByConversationForUserEnforcesOwnership(t *testing.T) {
 	}
 }
 
+func TestListTasksByConversationForUserIncludesWorkflowAttempts(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	for _, input := range []CreateTaskInput{
+		{TaskID: "independent", ConversationID: "conv", CreateUserID: "user-1", AgentType: "research"},
+		{TaskID: "workflow", ConversationID: "conv", CreateUserID: "user-1", AgentType: "workflow_step"},
+	} {
+		if _, err := CreateTask(ctx, db.DB, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tasks, err := ListTasksByConversationForUser(ctx, db.DB, "conv", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 || tasks[0].ID != "independent" || tasks[1].ID != "workflow" {
+		t.Fatalf("public tasks = %#v, want independent and workflow tasks", tasks)
+	}
+}
+
 func TestMarkInterrupted(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -175,11 +214,46 @@ func TestMarkInterrupted(t *testing.T) {
 	}
 }
 
+func TestInterruptConversationStopsOnlyActiveTasks(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	for _, input := range []CreateTaskInput{
+		{TaskID: "pending", ConversationID: "conv", AgentType: "research", Title: "pending"},
+		{TaskID: "running", ConversationID: "conv", AgentType: "research", Title: "running"},
+		{TaskID: "other", ConversationID: "other-conv", AgentType: "research", Title: "other"},
+	} {
+		if _, err := CreateTask(ctx, db.DB, input); err != nil {
+			t.Fatalf("create %s: %v", input.TaskID, err)
+		}
+	}
+	if err := UpdateStatus(ctx, db.DB, "running", StatusRunning); err != nil {
+		t.Fatalf("start running task: %v", err)
+	}
+
+	ids, err := InterruptConversation(ctx, db.DB, "conv", "stopped by user")
+	if err != nil {
+		t.Fatalf("interrupt conversation: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("interrupted IDs: got %#v, want two", ids)
+	}
+	for _, taskID := range []string{"pending", "running"} {
+		task, _ := GetTask(ctx, db.DB, taskID)
+		if task.Status != StatusInterrupted || task.Summary != "stopped by user" {
+			t.Fatalf("task %s not interrupted: status=%q summary=%q", taskID, task.Status, task.Summary)
+		}
+	}
+	other, _ := GetTask(ctx, db.DB, "other")
+	if other.Status != StatusPending {
+		t.Fatalf("other conversation task changed: %q", other.Status)
+	}
+}
+
 func TestLateRunnerEventsDoNotReviveInterruptedTask(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	if _, err := CreateTask(ctx, db.DB, CreateTaskInput{
-		TaskID: "stopped", ConversationID: "conv", AgentType: "plugin_step", Title: "stopped",
+		TaskID: "stopped", ConversationID: "conv", AgentType: "workflow_step", Title: "stopped",
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}

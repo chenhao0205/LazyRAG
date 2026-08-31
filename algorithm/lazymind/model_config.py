@@ -55,18 +55,21 @@ def is_model_role_available(role: str, *, config_path: Optional[str] = None) -> 
 def get_config_path() -> str:
     '''Return the active runtime_models config file path as a string.
 
-    Controlled entirely by LAZYMIND_MODEL_CONFIG_PATH.  Three shorthand aliases
+    Controlled entirely by LAZYMIND_MODEL_CONFIG_PATH.  Shorthand aliases
     are accepted in addition to an explicit file path:
 
         inner    → runtime_models.inner.yaml   (intranet / on-prem deployment)
         online   → runtime_models.online.yaml  (public cloud API deployment)
         dynamic  → runtime_models.yaml         (fully dynamic, key injected per request)
 
+    If inner is selected and a sibling gitignored runtime_models.local.yaml
+    exists, that file is used instead so machine overrides stay out of git.
+
     Alias resolution is handled by algorithm/config.py (Config alias mechanism),
     so config['model_config_path'] always contains the resolved absolute path.
     '''
-    from lazymind.config import config as _cfg
-    return _cfg['model_config_path']
+    from lazymind.config import apply_local_model_config_override, config as _cfg
+    return apply_local_model_config_override(_cfg['model_config_path'])
 
 
 def load_model_config(config_path: str | None = None, *, expand_env: bool = False) -> Dict[str, Any]:
@@ -181,6 +184,32 @@ def _normalize_model_config(model_config: Optional[Dict[str, Any]]) -> Optional[
         if target in normalized:
             continue
         normalized[target] = role_cfg
+    return _mirror_image_roles(normalized)
+
+
+def _clone_role_cfg_with_type(role_cfg: Any, role_type: str) -> Any:
+    if not isinstance(role_cfg, dict):
+        return role_cfg
+    mirrored = dict(role_cfg)
+    mirrored['type'] = role_type
+    return mirrored
+
+
+def _mirror_image_roles(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    '''Unidirectional mirror: editable image_editor also fills image_generator.
+
+    - image_editor only → also inject image_generator (same model, type=text2image)
+    - image_generator only → keep generator only (do not invent an editor)
+    - both present → leave each role as configured
+    '''
+    normalized = dict(model_config)
+    has_generator = 'image_generator' in normalized
+    has_editor = 'image_editor' in normalized
+    if has_editor and not has_generator:
+        normalized['image_generator'] = _clone_role_cfg_with_type(
+            normalized['image_editor'],
+            'text2image',
+        )
     return normalized
 
 
@@ -192,10 +221,13 @@ def _enrich_role_types(model_config: Dict[str, Any]) -> Dict[str, Any]:
             enriched[role] = role_cfg
             continue
         merged = dict(role_cfg)
-        if not merged.get('type'):
-            entry = _role_entry(yaml_cfg.get(role))
-            if entry:
+        entry = _role_entry(yaml_cfg.get(role))
+        if entry:
+            if not merged.get('type'):
                 merged['type'] = entry.get('type')
+            yaml_tokens = entry.get('max_input_tokens')
+            if yaml_tokens is not None and 'max_input_tokens' not in merged:
+                merged['max_input_tokens'] = yaml_tokens
         enriched[role] = merged
     return enriched
 

@@ -7,13 +7,13 @@ import threading
 from typing import Any, Dict, List
 
 import lazyllm
+from lazymind.common.memory.context import MemoryContext
 from lazymind.chat.service.chat_request import ChatRequest
 from lazymind.chat.service import chat_service
 
 
 DISABLED_TOOLS_EXCEPT_CALCULATOR = [
     'kb',
-    'temp_kb',
     'wikipedia',
     'arxiv',
     'sciverse',
@@ -67,6 +67,14 @@ class _FakeAgent:
     def _prepare_tool_context(self, _query, _history):
         return None
 
+    def _model_facing_prefix(self):
+        return {
+            'system_prompt': '',
+            'tool_definitions': [],
+            'skills_prompt': '',
+            'skill_prompt_parts': [],
+        }
+
     def set_stop_tools(self, stop_tools):
         self.stop_tools = stop_tools
 
@@ -80,10 +88,19 @@ async def _drain_response(response):
     return ''.join(chunks)
 
 
+def _mock_memory_context(monkeypatch):
+    monkeypatch.setattr(
+        chat_service,
+        'load_memory_context',
+        lambda: MemoryContext(soul='', profile='', preference=''),
+    )
+
+
 def test_stream_parallel_requests_see_isolated_config(monkeypatch):
     _FakeAgent.observations = []
     monkeypatch.setattr(chat_service, 'AutoModel', lambda *_a, **_kw: object())
     monkeypatch.setattr(chat_service.lazyllm.tools.agent, 'ReactAgent', _FakeAgent)
+    _mock_memory_context(monkeypatch)
 
     async def drive_one(i: int):
         session_id = f'stream-session-{i}'
@@ -104,7 +121,7 @@ def test_stream_parallel_requests_see_isolated_config(monkeypatch):
                 'available_skills': params['available_skills'],
                 'enable_subagent': False,
             },
-            plugin={'enable_plugin': False},
+            workflow={'enable_workflow': False},
         ))
         body = await _drain_response(response)
         outer = chat_service.lazyllm.globals.get('agentic_config')
@@ -119,7 +136,7 @@ def test_stream_parallel_requests_see_isolated_config(monkeypatch):
     obs_by_query = {
         obs['query']
         .rsplit('### User Instruction\n\n', 1)[-1]
-        .split('\n\nATTENTION — `ask_user`', 1)[0]: obs
+        .split('\n\nATTENTION —', 1)[0]: obs
         for obs in _FakeAgent.observations
     }
     assert set(obs_by_query.keys()) == {f's_{i}' for i in range(6)}
@@ -140,6 +157,7 @@ def test_stream_response_keeps_session_after_route_context_exits(monkeypatch):
     _FakeAgent.observations = []
     monkeypatch.setattr(chat_service, 'AutoModel', lambda *_a, **_kw: object())
     monkeypatch.setattr(chat_service.lazyllm.tools.agent, 'ReactAgent', _FakeAgent)
+    _mock_memory_context(monkeypatch)
 
     async def drive():
         session_id = 'route-stream-session'
@@ -155,7 +173,7 @@ def test_stream_response_keeps_session_after_route_context_exits(monkeypatch):
                     'available_skills': ['route_skill'],
                     'enable_subagent': False,
                 },
-                plugin={'enable_plugin': False},
+                workflow={'enable_workflow': False},
             ))
         return await _drain_response(response)
 

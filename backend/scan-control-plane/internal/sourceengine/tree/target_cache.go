@@ -167,13 +167,21 @@ func (c *targetSearchCache) build(ctx context.Context, key string, conn connecto
 }
 
 func (c *targetSearchCache) buildIfUnlocked(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
+	return c.buildIfUnlockedMode(ctx, conn, req, false, build)
+}
+
+func (c *targetSearchCache) rebuildIfUnlocked(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
+	return c.buildIfUnlockedMode(ctx, conn, req, true, build)
+}
+
+func (c *targetSearchCache) buildIfUnlockedMode(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, force bool, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
 	if c == nil {
 		return targetSearchCacheSnapshot{status: targetSearchCacheStatusMissing}
 	}
 	key := targetSearchCacheKey(req)
 	if c.store != nil {
 		previous, hasPrevious, err := c.store.Get(ctx, key)
-		if err == nil && hasPrevious && previous.complete && !previous.stale {
+		if !force && err == nil && hasPrevious && previous.complete && !previous.stale {
 			fmt.Fprintf(os.Stdout, "target search cache prewarm skip connector=%s auth_connection_id=%s status=%s nodes=%d truncated=%t stale=%t\n", req.ConnectorType, req.AuthConnectionID, previous.status, len(previous.nodes), previous.truncated, previous.stale)
 			return previous
 		}
@@ -193,7 +201,7 @@ func (c *targetSearchCache) buildIfUnlocked(ctx context.Context, conn connector.
 	}
 	c.mu.Lock()
 	entry := c.entries[key]
-	if entry != nil && time.Now().Before(entry.expiresAt) && entry.complete && time.Now().Before(entry.staleAt) {
+	if !force && entry != nil && time.Now().Before(entry.expiresAt) && entry.complete && time.Now().Before(entry.staleAt) {
 		snapshot := entry.snapshot()
 		c.mu.Unlock()
 		return snapshot
@@ -353,10 +361,61 @@ func treeNodeSearchMatches(node TreeNode, keyword string) bool {
 	if needle == "" {
 		return true
 	}
+	if strings.EqualFold(strings.TrimSpace(node.ConnectorType), "local_fs") {
+		segments := normalizedPathSegments(keyword)
+		if len(segments) > 1 {
+			for _, candidate := range treeNodePathCandidates(node) {
+				if pathHasExactSuffix(candidate, segments) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(segments) == 1 {
+			needle = segments[0]
+		}
+	}
 	for _, value := range []string{node.SearchName, node.DisplayName} {
 		if strings.Contains(strings.ToLower(value), needle) {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizedPathSegments(value string) []string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	raw := strings.Split(normalized, "/")
+	segments := make([]string, 0, len(raw))
+	for _, segment := range raw {
+		segment = strings.ToLower(strings.TrimSpace(segment))
+		if segment == "" || segment == "." {
+			continue
+		}
+		segments = append(segments, segment)
+	}
+	return segments
+}
+
+func treeNodePathCandidates(node TreeNode) []string {
+	candidates := []string{node.NodeRef, node.TargetRef}
+	if value, ok := node.ProviderMeta["path"].(string); ok {
+		candidates = append(candidates, value)
+	}
+	candidates = append(candidates, node.ObjectKey, node.Key)
+	return candidates
+}
+
+func pathHasExactSuffix(candidate string, expected []string) bool {
+	segments := normalizedPathSegments(candidate)
+	if len(segments) < len(expected) {
+		return false
+	}
+	offset := len(segments) - len(expected)
+	for index := range expected {
+		if segments[offset+index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }

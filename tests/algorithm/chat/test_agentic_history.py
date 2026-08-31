@@ -1,3 +1,5 @@
+from lazyllm.tools.agent.base import TOOL_OBSERVATION_KEY
+
 from lazymind.chat.service.component import normalize_history_for_agent
 
 
@@ -47,7 +49,8 @@ def test_normalize_history_keeps_kb_tool_calls_and_sanitizes_results():
         'role': 'assistant',
         'content': (
             '<tool_call>{"id":"call-1","name":"kb_search","arguments":{"query":"q"}}</tool_call>'
-            '<tool_result>{"id":"call-1","name":"kb_search","result":{"items":[{"text":"old [[9.1]]","ref":"[[9.1]]","citation_index":"9.1"}]}}</tool_result>'
+            '<tool_result>{"id":"call-1","name":"kb_search","result":{"items":'
+            '[{"text":"old [[9.1]]","ref":"[[9.1]]","citation_index":"9.1"}]}}</tool_result>'
             '最终答案 [9](#source-9.1 "old.pdf")。'
         ),
     }]
@@ -73,9 +76,31 @@ def test_normalize_history_keeps_kb_tool_calls_and_sanitizes_results():
             'tool_call_id': 'call-1',
             'name': 'kb_search',
             'content': '{"items":[{"text":"old "}]}',
+            TOOL_OBSERVATION_KEY: {
+                'version': 1,
+                'ok': None,
+                'value': {'items': [{'text': 'old '}]},
+                'error': '',
+            },
         },
         {'role': 'assistant', 'content': '最终答案。', 'reasoning_content': ''},
     ]
+
+
+def test_normalize_history_skips_observation_for_string_tool_results():
+    history = [{
+        'role': 'assistant',
+        'content': (
+            '<tool_call>{"id":"call-1","name":"shell","arguments":{"command":"ls"}}</tool_call>'
+            '<tool_result>{"id":"call-1","name":"shell","result":"file.txt"}</tool_result>'
+        ),
+    }]
+
+    normalized = normalize_history_for_agent(history)
+
+    assert normalized[1]['role'] == 'tool'
+    assert normalized[1]['content'] == 'file.txt'
+    assert TOOL_OBSERVATION_KEY not in normalized[1]
 
 
 def test_normalize_history_drops_ephemeral_intentwrite_trace():
@@ -91,4 +116,22 @@ def test_normalize_history_drops_ephemeral_intentwrite_trace():
 
     assert normalize_history_for_agent(history) == [
         {'role': 'assistant', 'content': '继续回答当前问题。', 'reasoning_content': ''},
+    ]
+
+
+def test_normalize_history_drops_incomplete_tool_exchange_after_cancel():
+    history = [{
+        'role': 'assistant',
+        'content': (
+            '正在处理。'
+            '<tool_call>{"id":"call-1","name":"trigger_writer_plugin","arguments":{}}</tool_call>'
+        ),
+    }, {
+        'role': 'user',
+        'content': '重新执行',
+    }]
+
+    assert normalize_history_for_agent(history) == [
+        {'role': 'assistant', 'content': '正在处理。', 'reasoning_content': ''},
+        {'role': 'user', 'content': '重新执行'},
     ]

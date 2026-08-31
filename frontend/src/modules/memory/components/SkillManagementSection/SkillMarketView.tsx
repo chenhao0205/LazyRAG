@@ -9,9 +9,12 @@ interface SkillMarketViewProps {
   loading: boolean;
   skillAssets: StructuredAsset[];
   installedSkills: StructuredAsset[];
+  isAdmin: boolean;
   onInstall: (item: StructuredAsset) => void;
   onDetail: (item: StructuredAsset) => void;
+  onDelete: (item: StructuredAsset) => void;
   installingUid?: string;
+  deletingUid?: string;
   page: number;
   pageSize: number;
   total: number;
@@ -25,9 +28,12 @@ export default function SkillMarketView({
   loading,
   skillAssets,
   installedSkills,
+  isAdmin,
   onInstall,
   onDetail,
+  onDelete,
   installingUid,
+  deletingUid,
   page,
   pageSize,
   total,
@@ -58,7 +64,7 @@ export default function SkillMarketView({
                   marketSource === "admin"
                     ? t("admin.memorySkillSourceAdmin")
                     : marketSource === "builtin"
-                      ? t("admin.memorySkillSourceBuiltin")
+                      ? item.provider || t("admin.memorySkillSourceBuiltin")
                       : t("admin.memorySkillSourcePersonal");
                 const sourceBadgeClass =
                   marketSource === "admin"
@@ -120,6 +126,17 @@ export default function SkillMarketView({
                           {t("admin.memorySkillMarketInstall")}
                         </Button>
                       )}
+                      {isAdmin && marketSource === "admin" ? (
+                        <Button
+                          danger
+                          size="small"
+                          loading={deletingUid === item.id}
+                          disabled={Boolean(deletingUid) && deletingUid !== item.id}
+                          onClick={() => onDelete(item)}
+                        >
+                          {t("admin.memorySkillMarketDelete")}
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 );

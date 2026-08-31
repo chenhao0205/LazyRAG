@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Button,
+  Checkbox,
+  Empty,
   Form,
   Input,
   Radio,
@@ -12,7 +15,15 @@ import {
   Typography,
 } from "antd";
 import type { FormInstance, TreeSelectProps } from "antd";
+import type { CheckboxChangeEvent } from "antd/es/checkbox";
 import type { DataNode } from "antd/es/tree";
+import {
+  CheckCircleFilled,
+  FolderAddOutlined,
+  FolderOpenOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
 import type { TFunction } from "i18next";
 import {
   KNOWLEDGE_BASE_NAME_MAX_LENGTH,
@@ -38,6 +49,8 @@ import {
   getFeishuTargetDisplayText,
   getFeishuTargetValuePath,
 } from "./feishuTargetUtils";
+import type { LocalPathRecommendation } from "../../utils/feishuTarget";
+import type { DesktopLocalFolderAccessState } from "@/runtime/desktopBridge";
 import WizardSchedulePanel from "./WizardSchedulePanel";
 
 const { Text } = Typography;
@@ -49,12 +62,19 @@ export interface WizardConnectionStepProps {
   syncMode: SyncMode;
   localPathOptions: LocalPathSelectOption[];
   localPathLoading: boolean;
+  localPathRecommendations: LocalPathRecommendation[];
+  localPathRecommendationsLoading: boolean;
+  localPathRecommendationsError: string;
+  localDiscoveryAccess?: DesktopLocalFolderAccessState | null;
+  localDiscoveryChoosing?: boolean;
   feishuTargetLoading: boolean;
   feishuTargetTreeData: DataNode[];
   onLoadLocalPathOptions?: (path?: string) => void;
   onSearchLocalPathOptions?: (keyword: string) => void;
   onLoadLocalPathChildren?: TreeSelectProps["loadData"];
   onResetLocalPathBrowseOptions?: () => void;
+  onLoadLocalPathRecommendations?: () => void;
+  onChooseLocalDiscoveryLocations?: () => void;
   onLoadFeishuTargetOptions?: () => void;
   onSearchFeishuTargetOptions?: (keyword: string) => void;
   onLoadFeishuTargetChildren?: TreeSelectProps["loadData"];
@@ -63,22 +83,33 @@ export interface WizardConnectionStepProps {
 export default function WizardConnectionStep({
   t,
   form,
-  isEditMode,
   selectedType,
   syncMode,
   localPathOptions,
   localPathLoading,
+  localPathRecommendations,
+  localPathRecommendationsLoading,
+  localPathRecommendationsError,
+  localDiscoveryAccess = null,
+  localDiscoveryChoosing = false,
   feishuTargetLoading,
   feishuTargetTreeData,
   onLoadLocalPathOptions,
   onSearchLocalPathOptions,
   onLoadLocalPathChildren,
   onResetLocalPathBrowseOptions,
+  onLoadLocalPathRecommendations,
+  onChooseLocalDiscoveryLocations,
   onLoadFeishuTargetOptions,
   onSearchFeishuTargetOptions,
   onLoadFeishuTargetChildren,
 }: WizardConnectionStepProps) {
   const [localPathSearchValue, setLocalPathSearchValue] = useState("");
+  const [localPathExpandedKeys, setLocalPathExpandedKeys] = useState<
+    Array<string | number>
+  >([]);
+  const [localPathBrowseExpandedKeys, setLocalPathBrowseExpandedKeys] =
+    useState<Array<string | number>>([]);
   const [feishuTargetSearchValue, setFeishuTargetSearchValue] = useState("");
   const [feishuTargetExpandedKeys, setFeishuTargetExpandedKeys] = useState<
     Array<string | number>
@@ -93,7 +124,31 @@ export default function WizardConnectionStep({
     () => new Map<string, string>(),
   );
 
+  const isLocalPathSearching = Boolean(localPathSearchValue.trim());
   const isFeishuTargetSearching = Boolean(feishuTargetSearchValue.trim());
+  const canChooseLocalDiscoveryLocations = localDiscoveryAccess?.available === true;
+  const hasLocalDiscoveryLocations = Boolean(
+    localDiscoveryAccess?.discoveryConsentGranted &&
+      localDiscoveryAccess.discoveryRoots.length > 0,
+  );
+
+  useEffect(() => {
+    if (!isLocalPathSearching) {
+      setLocalPathExpandedKeys(localPathBrowseExpandedKeys);
+      return;
+    }
+    if (localPathLoading) {
+      return;
+    }
+    setLocalPathExpandedKeys(
+      collectTreeExpandableKeys(localPathOptions as CollapsibleTreeNode[]),
+    );
+  }, [
+    localPathOptions,
+    localPathLoading,
+    isLocalPathSearching,
+    localPathBrowseExpandedKeys,
+  ]);
 
   useEffect(() => {
     if (!isFeishuTargetSearching) {
@@ -148,6 +203,39 @@ export default function WizardConnectionStep({
 
   const localPathValue = Form.useWatch("path", form);
   const selectedLocalPathValues = normalizeTreeSelectValues(localPathValue);
+  const selectedLocalPathValueSet = new Set(selectedLocalPathValues);
+  const selectedRecommendationCount = localPathRecommendations.filter((item) =>
+    selectedLocalPathValueSet.has(item.value),
+  ).length;
+  const allRecommendationsSelected =
+    localPathRecommendations.length > 0 &&
+    selectedRecommendationCount === localPathRecommendations.length;
+
+  const updateRecommendedPathSelection = (values: string[]) => {
+    form.setFieldValue("path", values);
+  };
+
+  const toggleRecommendedPath = (value: string, checked: boolean) => {
+    const nextValues = checked
+      ? Array.from(new Set([...selectedLocalPathValues, value]))
+      : selectedLocalPathValues.filter((item) => item !== value);
+    updateRecommendedPathSelection(nextValues);
+  };
+
+  const toggleAllRecommendedPaths = () => {
+    const recommendedValueSet = new Set(
+      localPathRecommendations.map((item) => item.value),
+    );
+    const nextValues = allRecommendationsSelected
+      ? selectedLocalPathValues.filter((item) => !recommendedValueSet.has(item))
+      : Array.from(
+          new Set([
+            ...selectedLocalPathValues,
+            ...localPathRecommendations.map((item) => item.value),
+          ]),
+        );
+    updateRecommendedPathSelection(nextValues);
+  };
   const selectedFeishuTargetValues = normalizeTreeSelectValues(
     Form.useWatch("target", form),
   );
@@ -300,69 +388,232 @@ export default function WizardConnectionStep({
           {t("admin.dataSourceAccessConfig")}
         </div>
         {selectedType === "local" ? (
-          <Form.Item
-            label={t("admin.dataSourceAccessPath")}
-            name="path"
-            getValueFromEvent={(value) =>
-              collapseSelectedTreeValues(value, localPathOptions)
-            }
-            rules={[
-              {
-                validator: (_rule, value) => {
-                  const values = Array.isArray(value)
-                    ? value
-                    : value
-                      ? [value]
-                      : [];
-                  return values.length > 0
-                    ? Promise.resolve()
-                    : Promise.reject(
-                        new Error(t("admin.dataSourceAccessPathRequired")),
-                      );
+          <>
+            <div className="data-source-local-recommendations">
+              <div className="data-source-local-recommendations-header">
+                <div className="data-source-local-recommendations-intro">
+                  <span className="data-source-local-recommendations-icon">
+                    <SearchOutlined />
+                  </span>
+                  <div className="data-source-local-recommendations-copy">
+                    <div className="data-source-local-recommendations-heading">
+                      <span className="data-source-local-recommendations-title">
+                        {t("admin.dataSourceRecommendedPaths")}
+                      </span>
+                      {!localPathRecommendationsLoading ? (
+                        <span className="data-source-local-recommendations-found">
+                          {t("admin.dataSourceRecommendedPathsFound", {
+                            total: localPathRecommendations.length,
+                          })}
+                        </span>
+                      ) : null}
+                    </div>
+                    <Text
+                      type="secondary"
+                      className="data-source-local-recommendations-description"
+                    >
+                      {t("admin.dataSourceRecommendedPathsDescription")}
+                    </Text>
+                  </div>
+                </div>
+                <div className="data-source-local-recommendations-actions">
+                  {selectedRecommendationCount > 0 ? (
+                    <span className="data-source-local-recommendations-selected">
+                      <CheckCircleFilled />
+                      {t("admin.dataSourceRecommendedPathsSelected", {
+                        selected: selectedRecommendationCount,
+                      })}
+                    </span>
+                  ) : null}
+                  {localPathRecommendations.length > 0 ? (
+                    <Button
+                      type="text"
+                      size="small"
+                      onClick={toggleAllRecommendedPaths}
+                    >
+                      {allRecommendationsSelected
+                        ? t("common.cancelSelectAll")
+                        : t("common.selectAll")}
+                    </Button>
+                  ) : null}
+                  {canChooseLocalDiscoveryLocations ? (
+                    <Tooltip
+                      title={
+                        hasLocalDiscoveryLocations
+                          ? t("admin.dataSourceDiscoveryAddLocation")
+                          : t("admin.dataSourceDiscoveryChooseLocation")
+                      }
+                    >
+                      <Button
+                        type="text"
+                        size="small"
+                        aria-label={t("admin.dataSourceDiscoveryChooseLocation")}
+                        icon={<FolderAddOutlined />}
+                        loading={localDiscoveryChoosing}
+                        onClick={onChooseLocalDiscoveryLocations}
+                      >
+                        {hasLocalDiscoveryLocations
+                          ? t("admin.dataSourceDiscoveryAddLocation")
+                          : t("admin.dataSourceDiscoveryChooseLocation")}
+                      </Button>
+                    </Tooltip>
+                  ) : null}
+                  <Tooltip
+                    title={t("admin.dataSourceRecommendedPathsRefresh")}
+                  >
+                    <Button
+                      type="text"
+                      shape="circle"
+                      size="small"
+                      aria-label={t("admin.dataSourceRecommendedPathsRefresh")}
+                      icon={<ReloadOutlined />}
+                      loading={localPathRecommendationsLoading}
+                      onClick={onLoadLocalPathRecommendations}
+                    />
+                  </Tooltip>
+                </div>
+              </div>
+
+              {localPathRecommendationsLoading ? (
+                <div className="data-source-local-recommendations-state">
+                  <Spin size="small" />
+                  <Text type="secondary">
+                    {t("admin.dataSourceRecommendedPathsLoading")}
+                  </Text>
+                </div>
+              ) : localPathRecommendationsError ? (
+                <Text type="danger">{localPathRecommendationsError}</Text>
+              ) : localPathRecommendations.length === 0 ? (
+                <Empty
+                  className="data-source-local-recommendations-empty"
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={
+                    hasLocalDiscoveryLocations
+                      ? t("admin.dataSourceDiscoveryEmptyAuthorized", {
+                          count: localDiscoveryAccess?.discoveryRoots.length || 0,
+                        })
+                      : canChooseLocalDiscoveryLocations
+                        ? t("admin.dataSourceDiscoveryPermissionHint")
+                        : t("admin.dataSourceRecommendedPathsEmpty")
+                  }
+                />
+              ) : (
+                <>
+                  <div className="data-source-local-recommendations-list">
+                    {localPathRecommendations.map((item) => (
+                      <Checkbox
+                        key={item.key}
+                        className={
+                          selectedLocalPathValueSet.has(item.value)
+                            ? "is-selected"
+                            : undefined
+                        }
+                        checked={selectedLocalPathValueSet.has(item.value)}
+                        onChange={(event: CheckboxChangeEvent) =>
+                          toggleRecommendedPath(item.value, event.target.checked)
+                        }
+                      >
+                        <span className="data-source-local-recommendations-item">
+                          <span className="data-source-local-recommendations-folder">
+                            <FolderOpenOutlined />
+                          </span>
+                          <span className="data-source-local-recommendations-item-copy">
+                            <span className="data-source-local-recommendations-name">
+                              {item.title}
+                            </span>
+                            <span
+                              className="data-source-local-recommendations-path"
+                              title={item.path}
+                            >
+                              {item.path}
+                            </span>
+                          </span>
+                        </span>
+                      </Checkbox>
+                    ))}
+                  </div>
+                  {localDiscoveryAccess?.truncated ? (
+                    <Text type="secondary" className="data-source-local-discovery-note">
+                      {t("admin.dataSourceDiscoveryScanLimited")}
+                    </Text>
+                  ) : null}
+                </>
+              )}
+            </div>
+
+            <Form.Item
+              label={t("admin.dataSourceAccessPath")}
+              name="path"
+              getValueFromEvent={(value) =>
+                collapseSelectedTreeValues(value, localPathOptions)
+              }
+              rules={[
+                {
+                  validator: (_rule, value) => {
+                    const values = Array.isArray(value)
+                      ? value
+                      : value
+                        ? [value]
+                        : [];
+                    return values.length > 0
+                      ? Promise.resolve()
+                      : Promise.reject(
+                          new Error(t("admin.dataSourceAccessPathRequired")),
+                        );
+                  },
                 },
-              },
-            ]}
-          >
-            <TreeSelect
-              key={`local-path-browse-${localPathBrowseKey}`}
-              multiple
-              allowClear
-              filterTreeNode={false}
-              loadData={onLoadLocalPathChildren}
-              loading={localPathLoading}
-              maxTagCount="responsive"
-              notFoundContent={localPathLoading ? <Spin size="small" /> : null}
-              placeholder="/mnt/team-share/ops-docs"
-              searchValue={localPathSearchValue}
-              showSearch
-              style={{ width: "100%" }}
-              treeCheckable
-              treeData={localPathOptions}
-              treeDefaultExpandAll={false}
-              treeLine
-              showCheckedStrategy={TreeSelect.SHOW_PARENT}
-              styles={{
-                popup: { root: { maxHeight: 360, overflow: "auto" } },
-              }}
-              onOpenChange={(open) => {
-                if (!open) {
-                  setLocalPathSearchValue("");
-                  setLocalPathBrowseKey((key) => key + 1);
-                  onResetLocalPathBrowseOptions?.();
-                  return;
-                }
-                onLoadLocalPathOptions?.(
-                  selectedLocalPathValues.length === 1
-                    ? selectedLocalPathValues[0]
-                    : "",
-                );
-              }}
-              onSearch={(value) => {
-                setLocalPathSearchValue(value);
-                onSearchLocalPathOptions?.(value);
-              }}
-            />
-          </Form.Item>
+              ]}
+            >
+              <TreeSelect
+                key={`local-path-browse-${localPathBrowseKey}`}
+                multiple
+                allowClear
+                filterTreeNode={false}
+                loadData={onLoadLocalPathChildren}
+                loading={localPathLoading}
+                maxTagCount="responsive"
+                notFoundContent={localPathLoading ? <Spin size="small" /> : null}
+                placeholder="/mnt/team-share/ops-docs"
+                searchValue={localPathSearchValue}
+                showSearch
+                style={{ width: "100%" }}
+                treeCheckable
+                treeData={localPathOptions}
+                treeDefaultExpandAll={false}
+                treeExpandedKeys={localPathExpandedKeys}
+                treeLine
+                showCheckedStrategy={TreeSelect.SHOW_PARENT}
+                styles={{
+                  popup: { root: { maxHeight: 360, overflow: "auto" } },
+                }}
+                onOpenChange={(open) => {
+                  if (!open) {
+                    setLocalPathSearchValue("");
+                    setLocalPathExpandedKeys([]);
+                    setLocalPathBrowseExpandedKeys([]);
+                    setLocalPathBrowseKey((key) => key + 1);
+                    onResetLocalPathBrowseOptions?.();
+                    return;
+                  }
+                  onLoadLocalPathOptions?.(
+                    selectedLocalPathValues.length === 1
+                      ? selectedLocalPathValues[0]
+                      : "",
+                  );
+                }}
+                onSearch={(value) => {
+                  setLocalPathSearchValue(value);
+                  onSearchLocalPathOptions?.(value);
+                }}
+                onTreeExpand={(keys) => {
+                  setLocalPathExpandedKeys(keys);
+                  if (!isLocalPathSearching) {
+                    setLocalPathBrowseExpandedKeys(keys);
+                  }
+                }}
+              />
+            </Form.Item>
+          </>
         ) : selectedType === "feishu" ? (
           <Form.Item
             label={t("admin.dataSourceFeishuSpace")}

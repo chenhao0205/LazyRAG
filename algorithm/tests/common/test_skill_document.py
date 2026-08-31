@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from lazymind.common.skill_document import (
+from lazymind.common.skill.document import (
     SkillDocumentError,
     require_valid_skill_document,
 )
@@ -60,6 +60,11 @@ def test_require_valid_skill_document_returns_immutable_parsed_document():
         ('---\nname: ""\ndescription: Empty name.\n---\nBody.\n', 'missing_field', 'name'),
         ('---\nname: valid\ndescription: ""\n---\nBody.\n', 'missing_field', 'description'),
         ('---\nname: invalid/name\ndescription: Invalid name.\n---\nBody.\n', 'invalid_name', 'name'),
+        (
+            f'---\nname: {"a" * 81}\ndescription: Long name.\n---\nBody.\n',
+            'name_too_long',
+            'name',
+        ),
         (
             f'---\nname: valid\ndescription: {"x" * 1025}\n---\nBody.\n',
             'description_too_long',

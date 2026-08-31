@@ -15,7 +15,7 @@ func TestWriterDocumentSyncRouteParsesSingleSlotIndex(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/plugin-sessions/ps-1/slots/synced_snapshot/items/idx/-1:sync-writer-document",
+		"/workflow-sessions/ps-1/slots/synced_snapshot/items/idx/-1:sync-writer-document",
 		nil,
 	)
 	var match mux.RouteMatch
@@ -25,9 +25,44 @@ func TestWriterDocumentSyncRouteParsesSingleSlotIndex(t *testing.T) {
 	if got := match.Vars["list_index"]; got != "-1" {
 		t.Fatalf("expected list_index -1, got %q", got)
 	}
-	want := "/plugin-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}:sync-writer-document"
+	want := "/workflow-sessions/{session_id}/slots/{slot_id}/items/idx/{list_index}:sync-writer-document"
 	if got, err := match.Route.GetPathTemplate(); err != nil || got != want {
 		t.Fatalf("expected route template %q, got %q (err=%v)", want, got, err)
+	}
+}
+
+func TestWriterDocumentWriteBackRoute(t *testing.T) {
+	r := mux.NewRouter()
+	r.UseEncodedPath()
+	registerAllRoutes(r)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/workflow-sessions/ps-1/writer-document:write-back",
+		nil,
+	)
+	var match mux.RouteMatch
+	if !r.Match(req, &match) {
+		t.Fatal("expected WriterDocument write-back route to match")
+	}
+	want := "/workflow-sessions/{session_id}/writer-document:write-back"
+	if got, err := match.Route.GetPathTemplate(); err != nil || got != want {
+		t.Fatalf("expected route template %q, got %q (err=%v)", want, got, err)
+	}
+}
+
+func TestArtifactActionRoutes(t *testing.T) {
+	r := mux.NewRouter()
+	r.UseEncodedPath()
+	registerAllRoutes(r)
+	path := "/workflow-sessions/ps-1/slots/draft_document/items/idx/-1:action-preview"
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	var match mux.RouteMatch
+	if !r.Match(req, &match) {
+		t.Fatal("expected artifact action preview route to match")
+	}
+	if got := match.Vars["list_index"]; got != "-1" {
+		t.Fatalf("expected list_index -1, got %q", got)
 	}
 }
 
@@ -71,6 +106,41 @@ func TestSkillMarketTagsRouteWinsOverItemRoute(t *testing.T) {
 	}
 	if want := "/skill-market/tags"; gotTemplate != want {
 		t.Fatalf("expected template %q, got %q", want, gotTemplate)
+	}
+}
+
+func TestKnowledgeMarketDomainsRouteWinsOverItemRoute(t *testing.T) {
+	r := mux.NewRouter()
+	r.UseEncodedPath()
+	registerAllRoutes(r)
+
+	var match mux.RouteMatch
+	req := httptest.NewRequest(http.MethodGet, "/knowledge-market/domains", nil)
+	if !r.Match(req, &match) {
+		t.Fatal("expected knowledge market domains route to match")
+	}
+	gotTemplate, err := match.Route.GetPathTemplate()
+	if err != nil {
+		t.Fatalf("get matched route template: %v", err)
+	}
+	if want := "/knowledge-market/domains"; gotTemplate != want {
+		t.Fatalf("expected template %q, got %q", want, gotTemplate)
+	}
+
+	itemReq := httptest.NewRequest(http.MethodGet, "/knowledge-market/items/domains", nil)
+	var itemMatch mux.RouteMatch
+	if !r.Match(itemReq, &itemMatch) {
+		t.Fatal("expected knowledge market item route to match")
+	}
+	gotTemplate, err = itemMatch.Route.GetPathTemplate()
+	if err != nil {
+		t.Fatalf("get item route template: %v", err)
+	}
+	if want := "/knowledge-market/items/{market_item_id}"; gotTemplate != want {
+		t.Fatalf("expected template %q, got %q", want, gotTemplate)
+	}
+	if gotID := itemMatch.Vars["market_item_id"]; gotID != "domains" {
+		t.Fatalf("expected market_item_id %q, got %q", "domains", gotID)
 	}
 }
 
@@ -384,5 +454,56 @@ func TestToolDisableRouteRegistered(t *testing.T) {
 	}
 	if gotName := match.Vars["tool_name"]; gotName != "bing" {
 		t.Fatalf("expected tool_name %q, got %q", "bing", gotName)
+	}
+}
+
+func TestWorkflowFacadeV1RoutesRegistered(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+	cases := []struct{ method, path, template string }{
+		{http.MethodGet, "/workflow-runtime/v1/workflows", "/workflow-runtime/v1/workflows"},
+		{http.MethodGet, "/workflow-runtime/v1/workflows/test-workflow", "/workflow-runtime/v1/workflows/{workflow_id}"},
+		{http.MethodPost, "/workflow-preparations", "/workflow-preparations"},
+		{http.MethodPost, "/workflow-preparations/p1:consume", "/workflow-preparations/{preparation_id}:consume"},
+		{http.MethodPost, "/workflow-sessions/s1:advance-step", "/workflow-sessions/{session_id}:advance-step"},
+		{http.MethodPost, "/workflow-sessions/s1:advance-step-and-hand-off", "/workflow-sessions/{session_id}:advance-step-and-hand-off"},
+		{http.MethodGet, "/workflow-sessions/s1/events", "/workflow-sessions/{session_id}/events"},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		var match mux.RouteMatch
+		if !r.Match(req, &match) {
+			t.Errorf("route not registered: %s %s", tc.method, tc.path)
+			continue
+		}
+		got, err := match.Route.GetPathTemplate()
+		if err != nil || got != tc.template {
+			t.Errorf("%s %s template=%q err=%v, want %q", tc.method, tc.path, got, err, tc.template)
+		}
+	}
+}
+
+func TestWorkflowAuthoringV1RoutesRegistered(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+	cases := []struct{ method, path, template string }{
+		{http.MethodGet, "/workflow-authoring/v1/skill-context", "/workflow-authoring/v1/skill-context"},
+		{http.MethodPost, "/workflow-authoring/v1/drafts", "/workflow-authoring/v1/drafts"},
+		{http.MethodPut, "/workflow-authoring/v1/drafts/d1/files", "/workflow-authoring/v1/drafts/{draft_id}/files"},
+		{http.MethodGet, "/workflow-authoring/v1/drafts/d1/diagnostics", "/workflow-authoring/v1/drafts/{draft_id}/diagnostics"},
+		{http.MethodPost, "/workflow-authoring/v1/drafts/d1:publish", "/workflow-authoring/v1/drafts/{draft_id}:publish"},
+		{http.MethodGet, "/workflow-authoring/v1/fixture", "/workflow-authoring/v1/fixture"},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		var match mux.RouteMatch
+		if !r.Match(req, &match) {
+			t.Errorf("missing %s %s", tc.method, tc.path)
+			continue
+		}
+		got, err := match.Route.GetPathTemplate()
+		if err != nil || got != tc.template {
+			t.Errorf("template=%q err=%v want=%q", got, err, tc.template)
+		}
 	}
 }

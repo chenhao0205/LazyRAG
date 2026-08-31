@@ -7,8 +7,6 @@ import {
   Dropdown,
   Tooltip,
   Input,
-  Tag,
-  Space,
 } from "antd";
 import { axiosInstance, BASE_URL } from "@/components/request";
 import { AgentAppsAuth } from "@/components/auth";
@@ -63,6 +61,10 @@ import CreateUpdateModal, {
 import { KnowledgeBaseServiceApi } from "@/modules/knowledge/utils/request";
 import { DocumentServiceApi, TaskServiceApi } from "../../utils/request";
 import { useDatasetPermissionStore } from "@/modules/knowledge/store/dataset_permission";
+import {
+  fetchUserUiPreferences,
+  USER_UI_PREFERENCES_CHANGED_EVENT,
+} from "@/modules/user/uiPreferencesApi";
 import {
   DEVELOPER_ACTIVE_EVENT,
   isDeveloperModeActive,
@@ -134,6 +136,7 @@ const Detail = () => {
   const [multimodalEmbeddingReady, setMultimodalEmbeddingReady] = useState<
     boolean | null
   >(null);
+  const [documentParsingEnabled, setDocumentParsingEnabled] = useState<boolean | null>(null);
   const [uploadingNoticeVisible, setUploadingNoticeVisible] = useState(false);
   const isAdmin = AgentAppsAuth.getUserInfo()?.role === "system-admin";
 
@@ -217,6 +220,24 @@ const Detail = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getDetail, clearDataset]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDocumentParsingState = () => fetchUserUiPreferences({ silentError: true } as never)
+      .then((preferences) => {
+        if (!cancelled) setDocumentParsingEnabled(preferences.document_parsing_enabled);
+      })
+      .catch(() => {
+        // Keep the existing backend protection authoritative when the optional
+        // preference request cannot be read.
+      });
+    void loadDocumentParsingState();
+    window.addEventListener(USER_UI_PREFERENCES_CHANGED_EVENT, loadDocumentParsingState);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(USER_UI_PREFERENCES_CHANGED_EVENT, loadDocumentParsingState);
+    };
+  }, []);
 
   useEffect(() => {
     const syncDeveloperActive = () => {
@@ -348,7 +369,7 @@ const Detail = () => {
           content: t("knowledge.ffmpegRequiredDesc"),
           okText: t("knowledge.configureFfmpeg"),
           cancelText: t("common.close"),
-          onOk: () => navigate("/model-providers/tools#ffmpeg-dependency"),
+          onOk: () => navigate("/settings?section=system_tools#ffmpeg-dependency"),
         });
       } catch (error) {
         console.error("Failed to inspect completed task:", error);
@@ -412,6 +433,16 @@ const Detail = () => {
     state.hasUploadPermission(),
   );
   const canImport = hasUploadPermission || hasWritePermission;
+  const isDocumentParsingUnavailable = documentParsingEnabled !== true;
+  const importDisabled =
+    isDocumentParsingUnavailable ||
+    embeddingReady === false ||
+    multimodalEmbeddingReady === false;
+  const importDisabledReason = isDocumentParsingUnavailable
+    ? documentParsingEnabled === false
+      ? "文档解析已暂停，请在设置中重新启用"
+      : "正在读取文档解析状态"
+    : undefined;
   const showDataSourceSync = isDatasetCreatedByDataSource(
     detail as DatasetWithDataSourceFlag | undefined,
   );
@@ -434,7 +465,13 @@ const Detail = () => {
       }}
     >
       <DetailPageHeader
-        title={detail?.display_name}
+        className="knowledge-detail-header"
+        title={
+          <span className="knowledge-detail-title-copy">
+            <strong>{detail?.display_name}</strong>
+            {detail?.desc ? <small>{detail.desc}</small> : null}
+          </span>
+        }
         titleExtra={
           developerActive ? (
             <>
@@ -463,81 +500,51 @@ const Detail = () => {
         settingsMenu={
           detail?.acl?.includes(DatasetAclEnum.DatasetWrite) && (
             <div>
-              <Tooltip title={t("common.edit")}>
-                <Button
-                  icon={<EditOutlined />}
-                  style={{ marginLeft: "12px", width: "24px", height: "24px" }}
-                  onClick={() => {
-                    createUpdateRef.current?.onOpen(detail);
-                  }}
-                />
-              </Tooltip>
+              <Button
+                icon={<EditOutlined />}
+                onClick={() => {
+                  createUpdateRef.current?.onOpen(detail);
+                }}
+              >
+                {t("common.edit")}
+              </Button>
               {!runtimeFeatures.hideUserGroupSurfaces && (
-                <Tooltip title={t("knowledge.authorize")}>
-                  <Button
-                    icon={<SettingOutlined />}
-                    style={{
-                      marginLeft: "12px",
-                      width: "24px",
-                      height: "24px",
-                    }}
-                    onClick={() =>
-                      navigate({
-                        pathname: `/lib/knowledge/auth/${id}`,
-                      })
-                    }
-                  />
-                </Tooltip>
-              )}
-              <Tooltip title={t("common.delete")}>
                 <Button
-                  icon={<DeleteOutlined />}
-                  style={{ marginLeft: "12px", width: "24px", height: "24px" }}
-                  onClick={() => {
-                    const knowledgeName = detail?.display_name || id;
-                    confirmRef.current?.onOpen({
-                      id,
-                      title: t("knowledge.deleteTitle", {
-                        name: knowledgeName,
-                      }),
-                      content: t("knowledge.deleteContent"),
-                      confirmText: t("knowledge.deleteConfirmText", {
-                        name: knowledgeName,
-                      }),
-                    });
-                  }}
-                />
-              </Tooltip>
+                  icon={<SettingOutlined />}
+                  onClick={() =>
+                    navigate({
+                      pathname: `/lib/knowledge/auth/${id}`,
+                    })
+                  }
+                >
+                  {t("knowledge.authorize")}
+                </Button>
+              )}
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => {
+                  const knowledgeName = detail?.display_name || id;
+                  confirmRef.current?.onOpen({
+                    id,
+                    title: t("knowledge.deleteTitle", {
+                      name: knowledgeName,
+                    }),
+                    content: t("knowledge.deleteContent"),
+                    confirmText: t("knowledge.deleteConfirmText", {
+                      name: knowledgeName,
+                    }),
+                  });
+                }}
+              >
+                {t("common.delete")}
+              </Button>
             </div>
           )
         }
         breadcrumbs={[
           { title: t("layout.knowledgeBase"), href: "/lib/knowledge/list" },
           { title: detail?.display_name },
-        ]}
-        description={detail?.desc}
-        extraContent={[
-          {
-            label: t("knowledge.tags"),
-            value:
-              detail?.tags && detail?.tags.length > 0
-                ? detail.tags.map((tag) => (
-                    <Tooltip key={tag} title={tag}>
-                      <Tag
-                        style={{
-                          marginLeft: "8px",
-                          maxWidth: "240px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {tag}
-                      </Tag>
-                    </Tooltip>
-                  ))
-                : "-",
-          },
         ]}
         onBack={() => {
           const bool = ["aiwrite", "aireview", "chat"].includes(
@@ -574,6 +581,7 @@ const Detail = () => {
             {showDataSourceSync && detail?.dataset_id ? (
               <KnowledgeBaseSyncNow
                 datasetId={detail.dataset_id}
+                documentParsingEnabled={documentParsingEnabled}
                 onSyncComplete={refreshKnowledgeAfterSync}
               />
             ) : null}
@@ -621,75 +629,57 @@ const Detail = () => {
               </Button>
             )}
             <Badge count={runningTotal} size="small" style={{ zIndex: 2 }}>
-              <Space.Compact>
-                <Tooltip
-                  title={
-                    embeddingReady === false ||
-                    multimodalEmbeddingReady === false ? (
-                      isAdmin ? (
-                        <span>
-                          {embeddingReady === false
-                            ? t("knowledge.embeddingNotReadyBannerAdmin")
-                            : t(
-                                "knowledge.multimodalEmbeddingNotReadyBannerAdmin",
-                              )}
-                          <a
-                            href="/model-providers"
-                            style={{
-                              marginLeft: 8,
-                              color: "#fff",
-                              textDecoration: "underline",
-                            }}
-                            onClick={(e: MouseEvent<HTMLAnchorElement>) => {
-                              e.preventDefault();
-                              navigate("/model-providers");
-                            }}
-                          >
-                            {t("knowledge.goToConfig")}
-                          </a>
-                        </span>
-                      ) : embeddingReady === false ? (
-                        t("knowledge.embeddingNotReadyBanner")
-                      ) : (
-                        t("knowledge.multimodalEmbeddingNotReadyBanner")
-                      )
-                    ) : undefined
-                  }
-                >
-                  <Button
-                    type="primary"
-                    disabled={
-                      embeddingReady === false ||
-                      multimodalEmbeddingReady === false
-                    }
-                    onClick={() => openImportModal({ importMode: "file" })}
-                  >
-                    {t("knowledge.importFile")}
-                  </Button>
-                </Tooltip>
+              <Tooltip
+                title={
+                  importDisabledReason ||
+                  (embeddingReady === false || multimodalEmbeddingReady === false ? (
+                    isAdmin ? (
+                      <span>
+                        {embeddingReady === false
+                          ? t("knowledge.embeddingNotReadyBannerAdmin")
+                          : t(
+                              "knowledge.multimodalEmbeddingNotReadyBannerAdmin",
+                            )}
+                        <a
+                          href="/settings?section=models"
+                          style={{
+                            marginLeft: 8,
+                            color: "#fff",
+                            textDecoration: "underline",
+                          }}
+                          onClick={(e: MouseEvent<HTMLAnchorElement>) => {
+                            e.preventDefault();
+                            navigate("/settings?section=models");
+                          }}
+                        >
+                          {t("knowledge.goToConfig")}
+                        </a>
+                      </span>
+                    ) : embeddingReady === false ? (
+                      t("knowledge.embeddingNotReadyBanner")
+                    ) : (
+                      t("knowledge.multimodalEmbeddingNotReadyBanner")
+                    )
+                  ) : undefined)
+                }
+              >
                 <Dropdown
                   menu={{
                     items: [
                       {
                         key: "importFile",
                         label: t("knowledge.importFile"),
-                        disabled:
-                          embeddingReady === false ||
-                          multimodalEmbeddingReady === false,
+                        disabled: importDisabled,
                       },
                       {
                         key: "importFolder",
                         label: t("knowledge.importFolder"),
-                        disabled:
-                          embeddingReady === false ||
-                          multimodalEmbeddingReady === false,
+                        disabled: importDisabled,
                       },
                       {
                         key: "importZip",
                         label: t("knowledge.importZip"),
-                        disabled:
-                          embeddingReady === false ||
-                          multimodalEmbeddingReady === false,
+                        disabled: importDisabled,
                       },
                       {
                         key: "taskManage",
@@ -740,14 +730,17 @@ const Detail = () => {
                       }
                     },
                   }}
+                  trigger={["click"]}
                 >
-                  <span style={{ display: "inline-flex" }}>
-                    <Button type="primary">
-                      <DownOutlined />
-                    </Button>
-                  </span>
+                  <Button
+                    className="knowledge-toolbar-dropdown-button"
+                    type="primary"
+                  >
+                    {t("knowledge.importFile")}
+                    <DownOutlined />
+                  </Button>
                 </Dropdown>
-              </Space.Compact>
+              </Tooltip>
             </Badge>
             {hasWritePermission && (
               <Dropdown
@@ -770,6 +763,7 @@ const Detail = () => {
                     {
                       key: "batchReparse",
                       label: t("knowledge.batchReparse"),
+                      disabled: isDocumentParsingUnavailable,
                       onClick: () => {
                         knowledgeListRef.current?.restartCheckedKnowledge();
                       },
@@ -786,14 +780,15 @@ const Detail = () => {
                 trigger={["click"]}
               >
                 <span style={{ display: "inline-flex" }}>
-                  <Space.Compact>
-                    <Button variant="outlined" color="primary" ghost>
-                      {t("knowledge.batchActions")}
-                    </Button>
-                    <Button variant="outlined" color="primary" ghost>
-                      <DownOutlined />
-                    </Button>
-                  </Space.Compact>
+                  <Button
+                    className="knowledge-toolbar-dropdown-button"
+                    variant="outlined"
+                    color="primary"
+                    ghost
+                  >
+                    {t("knowledge.batchActions")}
+                    <DownOutlined />
+                  </Button>
                 </span>
               </Dropdown>
             )}
@@ -804,6 +799,7 @@ const Detail = () => {
         <KnowledgeTable
           ref={knowledgeListRef}
           detail={detail}
+          documentParsingEnabled={documentParsingEnabled}
           onImportKnowledge={(data) => openImportModal(data)}
           getImportingTotal={getImportingTotal}
           getDetail={getDetail}

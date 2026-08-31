@@ -101,6 +101,18 @@ func TestBuildSelectsSQLRepositoryAndHTTPAdapters(t *testing.T) {
 	}
 }
 
+func TestLocalFSBackgroundPrewarmDisabledForDynamicDesktopRoots(t *testing.T) {
+	t.Parallel()
+
+	types := []connector.ConnectorType{localfs.ConnectorType, feishu.ConnectorType}
+	if !localFSBackgroundPrewarmEnabled(types, false) {
+		t.Fatal("ordinary Local and Docker runtimes should keep local_fs background prewarm")
+	}
+	if localFSBackgroundPrewarmEnabled(types, true) {
+		t.Fatal("Desktop dynamic roots must not prewarm protected folders in the background")
+	}
+}
+
 func TestBuildRequiresSQLBoundariesBeforeOpeningDB(t *testing.T) {
 	t.Parallel()
 
@@ -325,6 +337,8 @@ func TestConnectorRegistryWiresTempObjectStore(t *testing.T) {
 		agent,
 		"agent-default",
 		"/host/root",
+		[]string{"/host/root"},
+		false,
 		&appFeishuAuthStub{},
 		&appFeishuAPIStub{},
 		temp,
@@ -382,9 +396,11 @@ func TestRuntimeStartEnqueuesDueSyncRuns(t *testing.T) {
 	t.Parallel()
 
 	scheduler := &runtimeSchedulerSpy{calls: make(chan int, 1)}
+	recovery := &runtimeWatcherRecoverySpy{calls: make(chan struct{}, 1)}
 	runtime := &Runtime{
 		workerID:           "test-worker",
 		scheduler:          scheduler,
+		watcherRecovery:    recovery,
 		workerPollInterval: time.Hour,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -400,6 +416,11 @@ func TestRuntimeStartEnqueuesDueSyncRuns(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runtime did not enqueue due sync runs")
 	}
+	select {
+	case <-recovery.calls:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not start local watcher recovery")
+	}
 }
 
 type runtimeSchedulerSpy struct {
@@ -409,6 +430,15 @@ type runtimeSchedulerSpy struct {
 func (s *runtimeSchedulerSpy) EnqueueDueSyncRuns(_ context.Context, limit int) ([]schedule.SyncRunIntent, error) {
 	s.calls <- limit
 	return nil, nil
+}
+
+type runtimeWatcherRecoverySpy struct {
+	calls chan struct{}
+}
+
+func (s *runtimeWatcherRecoverySpy) RecoverLocalWatchers(context.Context, time.Time) (int, error) {
+	s.calls <- struct{}{}
+	return 1, nil
 }
 
 type appLocalAgentStub struct {
