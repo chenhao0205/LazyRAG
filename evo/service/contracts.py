@@ -24,6 +24,8 @@ class ThreadInputs(StrictModel):
     algorithm_id: str = Field(min_length=1)
     num_case: int = Field(gt=0)
     case_deadline_seconds: float = Field(default=300.0, gt=0)
+    chat_max_attempts: int = Field(default=5, ge=1, le=5)
+    chat_retry_wait_max_seconds: float = Field(default=2.0, ge=0)
 
     @model_validator(mode='after')
     def validate_sources(self) -> Self:

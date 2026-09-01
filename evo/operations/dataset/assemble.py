@@ -4,7 +4,7 @@ from typing import Any
 
 from evo.operations.public_contracts import DatasetRoot, case_source_label, dump_contract
 
-from .csv_loader import CASE_FIELDS, case_source, norm_text, normalize_eval_case
+from .csv_loader import CASE_FIELDS, ENHANCE_FIELDS, case_source, norm_text, normalize_eval_case
 
 
 def assemble_dataset(cases: Mapping[str, Any] | Iterable[Mapping[str, Any]], *, run_id: str, min_case_count: int = 1,
@@ -47,5 +47,6 @@ def _case(row: Mapping[str, Any]) -> dict[str, Any]:
         'case_id': row.get('id', ''),
         'source': case_source_label(row, csv_first=True),
         **{field: row.get(field, '') for field in CASE_FIELDS if field != 'id'},
+        **{field: list(row.get(field) or []) for field in ENHANCE_FIELDS},
         'original_id': audit.get('original_id', ''),
     }

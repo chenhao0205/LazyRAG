@@ -1,6 +1,12 @@
 from .assemble import assemble_dataset  # noqa: F401
 from .chunks_build import BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest  # noqa: F401
-from .csv_loader import AUDIT_FIELDS, CASE_FIELDS, load_eval_dataset_csv, normalize_eval_case  # noqa: F401
+from .csv_loader import (  # noqa: F401
+    AUDIT_FIELDS,
+    CASE_FIELDS,
+    ENHANCE_FIELDS,
+    load_eval_dataset_csv,
+    normalize_eval_case,
+)
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest  # noqa: F401
 from .generate import generate, generate_manifest  # noqa: F401
 from .generate_enhance import generate_enhance, generate_enhance_manifest  # noqa: F401

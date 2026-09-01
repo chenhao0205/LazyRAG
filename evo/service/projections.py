@@ -16,6 +16,11 @@ from evo.artifact_runtime import (
     PartitionSet,
     RecordedOperationEvent,
 )
+from evo.operations.eval.summary import (
+    build_eval_detail_summary,
+    build_eval_frontend_view,
+    is_scored_badcase,
+)
 
 from .contracts import ServiceError
 from .public import public_thread_state, public_value
@@ -190,6 +195,59 @@ class ProjectionService:
         value = await self.flow.read(thread_id, ref)
         return _candidate(thread_id, stage, ref, value, detail=True)
 
+    async def eval_bad_cases(
+        self,
+        thread_id: str,
+        version: int,
+        page_size: int,
+        page_token: str,
+        keyword: str = '',
+        failure_type: str = '',
+    ) -> dict[str, Any]:
+        record = await self._gate_record(thread_id, 'eval', version)
+        summary = await _eval_detail_summary_from_record(self.flow, thread_id, record)
+        rows = [
+            _bad_case_item(row)
+            for row in _rows(summary.get('bad_cases'))
+            if is_scored_badcase(row)
+        ]
+        rows = _filter(rows, keyword, ('case_id', 'question', 'defect', 'reason', 'failure_type'))
+        if failure_type:
+            rows = [row for row in rows if row.get('failure_type') == failure_type]
+        return _page(rows, page_size, page_token)
+
+    async def eval_overview(self, thread_id: str, version: int) -> dict[str, Any]:
+        record = await self._gate_record(thread_id, 'eval', version)
+        config = await _run_config(self.flow, thread_id)
+        summary = await _eval_detail_summary_from_record(
+            self.flow,
+            thread_id,
+            record,
+            live_progress=_eval_live_progress(record, config),
+        )
+        return {
+            'thread_id': thread_id,
+            'step': 'eval',
+            'version': version,
+            'content': public_value({
+                'overview': summary.get('overview') or {},
+                'case_overviews': summary.get('case_overviews') or [],
+                'case_details': summary.get('case_details') or [],
+                'guides': summary.get('guides') or {},
+                'metrics': summary.get('metrics') or {},
+                'quality_counts': summary.get('quality_counts') or {},
+                'failure_type_counts': summary.get('failure_type_counts') or {},
+                'retrieval_failure_type_counts': summary.get('retrieval_failure_type_counts') or {},
+            }),
+        }
+
+    async def _gate_record(self, thread_id: str, stage: str, version: int) -> ArtifactRecord:
+        ref = await self._gate_ref(thread_id, stage, version)
+        record = await self.flow.record(thread_id, ref)
+        if record is None:
+            raise ServiceError(404, 'gate artifact version not found')
+        return record
+
     async def _gate_ref(self, thread_id: str, stage: str, version: int) -> ArtifactRef:
         if stage not in A.ROOTS:
             raise ServiceError(422, f'step must be one of: {", ".join(A.STEPS)}')
@@ -282,6 +340,139 @@ def _page(rows: list[dict[str, Any]], size: int, token: str) -> dict[str, Any]:
         'next_page_token': str(offset + size) if offset + size < len(rows) else '',
         'total_size': len(rows),
     }
+
+
+async def _eval_detail_summary_from_record(
+    flow: Any,
+    thread_id: str,
+    record: ArtifactRecord,
+    *,
+    live_progress: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = await flow.read(thread_id, record.ref)
+    value = value if isinstance(value, Mapping) else {}
+    if 'bad_cases' in value or 'rows' in value:
+        detail = dict(value)
+        detail.setdefault(
+            'bad_cases',
+            [row for row in _rows(value.get('rows')) if row.get('quality_label') != 'good'],
+        )
+        detail.update(build_eval_frontend_view(detail, live_progress=live_progress))
+        return detail
+
+    judge_refs = [
+        ref for ref in record.input_refs
+        if ref.key.artifact_id == A.EVAL_JUDGE_RESULT
+    ]
+    if not judge_refs:
+        raise ServiceError(409, f'{_ref_text(record.ref)} has no {A.EVAL_JUDGE_RESULT} provenance')
+    values = await flow.read_many(thread_id, judge_refs)
+    judges = []
+    for ref in judge_refs:
+        value = values.get(ref)
+        if isinstance(value, Mapping):
+            judges.append(value)
+    summary = build_eval_detail_summary(tuple(judges))
+    summary.update(build_eval_frontend_view(summary, live_progress=live_progress))
+    return summary
+
+
+def _eval_live_progress(record: ArtifactRecord, config: Mapping[str, Any]) -> dict[str, Any]:
+    answer_ids = [
+        ref.key.partition_key
+        for ref in record.input_refs
+        if ref.key.artifact_id == A.EVAL_RAG_ANSWER and ref.key.partition_key
+    ]
+    judged_ids = {
+        ref.key.partition_key
+        for ref in record.input_refs
+        if ref.key.artifact_id == A.EVAL_JUDGE_RESULT and ref.key.partition_key
+    }
+    if not answer_ids and not judged_ids:
+        judged_ids = {
+            ref.key.partition_key
+            for ref in record.input_refs
+            if ref.key.partition_key
+        }
+    running_ids = [case_id for case_id in answer_ids if case_id not in judged_ids]
+    completed_cases = len(judged_ids)
+    answered_cases = len({case_id for case_id in answer_ids if case_id}) or completed_cases
+    total_cases = max(_num_case(config), answered_cases, completed_cases)
+    running_cases = len(running_ids)
+    pending_cases = max(0, total_cases - answered_cases)
+    current_case = {'case_id': '', 'stage': '', 'stage_label': ''}
+    if running_ids:
+        current_case = {
+            'case_id': running_ids[-1],
+            'stage': 'multi_dimension_judge',
+            'stage_label': '多维评测',
+        }
+    elif pending_cases > 0 and answered_cases < total_cases:
+        current_case = {
+            'case_id': '',
+            'stage': 'answer_generation',
+            'stage_label': '生成回答',
+        }
+        running_cases = max(running_cases, 1)
+        pending_cases = max(0, total_cases - completed_cases - running_cases)
+    return {
+        'total_cases': total_cases,
+        'completed_cases': completed_cases,
+        'running_cases': running_cases,
+        'pending_cases': pending_cases,
+        'current_case': current_case,
+    }
+
+
+async def _run_config(flow: Any, thread_id: str) -> Mapping[str, Any]:
+    history = await flow.history(thread_id, ArtifactKey.scalar(A.RUN_CONFIG))
+    if not history:
+        return {}
+    value = await flow.read(thread_id, history[-1].ref)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _bad_case_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    score_source = (
+        row.get('answer_correctness')
+        if row.get('answer_correctness') is not None
+        else row.get('overall_score')
+    )
+    try:
+        score = round(float(score_source or 0.0), 4)
+    except (TypeError, ValueError):
+        score = 0.0
+    payload = dict(row)
+    payload.update({
+        'query': row.get('query') or row.get('question'),
+        'reference': row.get('reference') or row.get('ground_truth'),
+        'answer': row.get('answer') or row.get('rag_answer'),
+        'score': score,
+        'Defect': row.get('Defect') or row.get('defect'),
+        'Reason': row.get('Reason') or row.get('reason'),
+        'trace_status': row.get('trace_status') or ('linked' if row.get('trace_id') else ''),
+        'failure_detail': (
+            row.get('failure_detail')
+            or row.get('chat_error_message')
+            or row.get('reason')
+            or row.get('failure_type')
+        ),
+    })
+    return payload
+
+
+def _num_case(config: Mapping[str, Any]) -> int:
+    inputs = config.get('inputs') if isinstance(config.get('inputs'), Mapping) else {}
+    return int(config.get('num_case') or inputs.get('num_case') or 0)
+
+
+def _ref_text(ref: ArtifactRef) -> str:
+    key = (
+        ref.key.artifact_id
+        if not ref.key.partition_key
+        else f'{ref.key.artifact_id}[{ref.key.partition_key}]'
+    )
+    return f'{key}@v{ref.version}'
 
 
 _TERMINAL_ATTEMPTS = frozenset({

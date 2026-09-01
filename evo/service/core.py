@@ -512,6 +512,8 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
         'llm_config': llm_config,
         'case_deadline_seconds': request.inputs.case_deadline_seconds,
         'first_frame_timeout_seconds': _FIRST_FRAME_TIMEOUT,
+        'chat_max_attempts': request.inputs.chat_max_attempts,
+        'chat_retry_wait_max_seconds': request.inputs.chat_retry_wait_max_seconds,
     }
     return {
         A.RUN_CONFIG: {
@@ -540,6 +542,8 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
             'llm_config': llm_config,
             'case_deadline_seconds': request.inputs.case_deadline_seconds,
             'first_frame_timeout_seconds': _FIRST_FRAME_TIMEOUT,
+            'chat_max_attempts': request.inputs.chat_max_attempts,
+            'chat_retry_wait_max_seconds': request.inputs.chat_retry_wait_max_seconds,
         },
     }
 

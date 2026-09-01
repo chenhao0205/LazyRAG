@@ -223,12 +223,17 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
             assert dataset['failed_case_num'] == 0
             assert dataset['cases'][0]['question_type'] == 'single_hop'
             assert dataset['cases'][0]['reasoning_steps'] == ['Imported fact']
+            assert dataset['cases'][0]['key_points'][0]['statement'] == 'Imported fact'
+            assert dataset['cases'][0]['forbidden_claims'] == []
 
             case_record = await flow.head(
                 'run-imported', ArtifactKey.partition(A.EVAL_CASE, 'case_0001'),
             )
             assert case_record is not None
             case = await flow.read('run-imported', case_record.ref)
+            assert case['key_points'][0]['statement'] == 'Imported fact'
+            assert case['key_points'][0]['evidence_chunk_ids'] == ['chunk-imported']
+            assert case['forbidden_claims'] == []
             assert case['source_preparation']['dataset_enhancement']['forbidden_claims'] == []
             assert case['source_preparation']['context_reference'][0]['chunk_id'] == 'chunk-imported'
 

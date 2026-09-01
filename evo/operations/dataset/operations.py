@@ -477,10 +477,19 @@ async def enhance_case_operation(
     draft: object,
     run_config: object,
 ) -> OperationResult:
-    enhancement = generate_enhance(ctx, {
-        'case': _mapping(draft, 'draft'),
-        'run_config': _mapping(run_config, 'run_config'),
-    }, llm_complete=_llm_complete(run_config))['case_enhance']
+    draft_map = _mapping(draft, 'draft')
+    existing_points = draft_map.get('key_points')
+    if isinstance(existing_points, list) and existing_points:
+        forbidden = draft_map.get('forbidden_claims')
+        enhancement = {
+            'key_points': [dict(item) if isinstance(item, Mapping) else item for item in existing_points],
+            'forbidden_claims': list(forbidden) if isinstance(forbidden, list) else [],
+        }
+    else:
+        enhancement = generate_enhance(ctx, {
+            'case': draft_map,
+            'run_config': _mapping(run_config, 'run_config'),
+        }, llm_complete=_llm_complete(run_config))['case_enhance']
     return await _result(ctx, 'dataset.case_enhanced', {'enhancement': enhancement}, case_id=ctx.partition_key)
 
 
@@ -783,6 +792,11 @@ def _finalize_case(
         raise ValueError('draft.reference_doc_ids must contain non-empty values')
     question_type = _current_question_type(str(draft.get('question_type') or ''), reference_doc_ids)
     difficulty = str(draft.get('difficulty') or '').strip()
+    forbidden_claims = enhancement.get('forbidden_claims')
+    if forbidden_claims is None:
+        forbidden_claims = []
+    if not isinstance(forbidden_claims, list):
+        raise ValueError('enhancement.forbidden_claims must be a list')
     return normalize_eval_case({
         'id': case_id,
         'question': draft.get('question'),
@@ -799,6 +813,8 @@ def _finalize_case(
         'reference_doc_ids': reference_doc_ids,
         'source_message_id': '',
         'source_preparation': source_preparation,
+        'key_points': [dict(item) for item in key_points],
+        'forbidden_claims': list(forbidden_claims),
     }, default_id=case_id)
 
 

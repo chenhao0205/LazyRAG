@@ -221,6 +221,23 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             request,
         )
 
+    @app.get('/threads/{thread_id}/gates/eval/versions/{version}/bad-cases')
+    async def eval_report_bad_cases(
+        thread_id: str,
+        version: int,
+        page_size: Annotated[int, Query(ge=1, le=200)] = 50,
+        page_token: str = '',
+        keyword: str = '',
+        failure_type: str = '',
+    ) -> dict[str, Any]:
+        return await _service(app).projections.eval_bad_cases(
+            thread_id, version, page_size, page_token, keyword, failure_type,
+        )
+
+    @app.get('/threads/{thread_id}/gates/eval/versions/{version}/overview')
+    async def eval_report_overview(thread_id: str, version: int) -> dict[str, Any]:
+        return await _service(app).projections.eval_overview(thread_id, version)
+
     @app.get('/threads/{thread_id}/gates/abtest/versions/{version}/case-details')
     async def abtest_case_details(thread_id: str, version: int, page_size: Annotated[int, Query(ge=1, le=200)] = 50,
                                   page_token: str = '', keyword: str = '', outcome: str = '') -> dict[str, Any]:

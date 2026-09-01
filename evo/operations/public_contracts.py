@@ -96,6 +96,8 @@ class DatasetCase(Contract):
     source_message_id: StrictStr
     source_preparation: dict[str, Any]
     type_rationale: StrictStr
+    key_points: list[Any] = Field(default_factory=list)
+    forbidden_claims: list[Any] = Field(default_factory=list)
 
 
 class FailedCase(Contract):
